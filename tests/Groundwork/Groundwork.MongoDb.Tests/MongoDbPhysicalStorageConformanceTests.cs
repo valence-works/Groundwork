@@ -2143,24 +2143,33 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         var database = Database();
         var model = CollectionEvolutionModel(includeCollection: false);
         await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var route = Assert.Single(model.Routes);
+        var initialFence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .SingleAsync();
+        Assert.Equal(MongoDbCollectionRolloutFence.Signature(route), initialFence["required_signature"].AsString);
+        Assert.Equal(0, initialFence["activity"].ToInt64());
         var databaseName = database.DatabaseNamespace.DatabaseName;
         var readyWriters = 0;
-        var transactionAttempts = 0;
+        var transactionAttempts = new int[writerCount];
         var releaseWriters = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        ValueTask CountAttempt(
-            IClientSessionHandle session,
-            int attempt,
-            CancellationToken cancellationToken)
-        {
-            Interlocked.Increment(ref transactionAttempts);
-            return ValueTask.CompletedTask;
-        }
+        using var barrierTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
-        ValueTask SynchronizeFenceTouch(CancellationToken cancellationToken)
+        async ValueTask SynchronizeFirstFenceTouch(CancellationToken cancellationToken)
         {
             if (Interlocked.Increment(ref readyWriters) == writerCount)
                 releaseWriters.TrySetResult();
-            return new ValueTask(releaseWriters.Task.WaitAsync(cancellationToken));
+            try
+            {
+                await releaseWriters.Task.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"Only {Volatile.Read(ref readyWriters)} of {writerCount} writers reached the rollout-fence barrier.");
+            }
         }
 
         var clients = Enumerable.Range(0, writerCount)
@@ -2169,7 +2178,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
 
         try
         {
-            var stores = clients.Select(client => new MongoDbPhysicalDocumentStore(
+            var stores = clients.Select((client, writerIndex) => new MongoDbPhysicalDocumentStore(
                     client.GetDatabase(databaseName),
                     model,
                     DocumentStoreAccess.Scoped(new("tenant-a")),
@@ -2178,8 +2187,15 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                     TimeProvider.System,
                     MongoDbPhysicalDocumentStoreExecutionHooks.None with
                     {
-                        TransactionBodyStarting = CountAttempt,
-                        RolloutFenceExistingBeforeTouch = SynchronizeFenceTouch
+                        TransactionBodyStarting = (_, _, _) =>
+                        {
+                            Interlocked.Increment(ref transactionAttempts[writerIndex]);
+                            return ValueTask.CompletedTask;
+                        },
+                        RolloutFenceExistingBeforeTouch = cancellationToken =>
+                            Volatile.Read(ref transactionAttempts[writerIndex]) == 1
+                                ? SynchronizeFirstFenceTouch(cancellationToken)
+                                : ValueTask.CompletedTask
                     }))
                 .ToArray();
             var writes = await Task.WhenAll(stores.Select((store, index) =>
@@ -2187,14 +2203,15 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                     "workItem",
                     $"writer-{index:D2}",
                     "1",
-                    $$"""{"category":"writer-{{index:D2}}"}"""))));
+                    $$"""{"category":"writer-{{index:D2}}"}"""),
+                    barrierTimeout.Token)));
 
             Assert.All(writes, result => Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status));
-            Assert.True(transactionAttempts > writerCount);
+            Assert.Equal(writerCount, readyWriters);
+            Assert.Contains(transactionAttempts, attempts => attempts > 1);
             foreach (var (store, index) in stores.Select((store, index) => (store, index)))
                 Assert.NotNull(await store.LoadAsync("workItem", $"writer-{index:D2}"));
 
-            var route = Assert.Single(model.Routes);
             var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
                 .Find(Builders<BsonDocument>.Filter.Eq(
                     "_id",

@@ -17,7 +17,9 @@ public sealed record MongoDbPhysicalDocumentStoreOptions
 
     /// <summary>
     /// Maximum transaction-body executions, including the initial attempt. A retry always uses a
-    /// fresh driver session and transaction.
+    /// fresh driver session and transaction. The default retains headroom for a controlled
+    /// 16-writer burst serialized by one route rollout fence; the elapsed-time budget remains the
+    /// authoritative upper bound.
     /// </summary>
     public int MaximumTransactionAttempts { get; init; } = 64;
 
