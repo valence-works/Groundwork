@@ -33,6 +33,41 @@ public sealed class PostgreSqlDiagnosticRecordStoreTests(PostgreSqlDiagnosticCon
         fixture ?? throw new InvalidOperationException("The PostgreSQL diagnostic fixture has not been initialized.");
 
     [Fact]
+    public async Task Grouped_sum_overflow_reaches_exact_int64_materialization()
+    {
+        var relationalFixture = CreateServerFixture();
+        var store = relationalFixture.OpenStore(TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        static DiagnosticRecordInput Record(string id, DateTimeOffset at, long sequence) =>
+            new(
+                id,
+                at,
+                "{}",
+                new Dictionary<string, IReadOnlyList<DiagnosticFieldValue>>(StringComparer.Ordinal)
+                {
+                    ["service"] = [DiagnosticFieldValue.String("api")],
+                    ["sequence"] = [DiagnosticFieldValue.Int64(sequence)]
+                });
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(relationalFixture.GetUtcNow(), "postgresql-grouped-sum-overflow"),
+            [
+                Record("max", occurredAt, long.MaxValue),
+                Record("one", occurredAt.AddTicks(1), 1)
+            ]));
+
+        await Assert.ThrowsAsync<OverflowException>(() =>
+            store.QueryGroupsAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"))).AsTask());
+    }
+
+    [Fact]
     public async Task Materializer_uses_native_binary_text_and_all_durable_tables()
     {
         var fixture = (PostgreSqlDiagnosticRecordStoreFixture)CreateServerFixture();
@@ -157,6 +192,12 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
             using var document = JsonDocument.Parse(json);
             if (FindSeek(document.RootElement, accessPath, constrainedColumns))
                 return true;
+            if (accessPath == FieldsPrimaryAccessPath &&
+                constrainedColumns.Contains("cursor", StringComparer.Ordinal) &&
+                FindCursorBoundedFieldMerge(document.RootElement, accessPath, constrainedColumns))
+            {
+                return true;
+            }
         }
         return false;
     }
@@ -310,6 +351,8 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
                 SELECT 'tenant-a', 'shell-a', 'logs', cursor_value, 'tags', value_ordinal, 0, 'dGFn', 'tag', 'tag', repeat('1', 64), '|0074|0061|0067'
                 FROM generate_series(1, 500) AS cursor_value
                 CROSS JOIN generate_series(0, 7) AS value_ordinal;
+                ANALYZE {{RelationalDiagnosticRecordSchema.RecordsTable}};
+                ANALYZE {{RelationalDiagnosticRecordSchema.FieldsTable}};
                 """;
             await noise.ExecuteNonQueryAsync(cancellationToken);
             planSeeded = true;
@@ -346,6 +389,46 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
             foreach (var item in element.EnumerateArray())
             {
                 if (FindSeek(item, accessPath, constrainedColumns))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool FindCursorBoundedFieldMerge(
+        JsonElement element,
+        string fieldAccessPath,
+        IReadOnlyList<string> constrainedColumns)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var isCursorMerge = element.TryGetProperty("Node Type", out var node) &&
+                                node.GetString()?.Contains("Merge Join", StringComparison.Ordinal) == true &&
+                                element.TryGetProperty("Merge Cond", out var condition) &&
+                                condition.GetString()?.Contains("cursor", StringComparison.Ordinal) == true;
+            if (isCursorMerge &&
+                FindSeek(
+                    element,
+                    fieldAccessPath,
+                    constrainedColumns.Where(column => column != "cursor").ToArray()) &&
+                FindSeek(
+                    element,
+                    "ix_groundwork_diagnostic_records_scope_cursor",
+                    ["tenant_id", "scope_id", "stream_id", "cursor"]))
+            {
+                return true;
+            }
+            foreach (var property in element.EnumerateObject())
+            {
+                if (FindCursorBoundedFieldMerge(property.Value, fieldAccessPath, constrainedColumns))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (FindCursorBoundedFieldMerge(item, fieldAccessPath, constrainedColumns))
                     return true;
             }
         }

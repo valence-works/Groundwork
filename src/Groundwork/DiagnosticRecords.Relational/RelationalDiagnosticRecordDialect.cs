@@ -16,6 +16,12 @@ public abstract class RelationalDiagnosticRecordDialect
 
     public abstract string Contains(string expression, string parameterName);
 
+    /// <summary>
+    /// Renders a null Int32 placeholder for heterogeneous result envelopes. Providers whose UNION
+    /// type inference does not retain an unknown null override this with an explicit native cast.
+    /// </summary>
+    public virtual string Int32Null => "NULL";
+
     /// <summary>Converts stored canonical Int64 text to the provider's exact integer domain.</summary>
     public virtual string Int64Value(string expression) => $"CAST({expression} AS BIGINT)";
 

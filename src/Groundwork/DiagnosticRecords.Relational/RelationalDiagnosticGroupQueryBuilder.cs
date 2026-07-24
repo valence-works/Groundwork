@@ -155,12 +155,12 @@ internal sealed class RelationalDiagnosticGroupQueryBuilder(
         {
             $"""
             SELECT 0 AS row_kind, 0 AS page_ordinal, NULL AS group_key, NULL AS alias,
-                   NULL AS field_type, NULL AS canonical_value, NULL AS order_value,
+                   {dialect.Int32Null} AS field_type, NULL AS canonical_value, NULL AS order_value,
                    {overflowExpression} AS union_overflow
             """,
             $"""
             SELECT 1 AS row_kind, p.page_ordinal, p.group_key, NULL AS alias,
-                   NULL AS field_type, NULL AS canonical_value, p.{orderValue} AS order_value,
+                   {dialect.Int32Null} AS field_type, NULL AS canonical_value, p.{orderValue} AS order_value,
                    0 AS union_overflow
             FROM page_numbered p
             """
