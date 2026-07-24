@@ -77,6 +77,7 @@ public sealed class BenchmarkWorkflowContractTests
         var workflow = File.ReadAllText(WorkflowPath);
 
         Assert.Contains("python3 tools/verify_physical_storage_scheduled_coverage.py", workflow, StringComparison.Ordinal);
+        Assert.Contains("--expected-git-commit \"${{ github.sha }}\"", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("python3 - <<'PY'", workflow, StringComparison.Ordinal);
         Assert.Contains("physical-storage-scheduled-aggregate-${{ github.run_id }}", workflow, StringComparison.Ordinal);
     }
@@ -122,6 +123,8 @@ public sealed class BenchmarkWorkflowContractTests
             process.ArgumentList.Add(root);
             process.ArgumentList.Add("--run-id");
             process.ArgumentList.Add(runId);
+            process.ArgumentList.Add("--expected-git-commit");
+            process.ArgumentList.Add("fixture-commit");
             process.ArgumentList.Add("--test-mode");
             process.ArgumentList.Add("--providers");
             process.ArgumentList.Add("sqlite,sqlserver,postgresql,mongodb");
@@ -228,7 +231,14 @@ public sealed class BenchmarkWorkflowContractTests
         var runs = new List<object>();
         WriteWorker(evidenceRoot, artifactToken, requestToken, "untimedWarmup", 0, runs);
         WriteWorker(evidenceRoot, artifactToken, requestToken, "measured", 1, runs);
-        WriteJson(Path.Combine(evidenceRoot, "run-group.json"), new { promotable = false, runs });
+        WriteJson(Path.Combine(evidenceRoot, "run-group.json"), new
+        {
+            promotable = false,
+            gitCommit = "fixture-commit",
+            gitDirty = false,
+            gitTreeDigest = new string('b', 64),
+            runs
+        });
     }
 
     private static void WriteWorker(
@@ -253,7 +263,12 @@ public sealed class BenchmarkWorkflowContractTests
             role,
             independentRun
         });
-        WriteJson(Path.Combine(evidenceRoot, response), new { succeeded = true });
+        WriteJson(Path.Combine(evidenceRoot, response), new
+        {
+            succeeded = true,
+            gitCommit = "fixture-commit",
+            gitTreeDigest = new string('b', 64)
+        });
 
         if (role == "measured")
         {
@@ -262,6 +277,7 @@ public sealed class BenchmarkWorkflowContractTests
             {
                 promotable = false,
                 gitCommit = "fixture-commit",
+                gitDirty = false,
                 results = new[]
                 {
                     new

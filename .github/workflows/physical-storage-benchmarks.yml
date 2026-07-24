@@ -167,7 +167,8 @@ jobs:
         run: |
           python3 tools/verify_physical_storage_scheduled_coverage.py \
             --root "${{ runner.temp }}/physical-storage-scheduled-aggregate" \
-            --run-id "${{ github.run_id }}"
+            --run-id "${{ github.run_id }}" \
+            --expected-git-commit "${{ github.sha }}"
 
       - name: Upload aggregate inputs and verification result
         if: always()

@@ -6,10 +6,10 @@ public static class Issue50EvidenceRequirements
 {
     public static IReadOnlyList<string> Remaining { get; } =
     [
-        "The required 1K/100K/1M matrix across payload sizes and the ratified 10% indexed-query acceptance and 50% scan-characterization selectivity shapes has not been executed.",
+        "The required 1K/100K/1M matrix for the reviewed payload profile and the ratified 10% indexed-query acceptance and 50% scan-characterization selectivity shapes has not been executed.",
         "exact-HEAD live evidence from all four providers (SQLite, SQL Server, PostgreSQL, and MongoDB) is incomplete.",
-        "The Elsa-owned EF Core oracle and entity-form benefit classification have not been joined to this Groundwork evidence.",
-        "Provider database-work signals, concurrent-load evidence, and an approved immutable baseline are incomplete."
+        "Target-scoped provider database-work signals, sustained concurrent-load evidence, and actual bounded recovery evidence are incomplete.",
+        "The approved immutable-baseline publication and comparison workflow is incomplete."
     ];
 }
 
@@ -27,8 +27,8 @@ public static class BaselineEligibilityEvaluator
         ArgumentNullException.ThrowIfNull(cases);
 
         // The current profiles are harness-scaffolding controls. Even a complete run is not
-        // evidence for baseline promotion or an Elsa migration decision until #50's ratified
-        // matrix and external EF oracle are supplied.
+        // evidence for Groundwork baseline promotion until #50's ratified matrix and provider
+        // evidence are supplied. Elsa owns its later EF-oracle join and migration decision.
         var diagnostics = new List<string>(Issue50EvidenceRequirements.Remaining);
         if (!UsesScheduledControls(configuration))
             diagnostics.Add("Future baseline activation also requires the exact fixed scheduled profile controls.");

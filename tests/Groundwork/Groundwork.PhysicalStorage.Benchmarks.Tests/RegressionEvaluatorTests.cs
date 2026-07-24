@@ -25,7 +25,7 @@ public sealed class RegressionEvaluatorTests
     }
 
     [Fact]
-    public void Scheduled_gate_applies_the_storage_budget_to_write_amplification()
+    public void Scheduled_gate_applies_the_net_storage_growth_budget()
     {
         var baseline = SamplesWithStorage(30, storageGrowthBytes: 100, logicalPayloadBytes: 100);
         var candidate = SamplesWithStorage(30, storageGrowthBytes: 130, logicalPayloadBytes: 100);

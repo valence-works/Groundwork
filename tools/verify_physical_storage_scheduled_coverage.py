@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--expected-git-commit", required=True)
     parser.add_argument(
         "--test-mode",
         action="store_true",
@@ -153,7 +154,11 @@ def matrix_from_args(args: argparse.Namespace) -> VerificationMatrix:
     )
 
 
-def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[str, object]:
+def verify(
+        root: pathlib.Path,
+        run_id: str,
+        expected_git_commit: str,
+        matrix: VerificationMatrix) -> dict[str, object]:
     shards_root = root / "shards"
     expected_shards = {
         f"physical-storage-scheduled-{run_id}-{provider.artifact_token}-{form}-n{dataset}":
@@ -182,6 +187,7 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
     result_digests: dict[tuple[object, ...], set[str]] = {}
     workload_fingerprints: dict[tuple[object, ...], set[str]] = {}
     git_commits: set[str] = set()
+    git_tree_digests: set[str] = set()
     digest_pattern = re.compile(r"^[0-9a-f]{64}$")
     measured_count = 0
     expected_runs_per_shard = (
@@ -196,6 +202,14 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
         manifest = json.loads(manifest_path.read_text())
         if manifest.get("promotable") is not False:
             raise SystemExit(f"{artifact_name} makes a promotional claim")
+        if manifest.get("gitCommit") != expected_git_commit:
+            raise SystemExit(f"{artifact_name} does not match expected Git commit {expected_git_commit}")
+        if manifest.get("gitDirty") is not False:
+            raise SystemExit(f"{artifact_name} was produced from a dirty worktree")
+        manifest_tree_digest = manifest.get("gitTreeDigest")
+        if not isinstance(manifest_tree_digest, str) or not digest_pattern.fullmatch(manifest_tree_digest):
+            raise SystemExit(f"{artifact_name} has an invalid Git tree digest")
+        git_tree_digests.add(manifest_tree_digest)
         runs = manifest.get("runs", [])
         if len(runs) != expected_runs_per_shard:
             raise SystemExit(f"{artifact_name} has {len(runs)} workers; expected {expected_runs_per_shard}")
@@ -209,6 +223,9 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
             response = json.loads(response_path.read_text())
             if response.get("succeeded") is not True:
                 raise SystemExit(f"{artifact_name} contains a failed worker response")
+            if (response.get("gitCommit") != expected_git_commit or
+                    response.get("gitTreeDigest") != manifest_tree_digest):
+                raise SystemExit(f"{artifact_name} worker response Git identity does not match its run group")
 
             request = invocation["request"]
             shape = request["dataShape"]
@@ -244,6 +261,8 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
                 evidence = json.loads(evidence_bytes)
                 if evidence.get("promotable") is not False:
                     raise SystemExit(f"{artifact_name} measured evidence makes a promotional claim")
+                if evidence.get("gitCommit") != expected_git_commit or evidence.get("gitDirty") is not False:
+                    raise SystemExit(f"{artifact_name} measured evidence Git identity is not clean exact-head")
                 git_commits.add(evidence["gitCommit"])
                 result = evidence["results"]
                 if len(result) != 1:
@@ -289,6 +308,8 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
         raise SystemExit(f"cross-provider/form workload fingerprints differ: {fingerprint_drift}")
     if len(git_commits) != 1:
         raise SystemExit(f"scheduled evidence spans multiple Git commits: {sorted(git_commits)}")
+    if len(git_tree_digests) != 1:
+        raise SystemExit(f"scheduled evidence spans multiple Git tree digests: {sorted(git_tree_digests)}")
 
     return {
         "contract": "groundwork.physical-storage.scheduled-coverage/v1",
@@ -299,12 +320,17 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
         "verifiedMeasuredWorkerCount": measured_count,
         "resultEqualityGroupCount": len(result_digests),
         "gitCommit": next(iter(git_commits)),
+        "gitTreeDigest": next(iter(git_tree_digests)),
     }
 
 
 def main() -> None:
     args = parse_args()
-    verification = verify(args.root, args.run_id, matrix_from_args(args))
+    verification = verify(
+        args.root,
+        args.run_id,
+        args.expected_git_commit,
+        matrix_from_args(args))
     (args.root / "coverage-verification.json").write_text(
         json.dumps(verification, indent=2, sort_keys=True) + "\n")
     print(json.dumps(verification, indent=2, sort_keys=True))

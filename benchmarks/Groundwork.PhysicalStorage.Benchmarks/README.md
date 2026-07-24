@@ -298,7 +298,7 @@ The candidate was remediated by using the production factories and the same meas
 native plans; emitting canonical observable-result vectors from real outcomes for all 14
 workloads; enforcing exact tuple/run identity, hierarchical process-first bootstrap statistics,
 strict group schemas/digests, and nonzero child-exit propagation; and sharding the scheduled matrix
-into 36 provider/form/cardinality jobs with an exact 2,016-worker aggregate verifier. The pull
+into 36 provider/form/cardinality jobs with an exact 4,032-worker aggregate verifier. The pull
 request smoke remains deliberately narrow and every workflow artifact remains non-promotable.
 
 The originating reviewers must re-verify the frozen remediation commit before merge. Their final
@@ -307,10 +307,8 @@ verdicts and any further dispositions are recorded here when that gate completes
 ## Remaining issue #50 acceptance work
 
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
-  the 1K/100K/1M dataset matrix, including the entity-form benefit classification; ratify any
-  additional payload-size vectors before treating them as baseline controls.
+  the 1K/100K/1M dataset matrix for one named, reviewed payload profile.
 - Capture exact-HEAD live evidence from SQLite, SQL Server, PostgreSQL, and MongoDB.
-- Join the Groundwork results with an Elsa-owned EF Core oracle using matched workloads and controls.
 - Complete reliable provider database-work/round-trip signals and concurrent-load evidence.
 - Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
 - Capture actual crash/failure recovery evidence required by issue #50. Client pool reset/reopen
@@ -318,3 +316,10 @@ verdicts and any further dispositions are recorded here when that gate completes
 
 Until all applicable items are ratified and complete, the harness stays non-promotable and
 non-decisional.
+
+## Elsa consumer prerequisites
+
+Groundwork #50 publishes provider-native evidence and never takes an EF dependency. Elsa #646 owns
+the matched EF Core oracle join, physical-form benefit verdicts, and any additional payload profiles
+needed by its frozen workloads. Those consumer decisions do not block delivery of a complete,
+immutable Groundwork baseline, but they do block an Elsa migration verdict.

@@ -24,7 +24,8 @@ public sealed class BaselineEligibilityEvaluatorTests
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("selectivity", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("exact-HEAD", StringComparison.Ordinal));
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("four providers", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("EF", StringComparison.Ordinal));
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("recovery", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("immutable-baseline", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
