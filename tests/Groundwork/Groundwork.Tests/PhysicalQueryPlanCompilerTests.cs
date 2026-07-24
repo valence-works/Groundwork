@@ -1762,11 +1762,11 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void OneClosedDeclarationPlansEveryBoundedOperatorAndTerminal()
+    public void OneClosedDeclarationPlansEveryScalarBoundedOperatorAndTerminal()
     {
         var predicate = new BoundedQueryPredicateField(
             "stimulusType",
-            Enum.GetValues<PortableQueryOperation>().ToHashSet());
+            ScalarQueryOperations());
         var query = Query(
             BoundedQueryExecutionClass.Ordinary,
             predicateFields: [predicate],
@@ -1782,7 +1782,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             Capabilities(PhysicalQuerySourceKind.PrimaryCanonicalJson)));
 
         Assert.Equal(
-            Enum.GetValues<PortableQueryOperation>().Order(),
+            ScalarQueryOperations().Order(),
             Assert.Single(plan.Predicates).Operations.Order());
         Assert.Equal(
             Enum.GetValues<BoundedQueryResultOperation>().Order(),
@@ -2180,6 +2180,102 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.Equal(
             new PhysicalQueryCollectionConstraint(PortablePhysicalType.String, 16),
             predicate.CollectionConstraint);
+    }
+
+    [Theory]
+    [InlineData(false, PortableQueryOperation.CollectionContains)]
+    [InlineData(false, PortableQueryOperation.CollectionContainsAll)]
+    [InlineData(true, PortableQueryOperation.CollectionContains)]
+    [InlineData(true, PortableQueryOperation.CollectionContainsAll)]
+    public void CollectionMembershipOperationsRejectScalarLogicalIndexesAndProjections(
+        bool projected,
+        PortableQueryOperation operation)
+    {
+        var fixture = CreateTypedFixture(projected, IndexValueKind.String, operation);
+        var source = projected
+            ? PhysicalQuerySourceKind.PrimaryProjectedColumns
+            : PhysicalQuerySourceKind.PrimaryCanonicalJson;
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(source));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-016" &&
+            diagnostic.Message.Contains(operation.ToString(), StringComparison.Ordinal) &&
+            diagnostic.Message.Contains(ProjectionCardinality.Scalar.ToString(), StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CollectionProjectionRejectsScalarAndMixedOperationDemand(bool mixed)
+    {
+        var operations = mixed
+            ? new HashSet<PortableQueryOperation>
+            {
+                PortableQueryOperation.CollectionContains,
+                PortableQueryOperation.Equal
+            }
+            : new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
+        var fixture = CreateCollectionFixture(
+            operations: operations,
+            executionClass: BoundedQueryExecutionClass.Ordinary);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-016" &&
+            diagnostic.Message.Contains(ProjectionCardinality.CollectionElements.ToString(), StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(PortableQueryOperation.CollectionContains)]
+    [InlineData(PortableQueryOperation.CollectionContainsAll)]
+    public void CollectionMembershipOperationsRemainValidForCollectionProjections(
+        PortableQueryOperation operation)
+    {
+        var fixture = CreateCollectionFixture(
+            operations: new HashSet<PortableQueryOperation> { operation });
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements)));
+
+        Assert.Contains(operation, Assert.Single(plan.Predicates).Operations);
+    }
+
+    [Fact]
+    public void CollectionMembershipOperationsRejectAResolvedScalarSource()
+    {
+        var fixture = CreateCollectionFixture(executionClass: BoundedQueryExecutionClass.Ordinary);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(
+                PhysicalQuerySourceKind.PrimaryCanonicalJson,
+                PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-016" &&
+            diagnostic.Message.Contains(
+                PhysicalQuerySourceKind.PrimaryCanonicalJson.ToString(),
+                StringComparison.Ordinal) &&
+            diagnostic.Message.Contains(
+                ProjectionCardinality.CollectionElements.ToString(),
+                StringComparison.Ordinal));
     }
 
     [Theory]
@@ -3320,7 +3416,9 @@ public sealed class PhysicalQueryPlanCompilerTests
         BoundedMutationAction? action = null,
         int maximumCollectionElements = 16,
         QuerySortSupport sortSupport = QuerySortSupport.None,
-        IReadOnlyList<BoundedQuerySortField>? sortFields = null)
+        IReadOnlyList<BoundedQuerySortField>? sortFields = null,
+        IReadOnlySet<PortableQueryOperation>? operations = null,
+        BoundedQueryExecutionClass executionClass = BoundedQueryExecutionClass.ScaleBearing)
     {
         var logicalIndex = new LogicalIndexDeclaration(
             "by-values",
@@ -3331,14 +3429,14 @@ public sealed class PhysicalQueryPlanCompilerTests
         var query = new BoundedQueryDeclaration(
             "list-by-values",
             logicalIndex.Identity,
-            new HashSet<PortableQueryOperation>
+            operations ?? new HashSet<PortableQueryOperation>
             {
                 PortableQueryOperation.CollectionContains,
                 PortableQueryOperation.CollectionContainsAll
             },
             latestPerKey ? QuerySortSupport.Both : sortSupport,
             pagingSupport,
-            BoundedQueryExecutionClass.ScaleBearing,
+            executionClass,
             sortFields: latestPerKey
                 ? [new BoundedQuerySortField("values", PhysicalSortDirection.Ascending)]
                 : sortFields,
@@ -3569,7 +3667,7 @@ public sealed class PhysicalQueryPlanCompilerTests
         new(
             "list-by-stimulus-type",
             "by-stimulus-type",
-            Enum.GetValues<PortableQueryOperation>().ToHashSet(),
+            ScalarQueryOperations(),
             sortFields is null ? QuerySortSupport.Both : QuerySortSupport.Descending,
             pagingSupport,
             executionClass,
@@ -3579,6 +3677,13 @@ public sealed class PhysicalQueryPlanCompilerTests
             predicateFields,
             resultOperations,
             latestPerKeyPath);
+
+    private static IReadOnlySet<PortableQueryOperation> ScalarQueryOperations() =>
+        Enum.GetValues<PortableQueryOperation>()
+            .Where(operation => operation is not (
+                PortableQueryOperation.CollectionContains or
+                PortableQueryOperation.CollectionContainsAll))
+            .ToHashSet();
 
     private static PhysicalQueryPlannerCapabilities CapabilitiesFor(PhysicalQueryAccessKind accessKind) =>
         Capabilities(accessKind switch

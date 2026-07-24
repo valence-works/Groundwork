@@ -110,7 +110,15 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     [Fact]
     public async Task Collection_contains_all_deduplicates_equivalent_values_after_typed_conversion()
     {
-        var database = Database();
+        var aggregateCommands = new ConcurrentQueue<BsonDocument>();
+        var settings = MongoClientSettings.FromConnectionString(container.GetConnectionString());
+        settings.ClusterConfigurator = builder => builder.Subscribe<CommandStartedEvent>(started =>
+        {
+            if (started.CommandName == "aggregate")
+                aggregateCommands.Enqueue(started.Command.DeepClone().AsBsonDocument);
+        });
+        using var client = new MongoClient(settings);
+        var database = client.GetDatabase($"groundwork_collection_dedup_{Guid.NewGuid():N}");
         var model = Model(
             PhysicalStorageForm.PhysicalEntityTable,
             operations: new HashSet<PortableQueryOperation>
@@ -135,12 +143,24 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             "1",
             """{"states":[1,2]}"""));
 
-        var result = await store.QueryAsync(new DocumentQuery(
+        aggregateCommands.Clear();
+        var query = new DocumentQuery(
             "workItem",
             "list-by-states",
-            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll("states", ["1", "01"]))]));
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll("states", ["1", "01"]))]);
+        var result = await store.QueryAsync(query);
 
         Assert.Equal("one", Assert.Single(result.Documents).Id);
+        var aggregate = Assert.Single(aggregateCommands);
+        var pipeline = aggregate["pipeline"].AsBsonArray;
+        var storage = Assert.Single(Assert.Single(model.Routes).CollectionElementStorages);
+        var initialValues = pipeline[0].AsBsonDocument["$match"].AsBsonDocument[
+            storage.Value.Column.Identifier].AsBsonDocument["$in"].AsBsonArray;
+        Assert.Equal(new BsonInt32(1), Assert.Single(initialValues));
+        var requestedValues = pipeline[2].AsBsonDocument["$match"].AsBsonDocument[
+            "$expr"].AsBsonDocument["$and"].AsBsonArray[0].AsBsonDocument[
+            "$or"].AsBsonArray[0].AsBsonDocument["$setIsSubset"].AsBsonArray[0].AsBsonArray;
+        Assert.Equal(new BsonInt32(1), Assert.Single(requestedValues));
     }
 
     [Theory]
@@ -2046,27 +2066,74 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 "_id",
                 MongoDbCollectionRolloutFence.Identity(route)))
             .ToListAsync());
-        var store = new MongoDbPhysicalDocumentStore(
-            database,
+        var missingFenceReads = 0;
+        var firstAttempts = 0;
+        var secondAttempts = 0;
+        var releaseMissingFenceReaders = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ValueTask AfterMissingFenceRead(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref missingFenceReads) == 2)
+                releaseMissingFenceReaders.TrySetResult();
+            return new ValueTask(releaseMissingFenceReaders.Task.WaitAsync(cancellationToken));
+        }
+
+        using var firstClient = new MongoClient(container.GetConnectionString());
+        using var secondClient = new MongoClient(container.GetConnectionString());
+        var databaseName = database.DatabaseNamespace.DatabaseName;
+        var firstDatabase = firstClient.GetDatabase(databaseName);
+        var secondDatabase = secondClient.GetDatabase(databaseName);
+        var firstStore = new MongoDbPhysicalDocumentStore(
+            firstDatabase,
             model,
-            DocumentStoreAccess.Scoped(new("tenant-a")));
+            DocumentStoreAccess.Scoped(new("tenant-a")),
+            scopeObserver: null,
+            options: null,
+            TimeProvider.System,
+            MongoDbPhysicalDocumentStoreExecutionHooks.None with
+            {
+                TransactionBodyStarting = (_, _, _) =>
+                {
+                    Interlocked.Increment(ref firstAttempts);
+                    return ValueTask.CompletedTask;
+                },
+                RolloutFenceMissingBeforeInsert = AfterMissingFenceRead
+            });
+        var secondStore = new MongoDbPhysicalDocumentStore(
+            secondDatabase,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")),
+            scopeObserver: null,
+            options: null,
+            TimeProvider.System,
+            MongoDbPhysicalDocumentStoreExecutionHooks.None with
+            {
+                TransactionBodyStarting = (_, _, _) =>
+                {
+                    Interlocked.Increment(ref secondAttempts);
+                    return ValueTask.CompletedTask;
+                },
+                RolloutFenceMissingBeforeInsert = AfterMissingFenceRead
+            });
 
         var firstWrites = await Task.WhenAll(
-            store.SaveAsync(new SaveDocumentRequest(
+            firstStore.SaveAsync(new SaveDocumentRequest(
                 "workItem", "first", "1", """{"category":"a"}""")),
-            store.SaveAsync(new SaveDocumentRequest(
+            secondStore.SaveAsync(new SaveDocumentRequest(
                 "workItem", "second", "1", """{"category":"b"}""")));
         Assert.All(firstWrites, result => Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status));
+        Assert.Equal(2, missingFenceReads);
+        Assert.Equal([1, 2], new[] { firstAttempts, secondAttempts }.Order());
 
-        var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+        var fence = await firstDatabase.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
             .Find(Builders<BsonDocument>.Filter.Eq(
                 "_id",
                 MongoDbCollectionRolloutFence.Identity(route)))
             .SingleAsync();
         Assert.Equal(MongoDbCollectionRolloutFence.Signature(route), fence["required_signature"].AsString);
         Assert.Equal(2, fence["activity"].ToInt64());
-        Assert.NotNull(await store.LoadAsync("workItem", "first"));
-        Assert.NotNull(await store.LoadAsync("workItem", "second"));
+        Assert.NotNull(await firstStore.LoadAsync("workItem", "first"));
+        Assert.NotNull(await secondStore.LoadAsync("workItem", "second"));
     }
 
     [Fact]

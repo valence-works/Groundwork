@@ -61,6 +61,15 @@ public static class PhysicalQueryPlanCompiler
         var predicateDeclarations = ResolvePredicates(logicalIndex, query, target, diagnostics);
         var residualPredicateDeclarations = ResolveResidualPredicates(query, logicalIndex, target, diagnostics);
         var hasMixedIdentityDemand = HasMixedIdentityDemand(predicateDeclarations);
+        if (!ValidateCollectionOperationCardinality(
+                route,
+                predicateDeclarations,
+                residualPredicateDeclarations,
+                target,
+                diagnostics))
+        {
+            return null;
+        }
         ValidateCollectionOrdering(route, logicalIndex, query, target, diagnostics);
         if (query.LatestPerKeyPath is not null &&
             logicalIndex.Fields.All(field => field.Path != query.LatestPerKeyPath))
@@ -110,6 +119,17 @@ public static class PhysicalQueryPlanCompiler
             query,
             residualPredicateDeclarations,
             capabilities);
+        if ((predicateDeclarations.Any(predicate => predicate.Operations.Any(IsCollectionOperation)) ||
+             residualPredicateDeclarations.Any(predicate => predicate.Operations.Any(IsCollectionOperation))) &&
+            selectedSource is not (null or PhysicalQuerySourceKind.CollectionElements))
+        {
+            diagnostics.Add(Error(
+                "GW-QUERY-016",
+                $"Collection membership query '{query.Identity}' resolved scalar source '{selectedSource}' instead of " +
+                $"a '{ProjectionCardinality.CollectionElements}' source.",
+                target));
+            return null;
+        }
         var hasBoundScalePath = route.CandidateQueryPaths.Any(path =>
             path.Kind == ExecutableQueryPathKind.PhysicalIndex &&
             path.Identity == logicalIndex.Identity &&
@@ -502,6 +522,70 @@ public static class PhysicalQueryPlanCompiler
             $"{string.Join(", ", collectionOrdering)}. Collection ordinals are reconstruct-only.",
             target));
     }
+
+    private static bool ValidateCollectionOperationCardinality(
+        ExecutableStorageRoute route,
+        IReadOnlyList<BoundedQueryPredicateField> predicates,
+        IReadOnlyList<BoundedQueryResidualPredicateField> residualPredicates,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        var isValid = true;
+        var collectionPaths = route.CollectionElementStorages
+            .Select(storage => storage.Projection.Definition.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var predicate in predicates.Select(predicate => (predicate.Path, predicate.Operations))
+                     .Concat(residualPredicates.Select(predicate => (predicate.Path, predicate.Operations))))
+        {
+            var collectionOperations = predicate.Operations
+                .Where(IsCollectionOperation)
+                .Order()
+                .ToArray();
+            var scalarOperations = predicate.Operations
+                .Where(operation => !IsCollectionOperation(operation))
+                .Order()
+                .ToArray();
+            var cardinality = collectionPaths.Contains(predicate.Path)
+                ? ProjectionCardinality.CollectionElements
+                : ProjectionCardinality.Scalar;
+            if (collectionOperations.Length != 0 && scalarOperations.Length != 0)
+            {
+                isValid = false;
+                diagnostics.Add(Error(
+                    "GW-QUERY-016",
+                    $"Predicate path '{predicate.Path}' mixes collection membership operations " +
+                    $"[{string.Join(", ", collectionOperations)}] with scalar operations " +
+                    $"[{string.Join(", ", scalarOperations)}] against resolved cardinality '{cardinality}'.",
+                    target));
+                continue;
+            }
+            if (collectionOperations.Length != 0 && cardinality != ProjectionCardinality.CollectionElements)
+            {
+                isValid = false;
+                diagnostics.Add(Error(
+                    "GW-QUERY-016",
+                    $"Collection membership operations [{string.Join(", ", collectionOperations)}] require " +
+                    $"a '{ProjectionCardinality.CollectionElements}' projection on predicate path '{predicate.Path}', " +
+                    $"but the resolved cardinality is '{cardinality}'.",
+                    target));
+                continue;
+            }
+            if (scalarOperations.Length != 0 && cardinality == ProjectionCardinality.CollectionElements)
+            {
+                isValid = false;
+                diagnostics.Add(Error(
+                    "GW-QUERY-016",
+                    $"Scalar operations [{string.Join(", ", scalarOperations)}] cannot execute against " +
+                    $"a '{ProjectionCardinality.CollectionElements}' projection on predicate path '{predicate.Path}'.",
+                    target));
+            }
+        }
+        return isValid;
+    }
+
+    private static bool IsCollectionOperation(PortableQueryOperation operation) => operation is
+        PortableQueryOperation.CollectionContains or
+        PortableQueryOperation.CollectionContainsAll;
 
     private static bool HasMixedIdentityDemand(IEnumerable<BoundedQueryPredicateField> predicates) =>
         predicates.Any(predicate =>

@@ -577,6 +577,7 @@ public sealed class MongoDbPhysicalDocumentStore :
             database,
             session,
             route,
+            hooks.RolloutFenceMissingBeforeInsert,
             cancellationToken);
         var current = await LoadDocumentAsync(route, request.Id, scope.StorageKey!, session, cancellationToken);
         if (current is not null)
@@ -644,6 +645,7 @@ public sealed class MongoDbPhysicalDocumentStore :
             database,
             session,
             route,
+            hooks.RolloutFenceMissingBeforeInsert,
             cancellationToken);
         var filter = MongoDbPhysicalDocumentIdentity.PrimaryExactFilter(route, request.Id, scope.StorageKey!);
         if (request.ExpectedVersion is not null)
@@ -948,6 +950,7 @@ public sealed class MongoDbPhysicalDocumentStore :
                     database,
                     session,
                     route,
+                    hooks.RolloutFenceMissingBeforeInsert,
                     cancellationToken);
                 var result = await action(session, cancellationToken);
                 if (beforeCommit is not null)
@@ -1199,6 +1202,9 @@ internal sealed record MongoDbPhysicalDocumentStoreExecutionHooks(
 
     public Func<IClientSessionHandle, CancellationToken, ValueTask> CollectionMaintenanceStarting { get; init; } =
         static (_, _) => ValueTask.CompletedTask;
+
+    public Func<CancellationToken, ValueTask> RolloutFenceMissingBeforeInsert { get; init; } =
+        static _ => ValueTask.CompletedTask;
 
     public static MongoDbPhysicalDocumentStoreExecutionHooks None { get; } = new(
         static (_, _, _) => ValueTask.CompletedTask,

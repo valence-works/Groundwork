@@ -40,8 +40,10 @@ internal static class MongoDbCollectionRolloutFence
         IMongoDatabase database,
         IClientSessionHandle session,
         ExecutableStorageRoute route,
+        Func<CancellationToken, ValueTask> missingBeforeInsert,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(missingBeforeInsert);
         var fences = database.GetCollection<BsonDocument>(CollectionName);
         var identity = Identity(route);
         var expected = Signature(route);
@@ -49,6 +51,7 @@ internal static class MongoDbCollectionRolloutFence
             .SingleOrDefaultAsync(cancellationToken);
         if (current is null)
         {
+            await missingBeforeInsert(cancellationToken);
             try
             {
                 await fences.InsertOneAsync(

@@ -122,12 +122,27 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         var runtime = PostgreSqlPhysicalQueryRuntime.Create(
             store, model.Manifest, model.Target.Routes.Single(), model.Target.Provider);
 
-        var result = await runtime.QueryAsync(new DocumentQuery(
+        var query = new DocumentQuery(
             "configurationDocument",
             "list-by-permissions",
             [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
                 "permissions",
-                ["1", "01"]))]));
+                ["1", "01"]))]);
+        var rendered = RelationalPhysicalQueryRuntime.BuildQueryCommand(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider,
+            "postgresql",
+            query);
+        var membershipParameter = Assert.Single(rendered.Parameters.Where(parameter =>
+            parameter.Name.StartsWith("v", StringComparison.Ordinal)));
+        Assert.Equal("v0", membershipParameter.Name);
+        Assert.Equal(1, Assert.IsType<int>(membershipParameter.Value));
+        Assert.Equal(1, rendered.CommandText.Split("@v0", StringSplitOptions.None).Length - 1);
+        Assert.Equal(1, rendered.CommandText.Split("EXISTS (SELECT 1 FROM", StringSplitOptions.None).Length - 1);
+
+        var result = await runtime.QueryAsync(query);
 
         Assert.Equal("one", Assert.Single(result.Documents).Id);
     }

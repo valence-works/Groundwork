@@ -1523,12 +1523,58 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
             store.BeginAsync(DocumentCommitScope.Of("configurationDocument")));
 
-        Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, exception.Code);
-        var cleanupFailures = Assert.IsAssignableFrom<IReadOnlyList<Exception>>(
-            exception.Data["Groundwork.Relational.CleanupFailures"]);
-        Assert.Collection(
-            cleanupFailures,
-            cleanup => Assert.Equal("transition lease dispose failed", cleanup.Message));
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
+    }
+
+    [Fact]
+    public async Task Direct_save_preserves_upgrade_failure_when_transition_lease_cleanup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        var (store, _, _) = await CreateCleanupFailingStaleStoreAsync(connection);
+
+        var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            store.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "stale-save",
+                "1",
+                """{"category":"pending"}""")));
+
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
+    }
+
+    [Fact]
+    public async Task Direct_delete_preserves_upgrade_failure_when_transition_lease_cleanup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        var (store, _, _) = await CreateCleanupFailingStaleStoreAsync(connection);
+
+        var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            store.DeleteAsync(new DeleteDocumentRequest("configurationDocument", "stale-delete")));
+
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
+    }
+
+    [Fact]
+    public async Task Direct_bounded_mutation_preserves_upgrade_failure_when_transition_lease_cleanup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        var (store, manifest, target) = await CreateCleanupFailingStaleStoreAsync(connection);
+        var mutations = RelationalPhysicalMutationRuntime.Create(
+            new RelationalPhysicalMutationRuntimeContext(
+                store,
+                manifest,
+                target.Routes.Single(),
+                target.Provider,
+                SqliteGroundworkCapabilities.Provider.Name,
+                "sqlite"));
+
+        var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            mutations.ExecuteAsync(new DocumentMutation(
+                "configurationDocument",
+                "revoke-pending",
+                $"stale-{Guid.NewGuid():N}")));
+
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
     }
 
     [Fact]
@@ -2229,6 +2275,44 @@ public sealed class SqlitePhysicalSchemaExecutorTests
     {
         await Assert.ThrowsAsync<TimeoutException>(() =>
             task.WaitAsync(TimeSpan.FromMilliseconds(150)));
+    }
+
+    private static async Task<(
+        RelationalPhysicalDocumentStore Store,
+        StorageManifest Manifest,
+        PhysicalSchemaTarget Target)> CreateCleanupFailingStaleStoreAsync(SqliteConnection connection)
+    {
+        var initial = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCategoryTransition: true);
+        var changed = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: true,
+            includeCategoryTransition: true);
+        await PhysicalSchemaApplication.ApplyAsync(
+            changed.Target,
+            new SqlitePhysicalSchemaExecutor(connection));
+        return (
+            new RelationalPhysicalDocumentStore(
+                connection,
+                initial.Manifest,
+                initial.Target.Routes,
+                new CleanupFailingSqliteDialect(),
+                DocumentStoreAccess.Global),
+            initial.Manifest,
+            initial.Target);
+    }
+
+    private static void AssertUpgradeFailureWithTransitionLeaseCleanup(
+        PhysicalSchemaUpgradeRequiredException exception)
+    {
+        Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, exception.Code);
+        var cleanupFailures = Assert.IsAssignableFrom<IReadOnlyList<Exception>>(
+            exception.Data["Groundwork.Relational.CleanupFailures"]);
+        Assert.Collection(
+            cleanupFailures,
+            cleanup => Assert.Equal("transition lease dispose failed", cleanup.Message));
     }
 
     private sealed class InjectedTransitionException : Exception

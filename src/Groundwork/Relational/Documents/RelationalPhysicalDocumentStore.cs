@@ -408,13 +408,19 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         ValidateDocumentIdentity(request.Id);
         return await ExecuteAsync(async (current, ct) =>
         {
-            await using var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
-            await using var transaction = await current.BeginTransactionAsync(ct);
-            await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
-            var result = await SaveCoreAsync(request, transaction, ct);
-            if (result.Status == DocumentStoreWriteStatus.Saved)
-                await transaction.CommitAsync(ct);
-            return result;
+            var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
+            return await ExecuteWithCleanupAsync(transitionLease, async () =>
+            {
+                var transaction = await current.BeginTransactionAsync(ct);
+                return await ExecuteWithCleanupAsync(transaction, async () =>
+                {
+                    await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
+                    var result = await SaveCoreAsync(request, transaction, ct);
+                    if (result.Status == DocumentStoreWriteStatus.Saved)
+                        await transaction.CommitAsync(ct);
+                    return result;
+                });
+            });
         }, cancellationToken);
     }
 
@@ -430,13 +436,19 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         ValidateDocumentIdentity(request.Id);
         return await ExecuteAsync(async (current, ct) =>
         {
-            await using var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
-            await using var transaction = await current.BeginTransactionAsync(ct);
-            await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
-            var result = await DeleteCoreAsync(request, transaction, ct);
-            if (result.Status == DocumentStoreWriteStatus.Deleted)
-                await transaction.CommitAsync(ct);
-            return result;
+            var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
+            return await ExecuteWithCleanupAsync(transitionLease, async () =>
+            {
+                var transaction = await current.BeginTransactionAsync(ct);
+                return await ExecuteWithCleanupAsync(transaction, async () =>
+                {
+                    await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
+                    var result = await DeleteCoreAsync(request, transaction, ct);
+                    if (result.Status == DocumentStoreWriteStatus.Deleted)
+                        await transaction.CommitAsync(ct);
+                    return result;
+                });
+            });
         }, cancellationToken);
     }
 
@@ -598,22 +610,25 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
 
         return await ExecuteAsync(async (current, ct) =>
         {
-            await using var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
-            var transaction = createMutationTransaction(
-                await dialect.BeginMutationTransactionAsync(current, ct)) ??
-                throw new InvalidOperationException("The physical mutation transaction factory returned null.");
-            return await CompletePhysicalMutationAsync(
-                transaction,
-                async token =>
-                {
-                    await ValidateSchemaTransitionWriterAsync(current, transaction.Transaction, token);
-                    return await action(current, transaction.Transaction, token);
-                },
-                transaction.CommitAsync,
-                transaction.RollbackAsync,
-                beforeCommit,
-                afterCommitBeforeAcknowledgement,
-                ct);
+            var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
+            return await ExecuteWithCleanupAsync(transitionLease, async () =>
+            {
+                var transaction = createMutationTransaction(
+                    await dialect.BeginMutationTransactionAsync(current, ct)) ??
+                    throw new InvalidOperationException("The physical mutation transaction factory returned null.");
+                return await CompletePhysicalMutationAsync(
+                    transaction,
+                    async token =>
+                    {
+                        await ValidateSchemaTransitionWriterAsync(current, transaction.Transaction, token);
+                        return await action(current, transaction.Transaction, token);
+                    },
+                    transaction.CommitAsync,
+                    transaction.RollbackAsync,
+                    beforeCommit,
+                    afterCommitBeforeAcknowledgement,
+                    ct);
+            });
         }, cancellationToken);
     }
 
@@ -784,6 +799,25 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         {
             RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
         }
+    }
+
+    private static async Task<T> ExecuteWithCleanupAsync<T>(
+        IAsyncDisposable resource,
+        Func<Task<T>> action)
+    {
+        T result;
+        try
+        {
+            result = await action();
+        }
+        catch (Exception primaryFailure)
+        {
+            await AttachCleanupFailureAsync(primaryFailure, resource.DisposeAsync);
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+            throw;
+        }
+        await resource.DisposeAsync();
+        return result;
     }
 
     internal static DbCommand CreatePhysicalCommand(DbConnection connection, string sql, DbTransaction? transaction = null)
