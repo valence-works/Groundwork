@@ -59,6 +59,11 @@ public sealed class PostgreSqlDiagnosticRecordStore : IDiagnosticRecordStore
         CancellationToken cancellationToken = default) =>
         instrumented.QueryAsync(query, cancellationToken);
 
+    public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default) =>
+        instrumented.QueryGroupsAsync(query, cancellationToken);
+
     public ValueTask<DiagnosticStreamStatistics> InspectAsync(
         DiagnosticStreamInspectionRequest request,
         CancellationToken cancellationToken = default) =>
@@ -81,6 +86,10 @@ internal sealed class PostgreSqlDiagnosticRecordDialect : RelationalDiagnosticRe
 
     public override string Contains(string expression, string parameterName) =>
         $"strpos({expression}, {Parameter(parameterName)}) > 0";
+
+    public override string Int32Null => "CAST(NULL AS INTEGER)";
+
+    public override string Int64Canonical(string expression) => $"CAST({expression} AS TEXT)";
 
     public override string BuildOperationCleanup(
         string table,

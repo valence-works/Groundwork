@@ -33,6 +33,41 @@ public sealed class PostgreSqlDiagnosticRecordStoreTests(PostgreSqlDiagnosticCon
         fixture ?? throw new InvalidOperationException("The PostgreSQL diagnostic fixture has not been initialized.");
 
     [Fact]
+    public async Task Grouped_sum_overflow_reaches_exact_int64_materialization()
+    {
+        var relationalFixture = CreateServerFixture();
+        var store = relationalFixture.OpenStore(TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        static DiagnosticRecordInput Record(string id, DateTimeOffset at, long sequence) =>
+            new(
+                id,
+                at,
+                "{}",
+                new Dictionary<string, IReadOnlyList<DiagnosticFieldValue>>(StringComparer.Ordinal)
+                {
+                    ["service"] = [DiagnosticFieldValue.String("api")],
+                    ["sequence"] = [DiagnosticFieldValue.Int64(sequence)]
+                });
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(relationalFixture.GetUtcNow(), "postgresql-grouped-sum-overflow"),
+            [
+                Record("max", occurredAt, long.MaxValue),
+                Record("one", occurredAt.AddTicks(1), 1)
+            ]));
+
+        await Assert.ThrowsAsync<OverflowException>(() =>
+            store.QueryGroupsAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"))).AsTask());
+    }
+
+    [Fact]
     public async Task Materializer_uses_native_binary_text_and_all_durable_tables()
     {
         var fixture = (PostgreSqlDiagnosticRecordStoreFixture)CreateServerFixture();
@@ -129,6 +164,20 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
     public void AdvanceTime(TimeSpan duration) => timeProvider.Advance(duration);
     public void SetWallClock(DateTimeOffset utcNow) => timeProvider.Set(utcNow);
 
+    public async ValueTask<DiagnosticRecordNativePlan> ExplainGroupedQueryAsync(
+        DiagnosticRecordStreamDefinition definition,
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsurePlanSeedAsync(definition, cancellationToken);
+        return await PostgreSqlDiagnosticRecordStoreFactory
+            .CreatePlanInspector(ConnectionString)
+            .InspectGroupedQueryAsync(
+                DiagnosticRecordConformanceDeployment.Create(definition),
+                query,
+                cancellationToken);
+    }
+
     public async ValueTask<IReadOnlyList<string>> ExplainQueryAsync(
         DiagnosticRecordStreamDefinition definition,
         DiagnosticRecordQuery query,
@@ -157,7 +206,35 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
             using var document = JsonDocument.Parse(json);
             if (FindSeek(document.RootElement, accessPath, constrainedColumns))
                 return true;
+            if (accessPath == FieldsPrimaryAccessPath &&
+                constrainedColumns.Contains("cursor", StringComparer.Ordinal) &&
+                FindCursorBoundedFieldMerge(document.RootElement, accessPath, constrainedColumns))
+            {
+                return true;
+            }
         }
+        return false;
+    }
+
+    public bool HasNativeScopedGroupedReduction(DiagnosticRecordNativePlan plan) =>
+        HasNativeScopedGroupedReductionPlan(plan);
+
+    internal static bool HasNativeScopedGroupedReductionPlan(DiagnosticRecordNativePlan plan)
+    {
+        if (plan.Provider != "postgresql" ||
+            plan.Operation != DiagnosticRecordPlanOperation.GroupedQuery ||
+            plan.Format != DiagnosticRecordNativePlanFormats.PostgreSqlExplainJson)
+        {
+            return false;
+        }
+
+        foreach (var json in plan.RawPlans)
+        {
+            using var document = JsonDocument.Parse(json);
+            if (FindScopedAggregate(document.RootElement, document.RootElement))
+                return true;
+        }
+
         return false;
     }
 
@@ -310,6 +387,8 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
                 SELECT 'tenant-a', 'shell-a', 'logs', cursor_value, 'tags', value_ordinal, 0, 'dGFn', 'tag', 'tag', repeat('1', 64), '|0074|0061|0067'
                 FROM generate_series(1, 500) AS cursor_value
                 CROSS JOIN generate_series(0, 7) AS value_ordinal;
+                ANALYZE {{RelationalDiagnosticRecordSchema.RecordsTable}};
+                ANALYZE {{RelationalDiagnosticRecordSchema.FieldsTable}};
                 """;
             await noise.ExecuteNonQueryAsync(cancellationToken);
             planSeeded = true;
@@ -351,4 +430,508 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
         }
         return false;
     }
+
+    internal static bool FindCursorBoundedFieldMerge(
+        JsonElement element,
+        string fieldAccessPath,
+        IReadOnlyList<string> constrainedColumns)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (IsExactCursorMerge(element, fieldAccessPath, constrainedColumns))
+            {
+                return true;
+            }
+            foreach (var property in element.EnumerateObject())
+            {
+                if (FindCursorBoundedFieldMerge(property.Value, fieldAccessPath, constrainedColumns))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (FindCursorBoundedFieldMerge(item, fieldAccessPath, constrainedColumns))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool IsExactCursorMerge(
+        JsonElement element,
+        string fieldAccessPath,
+        IReadOnlyList<string> constrainedColumns)
+    {
+        if (!element.TryGetProperty("Node Type", out var node) ||
+            node.GetString() != "Merge Join" ||
+            !element.TryGetProperty("Merge Cond", out var condition) ||
+            NormalizeMergeCondition(condition.GetString()) is not ("r.cursor=f.cursor" or "f.cursor=r.cursor") ||
+            !element.TryGetProperty("Plans", out var plans) ||
+            plans.ValueKind != JsonValueKind.Array ||
+            plans.GetArrayLength() != 2)
+        {
+            return false;
+        }
+
+        return MatchesExactMergeArms(plans[0], plans[1], fieldAccessPath, constrainedColumns) ||
+               MatchesExactMergeArms(plans[1], plans[0], fieldAccessPath, constrainedColumns);
+    }
+
+    private static bool MatchesExactMergeArms(
+        JsonElement recordArm,
+        JsonElement fieldArm,
+        string fieldAccessPath,
+        IReadOnlyList<string> constrainedColumns) =>
+        TryResolveUnaryIndexArm(recordArm, out var recordSeek) &&
+        MatchesIndexSeek(
+            recordSeek,
+            "ix_groundwork_diagnostic_records_scope_cursor",
+            "r",
+            ["tenant_id", "scope_id", "stream_id", "cursor"]) &&
+        TryResolveUnaryIndexArm(fieldArm, out var fieldSeek) &&
+        MatchesIndexSeek(
+            fieldSeek,
+            fieldAccessPath,
+            "f",
+            constrainedColumns.Where(column => column != "cursor").ToArray());
+
+    private static bool TryResolveUnaryIndexArm(JsonElement element, out JsonElement indexSeek)
+    {
+        var current = element;
+        while (current.ValueKind == JsonValueKind.Object)
+        {
+            if (current.TryGetProperty("Node Type", out var node) &&
+                node.GetString() is "Index Scan" or "Index Only Scan")
+            {
+                indexSeek = current;
+                return true;
+            }
+            if (!current.TryGetProperty("Node Type", out node) ||
+                node.GetString() is not ("Sort" or "Incremental Sort" or "Materialize"))
+            {
+                break;
+            }
+            if (!current.TryGetProperty("Plans", out var plans) ||
+                plans.ValueKind != JsonValueKind.Array ||
+                plans.GetArrayLength() != 1)
+            {
+                break;
+            }
+            current = plans[0];
+        }
+        indexSeek = default;
+        return false;
+    }
+
+    private static bool MatchesIndexSeek(
+        JsonElement seek,
+        string accessPath,
+        string alias,
+        IReadOnlyList<string> constrainedColumns)
+    {
+        if (!seek.TryGetProperty("Index Name", out var index) ||
+            index.GetString() != accessPath ||
+            !seek.TryGetProperty("Alias", out var observedAlias) ||
+            observedAlias.GetString() != alias ||
+            !seek.TryGetProperty("Index Cond", out var condition) ||
+            condition.GetString() is not { } predicate)
+        {
+            return false;
+        }
+
+        return constrainedColumns.All(column => ContainsExactIdentifier(predicate, column));
+    }
+
+    private static bool ContainsExactIdentifier(string expression, string identifier)
+    {
+        for (var offset = 0; offset < expression.Length;)
+        {
+            var index = expression.IndexOf(identifier, offset, StringComparison.Ordinal);
+            if (index < 0)
+                return false;
+            var before = index == 0 || !IsIdentifierCharacter(expression[index - 1]);
+            var afterIndex = index + identifier.Length;
+            var after = afterIndex == expression.Length || !IsIdentifierCharacter(expression[afterIndex]);
+            if (before && after)
+                return true;
+            offset = index + identifier.Length;
+        }
+        return false;
+    }
+
+    private static bool FindScopedAggregate(JsonElement element, JsonElement planRoot)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty("Node Type", out var nodeType) &&
+                nodeType.GetString() == "Aggregate" &&
+                FindInPlanLineage(
+                    element,
+                    planRoot,
+                    candidate => IsScopedRelationAccess(
+                        candidate,
+                        RelationalDiagnosticRecordSchema.RecordsTable),
+                    []) &&
+                FindInPlanLineage(
+                    element,
+                    planRoot,
+                    candidate => IsScopedRelationAccess(
+                        candidate,
+                        RelationalDiagnosticRecordSchema.FieldsTable),
+                    []))
+            {
+                return true;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (FindScopedAggregate(property.Value, planRoot))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (FindScopedAggregate(item, planRoot))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool FindInPlanLineage(
+        JsonElement element,
+        JsonElement planRoot,
+        Func<JsonElement, bool> predicate,
+        HashSet<string> visitedCtes)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (predicate(element))
+                return true;
+
+            if (element.TryGetProperty("CTE Name", out var cteNameElement) &&
+                cteNameElement.GetString() is { } cteName &&
+                visitedCtes.Add(cteName) &&
+                TryFindCteProducer(planRoot, cteName, out var producer) &&
+                FindInPlanLineage(producer, planRoot, predicate, visitedCtes))
+            {
+                return true;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (FindInPlanLineage(property.Value, planRoot, predicate, visitedCtes))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (FindInPlanLineage(item, planRoot, predicate, visitedCtes))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryFindCteProducer(
+        JsonElement element,
+        string cteName,
+        out JsonElement producer)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty("Subplan Name", out var subplanName) &&
+                subplanName.GetString() == $"CTE {cteName}")
+            {
+                producer = element;
+                return true;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (TryFindCteProducer(property.Value, cteName, out producer))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (TryFindCteProducer(item, cteName, out producer))
+                    return true;
+            }
+        }
+
+        producer = default;
+        return false;
+    }
+
+    private static bool HasPropertyValue(JsonElement element, string propertyName, string value) =>
+        element.TryGetProperty(propertyName, out var property) &&
+        property.ValueKind == JsonValueKind.String &&
+        property.GetString() == value;
+
+    private static bool IsScopedRelationAccess(JsonElement element, string relation) =>
+        HasPropertyValue(element, "Relation Name", relation) &&
+        HasPlanPredicateIdentifier(element, "tenant_id") &&
+        HasPlanPredicateIdentifier(element, "scope_id") &&
+        HasPlanPredicateIdentifier(element, "stream_id");
+
+    private static bool HasPlanPredicateIdentifier(JsonElement element, string identifier)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Name is "Index Cond" or "Recheck Cond" or "Filter" or "Hash Cond" or "Merge Cond" or "Join Filter" &&
+                property.Value.ValueKind == JsonValueKind.String &&
+                ContainsExactIdentifier(property.Value.GetString()!, identifier))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsIdentifierCharacter(char value) =>
+        char.IsAsciiLetterOrDigit(value) || value == '_';
+
+    private static string NormalizeMergeCondition(string? condition) =>
+        condition is null
+            ? string.Empty
+            : new(condition.Where(character =>
+                !char.IsWhiteSpace(character) && character is not '(' and not ')').ToArray());
+}
+
+public sealed class PostgreSqlDiagnosticPlanRecognizerTests
+{
+    private const string FieldAccessPath = "groundwork_diagnostic_fields_pkey";
+    private static readonly string[] Constraints =
+        ["tenant_id", "scope_id", "stream_id", "cursor", "field_name"];
+
+    [Theory]
+    [InlineData("(r.cursor = f.cursor)", false)]
+    [InlineData("(f.cursor = r.cursor)", false)]
+    [InlineData("(r.cursor = f.cursor)", true)]
+    [InlineData("(f.cursor = r.cursor)", true)]
+    public void Cursor_merge_accepts_both_exact_scoped_arm_layouts(string condition, bool swapArms)
+    {
+        var record = RecordSeek();
+        var field = FieldSeek();
+        using var plan = JsonDocument.Parse(MergePlan(
+            condition,
+            swapArms ? field : record,
+            swapArms ? record : field));
+
+        Assert.True(PostgreSqlDiagnosticRecordStoreFixture.FindCursorBoundedFieldMerge(
+            plan.RootElement,
+            FieldAccessPath,
+            Constraints));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_accepts_scoped_inputs_inside_aggregate_subtree()
+    {
+        var plan = GroupedPlan(
+            $$"""
+              {
+                "Node Type": "Aggregate",
+                "Plans": [
+                  {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
+                  {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "f")}}
+                ]
+              }
+              """);
+
+        Assert.True(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_resolves_only_the_cte_producer_consumed_by_the_aggregate()
+    {
+        var plan = GroupedPlan(
+            $$"""
+              {
+                "Node Type": "Sort",
+                "Plans": [
+                  {
+                    "Node Type": "Nested Loop",
+                    "Subplan Name": "CTE base_records",
+                    "Plans": [
+                      {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
+                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
+                    ]
+                  },
+                  {
+                    "Node Type": "Aggregate",
+                    "Plans": [
+                      {"Node Type": "CTE Scan", "CTE Name": "base_records"}
+                    ]
+                  }
+                ]
+              }
+              """);
+
+        Assert.True(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_disconnected_evidence()
+    {
+        var plan = GroupedPlan(
+            $$"""
+              {
+                "Node Type": "Append",
+                "Plans": [
+                  {"Node Type": "Aggregate", "Plans": [{"Node Type": "Result"}]},
+                  {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
+                  {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "f")}}
+                ]
+              }
+              """);
+
+        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_an_unreferenced_scoped_cte_producer()
+    {
+        var plan = GroupedPlan(
+            $$"""
+              {
+                "Node Type": "Sort",
+                "Plans": [
+                  {
+                    "Node Type": "Nested Loop",
+                    "Subplan Name": "CTE unrelated",
+                    "Plans": [
+                      {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
+                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
+                    ]
+                  },
+                  {
+                    "Node Type": "Aggregate",
+                    "Plans": [
+                      {"Node Type": "CTE Scan", "CTE Name": "base_records"}
+                    ]
+                  }
+                ]
+              }
+              """);
+
+        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_scope_predicates_disconnected_from_a_relation_access()
+    {
+        var plan = GroupedPlan(
+            $$"""
+              {
+                "Node Type": "Aggregate",
+                "Plans": [
+                  {"Node Type":"Seq Scan","Relation Name":"{{RelationalDiagnosticRecordSchema.RecordsTable}}","Alias":"r"},
+                  {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "f")}},
+                  {"Node Type":"Result","Filter":"tenant_id = 'tenant-a' AND scope_id = 'shell-a' AND stream_id = 'logs'"}
+                ]
+              }
+              """);
+
+        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Theory]
+    [MemberData(nameof(AdversarialMergePlans))]
+    public void Cursor_merge_rejects_uncorrelated_or_inexact_evidence(string json)
+    {
+        using var plan = JsonDocument.Parse(json);
+
+        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.FindCursorBoundedFieldMerge(
+            plan.RootElement,
+            FieldAccessPath,
+            Constraints));
+    }
+
+    public static TheoryData<string> AdversarialMergePlans() => new()
+    {
+        MergePlan("(r.cursor = unrelated.cursor)", RecordSeek(), FieldSeek()),
+        MergePlan("(r.cursor = f.cursor)", RecordSeek(alias: "x"), FieldSeek()),
+        MergePlan("(r.cursor = f.cursor)", RecordSeek(), FieldSeek(accessPath: "unrelated")),
+        MergePlan(
+            "(r.cursor = f.cursor)",
+            $$"""{"Node Type":"Append","Plans":[{{RecordSeek()}},{{FieldSeek()}}]}""",
+            """{"Node Type":"Index Scan","Index Name":"unrelated","Alias":"x","Index Cond":"(cursor = 1)"}"""),
+        MergePlan(
+            "(r.cursor = f.cursor)",
+            $$"""{"Node Type":"Result","Plans":[{{RecordSeek()}}]}""",
+            FieldSeek()),
+        MergePlan(
+            "(r.cursor = f.cursor)",
+            RecordSeek("tenant_id_shadow", "scope_id_shadow", "stream_id_shadow", "cursor_shadow"),
+            FieldSeek("tenant_id_shadow", "scope_id_shadow", "stream_id_shadow", "field_name_shadow"))
+    };
+
+    private static string MergePlan(string condition, string outer, string inner) =>
+        $$"""
+          {
+            "Node Type": "Merge Join",
+            "Merge Cond": "{{condition}}",
+            "Plans": [{{outer}}, {{inner}}]
+          }
+          """;
+
+    private static string RecordSeek(
+        string tenant = "tenant_id",
+        string scope = "scope_id",
+        string stream = "stream_id",
+        string cursor = "cursor",
+        string alias = "r") =>
+        $$"""
+          {
+            "Node Type": "Index Scan",
+            "Index Name": "ix_groundwork_diagnostic_records_scope_cursor",
+            "Alias": "{{alias}}",
+            "Index Cond": "({{tenant}} = 'tenant-a' AND {{scope}} = 'shell-a' AND {{stream}} = 'logs' AND {{cursor}} <= 10)"
+          }
+          """;
+
+    private static string FieldSeek(
+        string tenant = "tenant_id",
+        string scope = "scope_id",
+        string stream = "stream_id",
+        string field = "field_name",
+        string accessPath = FieldAccessPath,
+        string alias = "f") =>
+        $$"""
+          {
+            "Node Type": "Index Scan",
+            "Index Name": "{{accessPath}}",
+            "Alias": "{{alias}}",
+            "Index Cond": "({{tenant}} = 'tenant-a' AND {{scope}} = 'shell-a' AND {{stream}} = 'logs' AND {{field}} = 'unicode')"
+          }
+          """;
+
+    private static DiagnosticRecordNativePlan GroupedPlan(string root) =>
+        new(
+            "postgresql",
+            DiagnosticRecordPlanOperation.GroupedQuery,
+            DiagnosticRecordNativePlanFormats.PostgreSqlExplainJson,
+            [$$"""[{"Plan":{{root}}}]"""]);
+
+    private static string RelationSeek(string relation, string alias) =>
+        $$"""
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "{{relation}}",
+            "Alias": "{{alias}}",
+            "Index Cond": "({{alias}}.tenant_id = 'tenant-a' AND {{alias}}.scope_id = 'shell-a' AND {{alias}}.stream_id = 'logs')"
+          }
+          """;
 }
