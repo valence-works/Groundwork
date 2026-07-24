@@ -475,19 +475,27 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
             return false;
         }
 
-        return TryResolveUnaryIndexArm(plans[0], out var recordSeek) &&
-               MatchesIndexSeek(
-                   recordSeek,
-                   "ix_groundwork_diagnostic_records_scope_cursor",
-                   "r",
-                   ["tenant_id", "scope_id", "stream_id", "cursor"]) &&
-               TryResolveUnaryIndexArm(plans[1], out var fieldSeek) &&
-               MatchesIndexSeek(
-                   fieldSeek,
-                   fieldAccessPath,
-                   "f",
-                   constrainedColumns.Where(column => column != "cursor").ToArray());
+        return MatchesExactMergeArms(plans[0], plans[1], fieldAccessPath, constrainedColumns) ||
+               MatchesExactMergeArms(plans[1], plans[0], fieldAccessPath, constrainedColumns);
     }
+
+    private static bool MatchesExactMergeArms(
+        JsonElement recordArm,
+        JsonElement fieldArm,
+        string fieldAccessPath,
+        IReadOnlyList<string> constrainedColumns) =>
+        TryResolveUnaryIndexArm(recordArm, out var recordSeek) &&
+        MatchesIndexSeek(
+            recordSeek,
+            "ix_groundwork_diagnostic_records_scope_cursor",
+            "r",
+            ["tenant_id", "scope_id", "stream_id", "cursor"]) &&
+        TryResolveUnaryIndexArm(fieldArm, out var fieldSeek) &&
+        MatchesIndexSeek(
+            fieldSeek,
+            fieldAccessPath,
+            "f",
+            constrainedColumns.Where(column => column != "cursor").ToArray());
 
     private static bool TryResolveUnaryIndexArm(JsonElement element, out JsonElement indexSeek)
     {
@@ -709,14 +717,18 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
         ["tenant_id", "scope_id", "stream_id", "cursor", "field_name"];
 
     [Theory]
-    [InlineData("(r.cursor = f.cursor)")]
-    [InlineData("(f.cursor = r.cursor)")]
-    public void Cursor_merge_requires_exact_opposite_scoped_record_and_field_arms(string condition)
+    [InlineData("(r.cursor = f.cursor)", false)]
+    [InlineData("(f.cursor = r.cursor)", false)]
+    [InlineData("(r.cursor = f.cursor)", true)]
+    [InlineData("(f.cursor = r.cursor)", true)]
+    public void Cursor_merge_accepts_both_exact_scoped_arm_layouts(string condition, bool swapArms)
     {
+        var record = RecordSeek();
+        var field = FieldSeek();
         using var plan = JsonDocument.Parse(MergePlan(
             condition,
-            RecordSeek(),
-            FieldSeek()));
+            swapArms ? field : record,
+            swapArms ? record : field));
 
         Assert.True(PostgreSqlDiagnosticRecordStoreFixture.FindCursorBoundedFieldMerge(
             plan.RootElement,
@@ -849,8 +861,9 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
 
     public static TheoryData<string> AdversarialMergePlans() => new()
     {
-        MergePlan("(r.cursor = f.cursor)", FieldSeek(), RecordSeek()),
         MergePlan("(r.cursor = unrelated.cursor)", RecordSeek(), FieldSeek()),
+        MergePlan("(r.cursor = f.cursor)", RecordSeek(alias: "x"), FieldSeek()),
+        MergePlan("(r.cursor = f.cursor)", RecordSeek(), FieldSeek(accessPath: "unrelated")),
         MergePlan(
             "(r.cursor = f.cursor)",
             $$"""{"Node Type":"Append","Plans":[{{RecordSeek()}},{{FieldSeek()}}]}""",
@@ -878,12 +891,13 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
         string tenant = "tenant_id",
         string scope = "scope_id",
         string stream = "stream_id",
-        string cursor = "cursor") =>
+        string cursor = "cursor",
+        string alias = "r") =>
         $$"""
           {
             "Node Type": "Index Scan",
             "Index Name": "ix_groundwork_diagnostic_records_scope_cursor",
-            "Alias": "r",
+            "Alias": "{{alias}}",
             "Index Cond": "({{tenant}} = 'tenant-a' AND {{scope}} = 'shell-a' AND {{stream}} = 'logs' AND {{cursor}} <= 10)"
           }
           """;
@@ -892,12 +906,14 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
         string tenant = "tenant_id",
         string scope = "scope_id",
         string stream = "stream_id",
-        string field = "field_name") =>
+        string field = "field_name",
+        string accessPath = FieldAccessPath,
+        string alias = "f") =>
         $$"""
           {
             "Node Type": "Index Scan",
-            "Index Name": "{{FieldAccessPath}}",
-            "Alias": "f",
+            "Index Name": "{{accessPath}}",
+            "Alias": "{{alias}}",
             "Index Cond": "({{tenant}} = 'tenant-a' AND {{scope}} = 'shell-a' AND {{stream}} = 'logs' AND {{field}} = 'unicode')"
           }
           """;

@@ -59,6 +59,22 @@ public sealed class SqliteDiagnosticRecordStoreTests : RelationalDiagnosticRecor
 
         Assert.False(SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
     }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_scoped_reducer_without_aggregate_evidence()
+    {
+        var plan = new DiagnosticRecordNativePlan(
+            "sqlite",
+            DiagnosticRecordPlanOperation.GroupedQuery,
+            DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
+            [
+                "id=1;parent=0;detail=MATERIALIZE reducer_0",
+                "id=2;parent=1;detail=SEARCH r USING COVERING INDEX sqlite_autoindex_groundwork_diagnostic_records_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
+                "id=3;parent=1;detail=SEARCH f USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)"
+            ]);
+
+        Assert.False(SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
 }
 
 [Collection(SqliteDiagnosticRecordTestCollection.Name)]
@@ -180,15 +196,12 @@ public sealed class SqliteDiagnosticRecordMaterializerTests
                     "service",
                     [
                         new(
-                            "root",
-                            DiagnosticGroupReducerKind.FirstBy,
-                            "service",
-                            "service",
-                            DiagnosticSortDirection.Ascending,
-                            DiagnosticGroupFirstByTieBreak.CursorAscending)
+                            "start",
+                            DiagnosticGroupReducerKind.MinTimestamp,
+                            DiagnosticRecordFieldNames.OccurredAt)
                     ],
                     [],
-                    new HashSet<string> { "root" },
+                    new HashSet<string> { "start" },
                     10,
                     1)
             ]
@@ -206,7 +219,7 @@ public sealed class SqliteDiagnosticRecordMaterializerTests
                         definition.Stream,
                         "service-groups",
                         10,
-                        new("root")));
+                        new("start")));
 
             Assert.Equal(DiagnosticRecordPlanOperation.GroupedQuery, plan.Operation);
             Assert.Equal(DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan, plan.Format);
@@ -1165,7 +1178,9 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
                 line.Contains("SEARCH ", StringComparison.Ordinal) &&
                 line.Contains("groundwork_diagnostic_fields", StringComparison.Ordinal) &&
                 HasScopeConstraints(line));
-            if (hasScopedRecordAccess && hasScopedFieldAccess)
+            var hasAggregate = subtree.Any(line =>
+                line.Equals("USE TEMP B-TREE FOR GROUP BY", StringComparison.Ordinal));
+            if (hasScopedRecordAccess && hasScopedFieldAccess && hasAggregate)
                 return true;
         }
 
