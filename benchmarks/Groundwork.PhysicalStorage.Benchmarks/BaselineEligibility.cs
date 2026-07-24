@@ -6,10 +6,10 @@ public static class Issue50EvidenceRequirements
 {
     public static IReadOnlyList<string> Remaining { get; } =
     [
-        "The ratified 1K/100K/1M dataset matrix across payload sizes and query selectivity values has not been executed.",
+        "The required 1K/100K/1M matrix for the reviewed payload profile and the ratified 10% indexed-query acceptance and 50% scan-characterization selectivity shapes has not been executed.",
         "exact-HEAD live evidence from all four providers (SQLite, SQL Server, PostgreSQL, and MongoDB) is incomplete.",
-        "The Elsa-owned EF Core oracle and entity-form benefit classification have not been joined to this Groundwork evidence.",
-        "Provider database-work signals, concurrent-load evidence, and an approved immutable baseline are incomplete."
+        "Target-scoped provider database-work signals, sustained concurrent-load evidence, and actual bounded recovery evidence are incomplete.",
+        "The approved immutable-baseline publication and comparison workflow is incomplete."
     ];
 }
 
@@ -27,8 +27,8 @@ public static class BaselineEligibilityEvaluator
         ArgumentNullException.ThrowIfNull(cases);
 
         // The current profiles are harness-scaffolding controls. Even a complete run is not
-        // evidence for baseline promotion or an Elsa migration decision until #50's ratified
-        // matrix and external EF oracle are supplied.
+        // evidence for Groundwork baseline promotion until #50's ratified matrix and provider
+        // evidence are supplied. Elsa owns its later EF-oracle join and migration decision.
         var diagnostics = new List<string>(Issue50EvidenceRequirements.Remaining);
         if (!UsesScheduledControls(configuration))
             diagnostics.Add("Future baseline activation also requires the exact fixed scheduled profile controls.");
@@ -40,6 +40,8 @@ public static class BaselineEligibilityEvaluator
             diagnostics.Add("Future baseline activation also requires every workload.");
         if (machine.GitDirty || machine.GitCommit.Equals("unknown", StringComparison.OrdinalIgnoreCase))
             diagnostics.Add("Future baseline activation also requires a known, clean Git commit.");
+        diagnostics.Add(
+            "Current harness scaffold is explicitly non-promotable: immutable container/image digests and effective database settings are unavailable.");
 
         var expected = BenchmarkMatrix.Create(BenchmarkProfiles.Scheduled)
             .Select(benchmarkCase => benchmarkCase.Identity)
@@ -49,9 +51,12 @@ public static class BaselineEligibilityEvaluator
             actual.Distinct(StringComparer.Ordinal).Count() != actual.Length ||
             !expected.SetEquals(actual))
             diagnostics.Add("Future baseline activation also requires one result for every scheduled-scaffold case.");
-        if (cases.Any(result => result.Samples.Count != BenchmarkProfiles.Scheduled.MeasurementIterations ||
-                                result.Summary.SampleCount != BenchmarkProfiles.Scheduled.MeasurementIterations))
-            diagnostics.Add($"Future baseline activation also requires exactly {BenchmarkProfiles.Scheduled.MeasurementIterations} measured samples per scaffold case.");
+        if (cases.Any(result => !MeetsMeasurementFloors(result, BenchmarkProfiles.Scheduled)))
+        {
+            diagnostics.Add(
+                "Future baseline activation also requires every case to satisfy the scheduled " +
+                "sample-count, operation-count, and steady-state duration floors.");
+        }
         if (cases.Any(result => !AllPassed(result.Correctness)))
             diagnostics.Add("Future baseline activation also requires all correctness gates to pass.");
         if (cases.Any(result =>
@@ -73,9 +78,26 @@ public static class BaselineEligibilityEvaluator
                configuration.MigrationDatasetSize == scheduled.MigrationDatasetSize &&
                configuration.WarmupIterations == scheduled.WarmupIterations &&
                configuration.MeasurementIterations == scheduled.MeasurementIterations &&
+               configuration.MinimumMeasuredOperations == scheduled.MinimumMeasuredOperations &&
+               configuration.MinimumSteadyStateDurationSeconds == scheduled.MinimumSteadyStateDurationSeconds &&
                configuration.OperationsPerIteration == scheduled.OperationsPerIteration &&
                configuration.Concurrency == scheduled.Concurrency;
     }
+
+    private static bool MeetsMeasurementFloors(
+        BenchmarkCaseResult result,
+        BenchmarkRunConfiguration configuration) =>
+        result.Samples.Count >= configuration.MeasurementIterations &&
+        result.Summary.SampleCount == result.Samples.Count &&
+        result.Summary.OperationLatencyObservationCount ==
+        result.Samples.Sum(sample => sample.OperationLatencyNanoseconds?.Count ?? 0) &&
+        result.Samples.Sum(sample => (long)sample.Operations) >= configuration.MinimumMeasuredOperations &&
+        result.Samples.All(sample =>
+            sample.OperationLatencyNanoseconds is not null &&
+            sample.OperationLatencyNanoseconds.Count == sample.Operations &&
+            sample.OperationLatencyNanoseconds.All(latency => latency > 0)) &&
+        result.Samples.Sum(sample => sample.ElapsedNanoseconds) >=
+        configuration.MinimumSteadyStateDurationSeconds * 1_000_000_000L;
 
     private static bool SameSet<T>(IEnumerable<T> actual, IEnumerable<T> expected) where T : notnull =>
         actual.ToHashSet().SetEquals(expected);

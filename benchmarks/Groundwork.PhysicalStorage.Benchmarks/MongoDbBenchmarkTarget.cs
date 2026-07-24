@@ -54,8 +54,9 @@ public sealed class MongoDbBenchmarkTarget(
         ProviderVersion = buildInfo.GetValue("version", "unknown").AsString;
     }
 
-    public override async Task<IReadOnlyList<NativePlanEvidence>> RunNativePlanGatesAsync(
+    public override async Task<IReadOnlyList<NativePlanEvidence>> CaptureNativePlansAsync(
         IReadOnlyList<BenchmarkPlanRequest> requests,
+        NativePlanAssertionMode assertionMode,
         CancellationToken cancellationToken)
     {
         var route = Model.Routes.Single();
@@ -74,22 +75,31 @@ public sealed class MongoDbBenchmarkTarget(
             var command = explanation.Commands.Single(candidate => candidate.Kind == commandKind);
             var planDocument = BsonDocument.Parse(command.NativePlan);
             var plan = planDocument.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { Indent = true });
-            try
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
             {
-                MongoWinningPlanInspector.EnsureIndexScan(planDocument, indexName);
-            }
-            catch (InvalidOperationException exception)
-            {
-                throw new InvalidOperationException(
-                    $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}",
-                    exception);
+                try
+                {
+                    MongoWinningPlanInspector.EnsureIndexScan(planDocument, indexName);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    throw new InvalidOperationException(
+                        $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}",
+                        exception);
+                }
             }
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 (route.LinkedIndexStorage ?? route.PrimaryStorage).Name.Identifier,
                 indexName, plan,
-                ["winningPlan contains IXSCAN", $"winningPlan selects index {indexName}", "winningPlan contains no COLLSCAN"]));
+                NativePlanEvidenceAssertions.For(
+                    assertionMode,
+                    [
+                        "winningPlan contains IXSCAN",
+                        $"winningPlan selects index {indexName}",
+                        "winningPlan contains no COLLSCAN"
+                    ])));
         }
         return evidence;
     }
@@ -199,10 +209,14 @@ public sealed class MongoDbBenchmarkTarget(
             .MaterializeAsync(state.Additive, cancellationToken: cancellationToken);
         if (result.Outcome != PhysicalSchemaApplicationOutcome.Applied)
             throw new InvalidOperationException($"Backfill migration returned {result.Outcome}; expected Applied.");
-        return Execution(1, logicalMutations: state.Rows, providerWork: new Dictionary<string, long>
-        {
-            ["backfilled_documents"] = state.Rows
-        });
+        return Execution(
+            1,
+            logicalMutations: state.Rows,
+            providerWork: new Dictionary<string, long>
+            {
+                ["backfilled_documents"] = state.Rows
+            },
+            observableResultVector: BackfillObservableResult(result.Outcome.ToString(), state.Rows));
     }
 
     protected override async Task ValidateBackfillMigrationAsync(CancellationToken cancellationToken)
@@ -245,17 +259,23 @@ public sealed class MongoDbBenchmarkTarget(
     {
         await DisposeHandlesAsync();
         await OpenStoresAsync(cancellationToken);
+        var documents = new List<DocumentEnvelope>(operations);
         for (var index = 0; index < operations; index++)
         {
-            if (await TenantA.LoadAsync(
-                    BenchmarkModelFactory.DocumentKind,
-                    $"seed-{index:D8}",
-                    cancellationToken) is null)
+            var document = await TenantA.LoadAsync(
+                BenchmarkModelFactory.DocumentKind,
+                $"seed-{index:D8}",
+                cancellationToken);
+            if (document is null)
             {
                 throw new InvalidOperationException("Client-restart validation could not load durable seeded data.");
             }
+            documents.Add(document);
         }
-        return Execution(operations, providerWork: new Dictionary<string, long> { ["factory_restart_validations"] = 1 });
+        return Execution(
+            1,
+            providerWork: new Dictionary<string, long> { ["factory_restart_validations"] = 1 },
+            observableResultVector: RestartObservableResult("reopened", documents));
     }
 
     private async Task OpenStoresAsync(CancellationToken cancellationToken)

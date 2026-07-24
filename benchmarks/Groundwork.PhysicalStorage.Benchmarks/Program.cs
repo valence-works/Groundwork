@@ -4,8 +4,12 @@ internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length > 0 && args[0].Equals("worker", StringComparison.OrdinalIgnoreCase))
+            return await RunWorkerAsync(args);
         try
         {
+            if (args.Length > 0 && args[0].Equals("verify-scheduled-group", StringComparison.OrdinalIgnoreCase))
+                return await VerifyScheduledGroupAsync(args);
             var command = BenchmarkCommandLine.Parse(args, FindRepositoryRoot(Environment.CurrentDirectory));
             if (command.ShowHelp)
             {
@@ -19,8 +23,10 @@ internal static class Program
                 eventArgs.Cancel = true;
                 cancellation.Cancel();
             };
-            var result = await new BenchmarkRunner(Console.WriteLine).RunAsync(command.Request!, cancellation.Token);
-            Console.WriteLine($"Benchmark artifacts: {result.RunDirectory}");
+            var result = await new BenchmarkSubprocessCoordinator(Console.WriteLine)
+                .RunAsync(command.Request!, cancellation.Token);
+            Console.WriteLine($"Benchmark artifact group: {result.RunDirectory}");
+            Console.WriteLine($"Independent workers: {result.WorkerCount}");
             return result.ConfirmedRegression ? 2 : 0;
         }
         catch (OperationCanceledException)
@@ -33,6 +39,78 @@ internal static class Program
             Console.Error.WriteLine(exception);
             return 1;
         }
+    }
+
+    private static async Task<int> VerifyScheduledGroupAsync(IReadOnlyList<string> args)
+    {
+        string? root = null;
+        string? expectedGitCommit = null;
+        for (var index = 1; index < args.Count; index++)
+        {
+            var option = args[index];
+            if (index + 1 >= args.Count)
+                throw new ArgumentException($"Option '{option}' requires a value.");
+            switch (option)
+            {
+                case "--root":
+                    if (root is not null)
+                        throw new ArgumentException("Option '--root' may only be supplied once.");
+                    root = args[++index];
+                    break;
+                case "--expected-git-commit":
+                    if (expectedGitCommit is not null)
+                        throw new ArgumentException("Option '--expected-git-commit' may only be supplied once.");
+                    expectedGitCommit = args[++index];
+                    break;
+                default:
+                    throw new ArgumentException($"Unknown scheduled-group verification option '{option}'.");
+            }
+        }
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(expectedGitCommit))
+        {
+            throw new ArgumentException(
+                "Usage: verify-scheduled-group --root <group-root> --expected-git-commit <sha>.");
+        }
+
+        var summary = await BenchmarkScheduledGroupVerifier.VerifyAsync(
+            root,
+            expectedGitCommit,
+            CancellationToken.None);
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(summary, BenchmarkJson.CompactOptions));
+        return 0;
+    }
+
+    private static async Task<int> RunWorkerAsync(IReadOnlyList<string> args)
+    {
+        string? requestPath = null;
+        string? responsePath = null;
+        for (var index = 1; index < args.Count; index++)
+        {
+            var option = args[index];
+            if (index + 1 >= args.Count)
+                return 1;
+            switch (option)
+            {
+                case "--request":
+                    requestPath = args[++index];
+                    break;
+                case "--response":
+                    responsePath = args[++index];
+                    break;
+                default:
+                    return 1;
+            }
+        }
+        if (requestPath is null || responsePath is null)
+            return 1;
+        var invocation = await BenchmarkSubprocessCoordinator.ReadAsync<BenchmarkWorkerInvocation>(
+            requestPath,
+            CancellationToken.None);
+        return await BenchmarkSubprocessCoordinator.RunWorkerAsync(
+            invocation,
+            responsePath,
+            CancellationToken.None,
+            BenchmarkSubprocessCoordinator.DigestFile(requestPath));
     }
 
     private static string FindRepositoryRoot(string start)
