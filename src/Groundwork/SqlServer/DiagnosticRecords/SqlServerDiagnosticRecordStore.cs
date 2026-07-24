@@ -48,7 +48,7 @@ public sealed class SqlServerDiagnosticRecordStore : IDiagnosticRecordStore
             materializeAsync is null ? null : cancellationToken => materializeAsync(snapshot, cancellationToken));
         var core = new CoreHandlers(inner);
         instrumented = new(
-            new DiagnosticRecordStoreHandlers(core, core, core, core),
+            new DiagnosticRecordStoreHandlers(core, core, core, core) { GroupedQuery = core },
             new("sqlserver", "diagnostic-records"));
     }
 
@@ -63,6 +63,11 @@ public sealed class SqlServerDiagnosticRecordStore : IDiagnosticRecordStore
         DiagnosticRecordQuery query,
         CancellationToken cancellationToken = default) =>
         instrumented.QueryAsync(query, cancellationToken);
+
+    public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default) =>
+        instrumented.QueryGroupsAsync(query, cancellationToken);
 
     public ValueTask<DiagnosticStreamStatistics> InspectAsync(
         DiagnosticStreamInspectionRequest request,
@@ -79,10 +84,13 @@ public sealed class SqlServerDiagnosticRecordStore : IDiagnosticRecordStore
     private sealed class CoreHandlers(RelationalDiagnosticRecordStore inner) :
         IDiagnosticAppendHandler,
         IDiagnosticQueryHandler,
+        IDiagnosticGroupedQueryHandler,
         IDiagnosticInspectHandler,
         IDiagnosticTrimHandler
     {
         public DiagnosticQueryHandlerCapabilities Capabilities => inner.Capabilities;
+        DiagnosticGroupedQueryHandlerCapabilities IDiagnosticGroupedQueryHandler.Capabilities =>
+            ((IDiagnosticGroupedQueryHandler)inner).Capabilities;
 
         public ValueTask<DiagnosticAppendResult> AppendAsync(
             DiagnosticRecordBatch batch,
@@ -98,6 +106,14 @@ public sealed class SqlServerDiagnosticRecordStore : IDiagnosticRecordStore
         {
             SqlServerDiagnosticRecordValidator.ValidateScopeAndThrow(query.Scope, query.Stream);
             return inner.QueryAsync(query, cancellationToken);
+        }
+
+        public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+            DiagnosticRecordGroupQuery query,
+            CancellationToken cancellationToken = default)
+        {
+            SqlServerDiagnosticRecordValidator.ValidateScopeAndThrow(query.Scope, query.Stream);
+            return inner.QueryGroupsAsync(query, cancellationToken);
         }
 
         public ValueTask<DiagnosticStreamStatistics> InspectAsync(
@@ -138,6 +154,9 @@ internal sealed class SqlServerDiagnosticRecordDialect : RelationalDiagnosticRec
 
     public override string Contains(string expression, string parameterName) =>
         $"CHARINDEX({Parameter(parameterName)}, {expression}) > 0";
+
+    public override string SumInt64(string expression) =>
+        $"SUM(CAST({expression} AS DECIMAL(38, 0)))";
 
     public override string BuildOperationCleanup(
         string table,

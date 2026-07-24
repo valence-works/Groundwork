@@ -219,14 +219,10 @@ public sealed record DiagnosticRecordGroupContinuation(
     string LastGroupKey,
     DiagnosticRequestFingerprint QueryFingerprint);
 
-/// <summary>Provider-derived metadata only. It does not identify a raw record as the group result.</summary>
-public sealed record DiagnosticRecordGroupRepresentative(DiagnosticCursor Cursor);
-
 /// <summary>One reduced group; it deliberately has no payload or raw record identity.</summary>
 public sealed record DiagnosticRecordGroup(
     string GroupKey,
-    IReadOnlyDictionary<string, IReadOnlyList<DiagnosticFieldValue>> Fields,
-    DiagnosticRecordGroupRepresentative Representative);
+    IReadOnlyDictionary<string, IReadOnlyList<DiagnosticFieldValue>> Fields);
 
 public sealed record DiagnosticRecordGroupPage(
     IReadOnlyList<DiagnosticRecordGroup> Groups,

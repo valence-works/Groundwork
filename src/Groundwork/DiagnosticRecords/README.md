@@ -160,9 +160,16 @@ cannot silently fall back to client-side loading.
 `DiagnosticRecordGroupQuery` selects one named profile rather than supplying reducers. Profiles admit
 only timestamp minimum/maximum, `Int64` sum/maximum, bounded string set union, and `FirstBy`.
 `FirstBy` declares its order field and direction explicitly, then uses the ascending raw diagnostic
-cursor as its mandatory secondary tie-break. Group predicates execute against reduced aliases, and
-reduced pages use the declared alias plus group key as their total order. Exact count is intentionally
-absent from the grouped contract.
+cursor as its mandatory secondary tie-break. Selection is based on that order even when the selected
+field is absent, so a later non-null value cannot replace the earliest projected null. Set union
+detects at most the declared bound plus one for each returned group and fails with
+`group_query.union.too_large` instead of truncating. An oversized group outside the returned page,
+including the take-plus-one lookahead row, does not poison that page; it fails when it is selected for
+return. `Int64` sum executes in a provider exact-numeric domain and rejects results outside the portable
+`Int64` range. Group predicates execute against reduced aliases, and reduced pages use the declared
+alias plus group key as their total order. Group results expose only the group key and typed reduced
+fields; they do not nominate a representative raw record. Exact count is intentionally absent from the
+grouped contract.
 
 String fields select one explicit comparison policy. `Ordinal` uses versioned UTF-16 keys.
 `AsciiIgnoreCase` accepts only U+0020 through U+007E and maps `A` through `Z` to `a` through `z`; it
@@ -247,6 +254,11 @@ forms, snapshot continuation, latest-per-key, exact counts, retention boundaries
 cancellation, and uncertain acknowledgement. SQLite, SQL Server, PostgreSQL, and MongoDB run the
 same suite and assert native server-side plans; the in-memory fixture is not a production provider
 or an authorization to perform client evaluation.
+
+The four production diagnostic providers install native grouped executors. Relational providers use
+one bounded SQL reduction/page command, while MongoDB uses one typed aggregation pipeline and a final
+facet for overflow plus page results. `IDiagnosticRecordPlanInspector.InspectGroupedQueryAsync`
+returns each provider's native planner output for that exact admitted route.
 
 Capture channels, batch sizing, retry/backoff, overload shedding, graceful drain, redaction, live
 subscriptions, and application drop accounting remain consumer policy. Mutable diagnostic catalogs

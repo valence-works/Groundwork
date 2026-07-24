@@ -781,6 +781,155 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             command.TryGetValue("readConcern", out var concern) && concern["level"] == "snapshot");
     }
 
+    [Fact]
+    public async Task Grouped_reduction_uses_native_types_and_preserves_first_null()
+    {
+        var fixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var store = fixture.OpenStore(TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var firstAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "mongo-grouped-reduction"),
+            [
+                GroupRecord("api-1", firstAt, "API", 1, null, "blue", "shared"),
+                GroupRecord("api-2", firstAt.AddSeconds(2), "api", 2, "later", "green", "shared"),
+                GroupRecord("worker-1", firstAt.AddSeconds(1), "worker", 3, "worker-root", "red")
+            ]));
+
+        var first = await store.QueryGroupsAsync(new(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start"),
+            new DiagnosticRecordGroupPredicate.Comparison(
+                "status",
+                DiagnosticPredicateOperator.RangeInclusive,
+                [DiagnosticFieldValue.Int64(2), DiagnosticFieldValue.Int64(3)])));
+        var api = Assert.Single(first.Groups);
+
+        Assert.Equal("API", api.GroupKey);
+        Assert.Equal(DiagnosticFieldValue.Int64(3), Assert.Single(api.Fields["spanCount"]));
+        Assert.Equal(["blue", "green", "shared"], api.Fields["tags"].Select(value => value.CanonicalValue));
+        Assert.Empty(api.Fields["rootName"]);
+        Assert.NotNull(first.Continuation);
+
+        var second = await store.QueryGroupsAsync(new(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start"),
+            new DiagnosticRecordGroupPredicate.Comparison(
+                "status",
+                DiagnosticPredicateOperator.RangeInclusive,
+                [DiagnosticFieldValue.Int64(2), DiagnosticFieldValue.Int64(3)]),
+            first.Continuation));
+
+        Assert.Equal("worker", Assert.Single(second.Groups).GroupKey);
+        Assert.Null(second.Continuation);
+    }
+
+    [Fact]
+    public async Task Grouped_union_overflow_and_numeric_overflow_fail_visibly()
+    {
+        var unionFixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var unionStore = unionFixture.OpenStore(TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await unionStore.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(unionFixture.GetUtcNow(), "mongo-grouped-union-overflow"),
+            new[]
+            {
+                GroupRecord("selected-valid", occurredAt, "a-valid", 1, "root", "shared")
+            }.Concat(Enumerable.Range(0, 9)
+                .Select(index => GroupRecord(
+                    $"later-overflow-{index}",
+                    occurredAt.AddMinutes(1).AddSeconds(index),
+                    "z-overflow",
+                    1,
+                    "root",
+                    $"tag-{index}")))
+                .ToArray()));
+
+        var first = await unionStore.QueryGroupsAsync(new(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start")));
+        Assert.Equal("a-valid", Assert.Single(first.Groups).GroupKey);
+        Assert.NotNull(first.Continuation);
+
+        var union = await Assert.ThrowsAsync<DiagnosticRecordValidationException>(() =>
+            unionStore.QueryGroupsAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                1,
+                new("start"),
+                Continuation: first.Continuation)).AsTask());
+        Assert.Contains(union.Errors, error => error.Code == "group_query.union.too_large");
+
+        var sumFixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var sumStore = sumFixture.OpenStore(TestDefinition);
+        await sumStore.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(sumFixture.GetUtcNow(), "mongo-grouped-sum-overflow"),
+            [
+                GroupRecord("max", DateTimeOffset.Parse("2026-07-12T12:00:01Z"), "api", long.MaxValue, "root", "shared"),
+                GroupRecord("one", DateTimeOffset.Parse("2026-07-12T12:00:02Z"), "api", 1, "later", "shared")
+            ]));
+
+        await Assert.ThrowsAsync<OverflowException>(() =>
+            sumStore.QueryGroupsAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"))).AsTask());
+    }
+
+    [Fact]
+    public async Task Grouped_explain_returns_native_aggregation_plan()
+    {
+        var fixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var store = (MongoDbDiagnosticRecordStore)fixture.OpenStore(TestDefinition);
+        var explain = await store.ExplainGroupedQueryAsync(new(
+            new("tenant-a", "shell-a"),
+            TestDefinition.Stream,
+            "service-summary",
+            10,
+            new("start")));
+
+        Assert.Contains("$group", explain.ToString());
+        Assert.Contains("$facet", explain.ToString());
+    }
+
+    private static DiagnosticRecordInput GroupRecord(
+        string id,
+        DateTimeOffset occurredAt,
+        string service,
+        long sequence,
+        string? category,
+        params string[] tags)
+    {
+        var fields = new Dictionary<string, IReadOnlyList<DiagnosticFieldValue>>(StringComparer.Ordinal)
+        {
+            ["service"] = [DiagnosticFieldValue.String(service)],
+            ["sequence"] = [DiagnosticFieldValue.Int64(sequence)],
+            ["tags"] = tags.Select(DiagnosticFieldValue.String).ToArray()
+        };
+        if (category is not null)
+            fields.Add("category", [DiagnosticFieldValue.String(category)]);
+        return new(id, occurredAt, "{}", fields);
+    }
+
     private static IReadOnlyList<string> WinningIndexNames(MongoDB.Bson.BsonDocument explain)
     {
         var result = new List<string>();

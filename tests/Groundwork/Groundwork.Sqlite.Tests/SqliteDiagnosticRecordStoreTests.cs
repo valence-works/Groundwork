@@ -128,6 +128,58 @@ public sealed class SqliteDiagnosticRecordMaterializerTests
     }
 
     [Fact]
+    public async Task Plan_inspector_returns_native_grouped_reduction_plan()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"groundwork-group-plan-{Guid.NewGuid():N}.db");
+        var connectionString = ConnectionString(path);
+        var definition = SqliteDiagnosticRecordStoreFixture.Definition with
+        {
+            GroupReductionProfiles =
+            [
+                new(
+                    "service-groups",
+                    "service",
+                    [
+                        new(
+                            "root",
+                            DiagnosticGroupReducerKind.FirstBy,
+                            "service",
+                            "service",
+                            DiagnosticSortDirection.Ascending,
+                            DiagnosticGroupFirstByTieBreak.CursorAscending)
+                    ],
+                    [],
+                    new HashSet<string> { "root" },
+                    10,
+                    1)
+            ]
+        };
+        await SqliteDiagnosticRecordMaterializer.MaterializeAsync(connectionString, definition);
+
+        try
+        {
+            var plan = await SqliteDiagnosticRecordStoreFactory
+                .CreatePlanInspector(connectionString)
+                .InspectGroupedQueryAsync(
+                    Deployment(definition),
+                    new(
+                        new("tenant-a", "shell-a"),
+                        definition.Stream,
+                        "service-groups",
+                        10,
+                        new("root")));
+
+            Assert.Equal(DiagnosticRecordPlanOperation.GroupedQuery, plan.Operation);
+            Assert.Equal(DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan, plan.Format);
+            Assert.NotEmpty(plan.RawPlans);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task Plan_inspector_preserves_provider_query_validation()
     {
         var path = Path.Combine(Path.GetTempPath(), $"groundwork-plan-admission-{Guid.NewGuid():N}.db");
