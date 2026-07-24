@@ -25,8 +25,9 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
 
         var correctness = await target.RunCorrectnessGateAsync(CancellationToken.None);
         var beforePlans = await target.CaptureStorageAsync(CancellationToken.None);
-        var plans = await target.RunNativePlanGatesAsync(
+        var plans = await target.CaptureNativePlansAsync(
             BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery]),
+            NativePlanAssertionMode.RequireDeclaredIndex,
             CancellationToken.None);
         var afterPlans = await target.CaptureStorageAsync(CancellationToken.None);
 
@@ -63,8 +64,9 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         var beforePlans = await target.CaptureStorageAsync(CancellationToken.None);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            target.RunNativePlanGatesAsync(
+            target.CaptureNativePlansAsync(
                 BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery]),
+                NativePlanAssertionMode.RequireDeclaredIndex,
                 CancellationToken.None));
         var afterPlans = await target.CaptureStorageAsync(CancellationToken.None);
 

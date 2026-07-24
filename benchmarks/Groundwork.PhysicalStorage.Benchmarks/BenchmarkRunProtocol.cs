@@ -124,6 +124,6 @@ public static class BenchmarkRunProtocol
             : new BenchmarkMatrixDimensions(
                 [request.Configuration.DatasetSize],
                 PayloadPaddingBytes: [0],
-                QuerySelectivityBasisPoints: [5_000],
+                QuerySelectivityBasisPoints: [BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints],
                 IndependentRuns: 1);
 }

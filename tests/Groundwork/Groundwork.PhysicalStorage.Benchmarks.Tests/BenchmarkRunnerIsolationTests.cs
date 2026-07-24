@@ -8,7 +8,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
     private readonly string output = Path.Combine(Path.GetTempPath(), $"groundwork-runner-test-{Guid.NewGuid():N}");
 
     [Fact]
-    public async Task Native_plans_use_a_separately_initialized_identically_seeded_target()
+    public async Task Mandatory_indexed_query_plans_use_a_separately_initialized_identically_seeded_target()
     {
         var environment = new RecordingEnvironment();
         var configuration = BenchmarkProfiles.Smoke with
@@ -44,10 +44,46 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         Assert.Equal(0, plans.CorrectnessCalls);
         Assert.Equal(0, measured.PlanCalls);
         Assert.Equal(1, plans.PlanCalls);
+        Assert.Equal([NativePlanAssertionMode.RequireDeclaredIndex], plans.PlanAssertionModes);
         Assert.Equal(configuration.MeasurementIterations, measured.ExecuteCalls);
         Assert.Equal(0, plans.ExecuteCalls);
         Assert.True(measured.Disposed);
         Assert.True(plans.Disposed);
+    }
+
+    [Fact]
+    public async Task Fifty_percent_shape_captures_a_non_gating_scan_characterization()
+    {
+        var environment = new RecordingEnvironment();
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            DatasetSize = 10,
+            MigrationDatasetSize = 1,
+            WarmupIterations = 1,
+            MeasurementIterations = 5,
+            OperationsPerIteration = 1,
+            Providers = [BenchmarkProvider.Sqlite],
+            StorageForms = [PhysicalStorageForm.SharedDocuments]
+        };
+        var runner = new BenchmarkRunner(null, () => environment);
+
+        await runner.RunAsync(
+            new BenchmarkRunRequest(
+                FindRepositoryRoot(),
+                configuration,
+                [BenchmarkWorkload.IndexedQuery],
+                output,
+                null,
+                AllowContainers: false,
+                RegressionConfirmationRun: false,
+                DataShape: new BenchmarkDataShape(
+                    configuration.DatasetSize,
+                    0,
+                    BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints)),
+            CancellationToken.None);
+
+        var plans = Assert.Single(environment.Targets, target => target.Instance.Contains("plan", StringComparison.Ordinal));
+        Assert.Equal([NativePlanAssertionMode.ScanCharacterization], plans.PlanAssertionModes);
     }
 
     [Fact]
@@ -284,6 +320,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         public (int Seed, int Count) Seed { get; private set; }
         public int CorrectnessCalls { get; private set; }
         public int PlanCalls { get; private set; }
+        public List<NativePlanAssertionMode> PlanAssertionModes { get; } = [];
         public int ExecuteCalls { get; private set; }
         public bool Disposed { get; private set; }
 
@@ -301,11 +338,13 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
             return Task.FromResult(new CorrectnessGateResult(true, true, true, true, true));
         }
 
-        public Task<IReadOnlyList<NativePlanEvidence>> RunNativePlanGatesAsync(
+        public Task<IReadOnlyList<NativePlanEvidence>> CaptureNativePlansAsync(
             IReadOnlyList<BenchmarkPlanRequest> requests,
+            NativePlanAssertionMode assertionMode,
             CancellationToken cancellationToken)
         {
             PlanCalls++;
+            PlanAssertionModes.Add(assertionMode);
             return Task.FromResult<IReadOnlyList<NativePlanEvidence>>(requests.Select(request => new NativePlanEvidence(
                 request, Provider.ToString(), StorageForm.ToString(), "query", "table", "index", "plan", ["assertion"])).ToArray());
         }

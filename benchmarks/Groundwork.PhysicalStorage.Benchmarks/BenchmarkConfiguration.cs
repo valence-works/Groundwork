@@ -40,6 +40,45 @@ public enum BenchmarkExecutionRole
     Measured
 }
 
+/// <summary>
+/// States how a provider-native query plan is interpreted for one measured data shape.
+/// </summary>
+public enum NativePlanAssertionMode
+{
+    /// <summary>
+    /// The indexed query must select the declared index and avoid a scan of its
+    /// predicate-bearing relation.
+    /// </summary>
+    RequireDeclaredIndex,
+
+    /// <summary>
+    /// Retain the provider-native plan as a workload characterization without
+    /// treating an optimizer-selected scan as a correctness failure.
+    /// </summary>
+    ScanCharacterization
+}
+
+/// <summary>
+/// The reviewed selectivity policy for the physical-storage benchmark protocol.
+/// The 10% shape proves the scale-bearing indexed-query contract. The 50% shape
+/// remains measured and captures its real native plan, where a scan can be a
+/// legitimate optimizer choice rather than an index-contract failure.
+/// </summary>
+public static class BenchmarkSelectivityPolicy
+{
+    public const int IndexedQueryAcceptanceBasisPoints = 1_000;
+    public const int ScanCharacterizationBasisPoints = 5_000;
+
+    public static NativePlanAssertionMode PlanAssertionModeFor(BenchmarkDataShape shape)
+    {
+        ArgumentNullException.ThrowIfNull(shape);
+        shape.Validate();
+        return shape.QuerySelectivityBasisPoints == ScanCharacterizationBasisPoints
+            ? NativePlanAssertionMode.ScanCharacterization
+            : NativePlanAssertionMode.RequireDeclaredIndex;
+    }
+}
+
 public sealed record BenchmarkDataShape(
     int DatasetSize,
     int PayloadPaddingBytes,
@@ -162,12 +201,16 @@ public static class BenchmarkProfiles
     public static BenchmarkMatrixDimensions SmokeDimensions { get; } = new(
         DatasetSizes: [250],
         PayloadPaddingBytes: [0],
-        QuerySelectivityBasisPoints: [5_000],
+        QuerySelectivityBasisPoints: [BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints],
         IndependentRuns: 1);
     public static BenchmarkMatrixDimensions ScheduledDimensions { get; } = new(
         RatifiedDatasetSizes,
         PayloadPaddingBytes: [0],
-        QuerySelectivityBasisPoints: [5_000],
+        QuerySelectivityBasisPoints:
+        [
+            BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints,
+            BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+        ],
         IndependentRuns: 3);
 
     public static BenchmarkRunConfiguration Smoke { get; } = new(

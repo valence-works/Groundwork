@@ -50,7 +50,7 @@ public sealed class RelationalServerBenchmarkTargetTests(
 
     [Theory]
     [MemberData(nameof(ProviderForms))]
-    public async Task Native_plan_gate_accepts_the_exact_scheduled_server_shape_without_changing_it(
+    public async Task Native_plan_gate_accepts_the_mandatory_indexed_query_server_shape_without_changing_it(
         BenchmarkProvider provider,
         PhysicalStorageForm form)
     {
@@ -63,18 +63,54 @@ public sealed class RelationalServerBenchmarkTargetTests(
         await target.InitializeAsync(CancellationToken.None);
         await target.SeedAsync(
             BenchmarkProfiles.ReproducibleSeed,
-            new BenchmarkDataShape(1_000, 0, 5_000),
+            new BenchmarkDataShape(
+                1_000,
+                0,
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints),
             CancellationToken.None);
         var beforePlans = await target.CaptureStorageAsync(CancellationToken.None);
 
-        var evidence = await target.RunNativePlanGatesAsync(
+        var evidence = await target.CaptureNativePlansAsync(
             BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery]),
+            NativePlanAssertionMode.RequireDeclaredIndex,
             CancellationToken.None);
         var afterPlans = await target.CaptureStorageAsync(CancellationToken.None);
 
         Assert.Equal(2, evidence.Count);
         Assert.Equal(beforePlans.PrimaryRows, afterPlans.PrimaryRows);
         Assert.Equal(beforePlans.LinkedRows, afterPlans.LinkedRows);
+    }
+
+    [Theory]
+    [MemberData(nameof(ProviderForms))]
+    public async Task Native_plan_capture_retains_the_50_percent_scan_characterization_without_gating_it(
+        BenchmarkProvider provider,
+        PhysicalStorageForm form)
+    {
+        await using var target = fixture.Environment.CreateTarget(
+            provider,
+            form,
+            Guid.NewGuid().ToString("N")[..8],
+            fixture.Scratch,
+            migrationDatasetSize: 5);
+        await target.InitializeAsync(CancellationToken.None);
+        await target.SeedAsync(
+            BenchmarkProfiles.ReproducibleSeed,
+            new BenchmarkDataShape(
+                1_000,
+                0,
+                BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints),
+            CancellationToken.None);
+
+        var evidence = await target.CaptureNativePlansAsync(
+            BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery]),
+            NativePlanAssertionMode.ScanCharacterization,
+            CancellationToken.None);
+
+        Assert.Equal(2, evidence.Count);
+        Assert.All(evidence, item => Assert.Contains(
+            item.Assertions,
+            assertion => assertion.Contains("non-gating scan characterization", StringComparison.Ordinal)));
     }
 
     [Fact]

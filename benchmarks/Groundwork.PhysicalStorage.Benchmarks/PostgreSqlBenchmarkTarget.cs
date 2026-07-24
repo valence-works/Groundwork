@@ -43,8 +43,9 @@ public sealed class PostgreSqlBenchmarkTarget(
     protected override string HandlerPrefix => "postgresql";
     protected override string ConnectionString => connectionString;
 
-    public override async Task<IReadOnlyList<NativePlanEvidence>> RunNativePlanGatesAsync(
+    public override async Task<IReadOnlyList<NativePlanEvidence>> CaptureNativePlansAsync(
         IReadOnlyList<BenchmarkPlanRequest> requests,
+        NativePlanAssertionMode assertionMode,
         CancellationToken cancellationToken)
     {
         var store = RelationalTenantA;
@@ -61,7 +62,8 @@ public sealed class PostgreSqlBenchmarkTarget(
                 command.Parameters.AddWithValue(name, value ?? DBNull.Value);
             var plan = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken)) ?? string.Empty;
             var indexedRelation = (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier;
-            if (!UsesDeclaredIndexWithoutScanningIndexedRelation(plan, indexName, indexedRelation))
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
+                !UsesDeclaredIndexWithoutScanningIndexedRelation(plan, indexName, indexedRelation))
             {
                 throw new InvalidOperationException(
                     $"PostgreSQL native-plan gate rejected {request.Workload}/{request.Operation}. Expected index '{indexName}'.{Environment.NewLine}{plan}");
@@ -71,12 +73,14 @@ public sealed class PostgreSqlBenchmarkTarget(
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 indexedRelation,
                 indexName, plan,
-                [
-                    "declared index is selected on the predicate-bearing relation",
-                    "the predicate-bearing relation is not sequentially scanned",
-                    "an optimizer-selected scan of a separate primary payload relation is permitted for linked forms",
-                    "query shape is rendered by the certified production handler"
-                ]));
+                NativePlanEvidenceAssertions.For(
+                    assertionMode,
+                    [
+                        "declared index is selected on the predicate-bearing relation",
+                        "the predicate-bearing relation is not sequentially scanned",
+                        "an optimizer-selected scan of a separate primary payload relation is permitted for linked forms",
+                        "query shape is rendered by the certified production handler"
+                    ])));
         }
         return evidence;
     }

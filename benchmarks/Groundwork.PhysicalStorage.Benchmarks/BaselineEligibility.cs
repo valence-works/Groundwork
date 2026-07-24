@@ -6,7 +6,7 @@ public static class Issue50EvidenceRequirements
 {
     public static IReadOnlyList<string> Remaining { get; } =
     [
-        "The ratified 1K/100K/1M dataset matrix across payload sizes and query selectivity values has not been executed.",
+        "The required 1K/100K/1M matrix across payload sizes and the ratified 10% indexed-query acceptance and 50% scan-characterization selectivity shapes has not been executed.",
         "exact-HEAD live evidence from all four providers (SQLite, SQL Server, PostgreSQL, and MongoDB) is incomplete.",
         "The Elsa-owned EF Core oracle and entity-form benefit classification have not been joined to this Groundwork evidence.",
         "Provider database-work signals, concurrent-load evidence, and an approved immutable baseline are incomplete."

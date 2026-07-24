@@ -34,6 +34,7 @@ FORMS = {
     "entity": "physicalEntityTable",
 }
 DATASETS = (1000, 100000, 1000000)
+SELECTIVITY_BASIS_POINTS = (1000, 5000)
 WORKLOADS = (
     "clientResetPointReadBatch",
     "reusedClientPointReadBatch",
@@ -57,6 +58,7 @@ class VerificationMatrix:
     providers: tuple[Provider, ...]
     forms: tuple[str, ...]
     datasets: tuple[int, ...]
+    selectivity_basis_points: tuple[int, ...]
     workloads: tuple[str, ...]
     independent_runs: int
 
@@ -73,12 +75,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--providers", help="Comma-separated artifact provider tokens (test mode only).")
     parser.add_argument("--forms", help="Comma-separated form tokens (test mode only).")
     parser.add_argument("--datasets", help="Comma-separated dataset sizes (test mode only).")
+    parser.add_argument("--selectivity-bps", help="Comma-separated query selectivities (test mode only).")
     parser.add_argument("--workloads", help="Comma-separated workload tokens (test mode only).")
     parser.add_argument("--independent-runs", type=int, help="Measured repetitions (test mode only).")
     args = parser.parse_args()
-    narrowed_options = (args.providers, args.forms, args.datasets, args.workloads, args.independent_runs)
+    narrowed_options = (
+        args.providers,
+        args.forms,
+        args.datasets,
+        args.selectivity_bps,
+        args.workloads,
+        args.independent_runs,
+    )
     if any(option is not None for option in narrowed_options) and not args.test_mode:
-        parser.error("matrix overrides require --test-mode; production verification is fixed at 36 shards and 2,016 workers")
+        parser.error("matrix overrides require --test-mode; production verification is fixed at 36 shards and 4,032 workers")
     return args
 
 
@@ -113,6 +123,18 @@ def matrix_from_args(args: argparse.Namespace) -> VerificationMatrix:
     if any(dataset <= 0 for dataset in datasets):
         raise SystemExit("--datasets must contain positive integers")
 
+    selectivity_tokens = comma_separated(
+        args.selectivity_bps,
+        (str(selectivity) for selectivity in SELECTIVITY_BASIS_POINTS),
+        "--selectivity-bps",
+    )
+    try:
+        selectivity_basis_points = tuple(int(selectivity) for selectivity in selectivity_tokens)
+    except ValueError as error:
+        raise SystemExit("--selectivity-bps must contain integers") from error
+    if any(selectivity <= 0 or selectivity >= 10000 for selectivity in selectivity_basis_points):
+        raise SystemExit("--selectivity-bps must be between 1 and 9999")
+
     workloads = comma_separated(args.workloads, WORKLOADS, "--workloads")
     unknown_workloads = sorted(set(workloads) - set(WORKLOADS))
     if unknown_workloads:
@@ -125,6 +147,7 @@ def matrix_from_args(args: argparse.Namespace) -> VerificationMatrix:
         tuple(providers_by_token[token] for token in provider_tokens),
         forms,
         datasets,
+        selectivity_basis_points,
         workloads,
         independent_runs,
     )
@@ -146,9 +169,10 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
         raise SystemExit(f"scheduled shard set mismatch; missing={missing}, extra={extra}")
 
     expected_workers = {
-        (provider.request_token, FORMS[form], dataset, workload, role, independent_run)
+        (provider.request_token, FORMS[form], dataset, selectivity, workload, role, independent_run)
         for provider, form, dataset, workload in itertools.product(
             matrix.providers, matrix.forms, matrix.datasets, matrix.workloads)
+        for selectivity in matrix.selectivity_basis_points
         for role, independent_run in itertools.chain(
             (("untimedWarmup", 0),),
             (("measured", run) for run in range(1, matrix.independent_runs + 1)),
@@ -160,7 +184,9 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
     git_commits: set[str] = set()
     digest_pattern = re.compile(r"^[0-9a-f]{64}$")
     measured_count = 0
-    expected_runs_per_shard = len(matrix.workloads) * (1 + matrix.independent_runs)
+    expected_runs_per_shard = (
+        len(matrix.selectivity_basis_points) * len(matrix.workloads) * (1 + matrix.independent_runs)
+    )
 
     for artifact_name, (provider, form, dataset) in sorted(expected_shards.items()):
         shard_root = shards_root / artifact_name / "evidence"
@@ -193,6 +219,7 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
                 request["configuration"]["providers"][0],
                 request["configuration"]["storageForms"][0],
                 shape["datasetSize"],
+                shape["querySelectivityBasisPoints"],
                 workload,
                 role,
                 independent_run,
@@ -203,7 +230,8 @@ def verify(root: pathlib.Path, run_id: str, matrix: VerificationMatrix) -> dict[
 
             if worker[0] != provider.request_token or worker[1] != FORMS[form] or worker[2] != dataset:
                 raise SystemExit(f"{artifact_name} contains out-of-shard worker {worker}")
-            if shape["payloadPaddingBytes"] != 0 or shape["querySelectivityBasisPoints"] != 5000:
+            if (shape["payloadPaddingBytes"] != 0 or
+                    shape["querySelectivityBasisPoints"] not in matrix.selectivity_basis_points):
                 raise SystemExit(f"{artifact_name} contains an unexpected data shape")
 
             if role == "measured":

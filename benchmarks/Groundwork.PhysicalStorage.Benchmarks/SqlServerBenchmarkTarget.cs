@@ -42,8 +42,9 @@ public sealed class SqlServerBenchmarkTarget(
     protected override string HandlerPrefix => "sqlserver";
     protected override string ConnectionString => connectionString;
 
-    public override async Task<IReadOnlyList<NativePlanEvidence>> RunNativePlanGatesAsync(
+    public override async Task<IReadOnlyList<NativePlanEvidence>> CaptureNativePlansAsync(
         IReadOnlyList<BenchmarkPlanRequest> requests,
+        NativePlanAssertionMode assertionMode,
         CancellationToken cancellationToken)
     {
         var store = RelationalTenantA;
@@ -62,22 +63,31 @@ public sealed class SqlServerBenchmarkTarget(
             var plans = await SqlServerShowplanReader.ReadAsync(reader, cancellationToken);
             var plan = plans.SingleOrDefault() ?? throw new InvalidOperationException(
                 $"SQL Server returned no native XML plan for {request.Workload}/{request.Operation}.");
-            try
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
             {
-                SqlServerShowplanReader.EnsureScaleBearingIndex(plan, indexName);
-            }
-            catch (InvalidOperationException exception)
-            {
-                throw new InvalidOperationException(
-                    $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.",
-                    exception);
+                try
+                {
+                    SqlServerShowplanReader.EnsureScaleBearingIndex(plan, indexName);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    throw new InvalidOperationException(
+                        $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.",
+                        exception);
+                }
             }
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier,
                 indexName, plan,
-                ["declared index is selected", "table and index scans are absent", "query shape is rendered by the certified production handler"]));
+                NativePlanEvidenceAssertions.For(
+                    assertionMode,
+                    [
+                        "declared index is selected",
+                        "table and index scans are absent",
+                        "query shape is rendered by the certified production handler"
+                    ])));
         }
         return evidence;
     }

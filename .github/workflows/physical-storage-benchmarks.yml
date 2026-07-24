@@ -132,7 +132,7 @@ jobs:
             --workloads all \
             --dataset-sizes "${{ matrix.dataset }}" \
             --payload-padding-bytes 0 \
-            --selectivity-bps 5000 \
+            --selectivity-bps 1000,5000 \
             --independent-runs 3 \
             --output "${RUNNER_TEMP}/physical-storage-scheduled/${SHARD_ID}/evidence"
 

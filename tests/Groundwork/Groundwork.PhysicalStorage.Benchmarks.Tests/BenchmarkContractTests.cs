@@ -13,6 +13,15 @@ public sealed class BenchmarkContractTests
         Assert.Equal(BenchmarkProfiles.ReproducibleSeed, profile.Seed);
         Assert.Equal([BenchmarkProvider.Sqlite], profile.Providers);
         Assert.Equal(Enum.GetValues<PhysicalStorageForm>(), profile.StorageForms);
+        Assert.Equal(
+            [BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints],
+            BenchmarkProfiles.SmokeDimensions.QuerySelectivityBasisPoints);
+        Assert.Equal(
+            [
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints,
+                BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+            ],
+            BenchmarkProfiles.ScheduledDimensions.QuerySelectivityBasisPoints);
         Assert.True(profile.WarmupIterations >= 1);
         Assert.True(profile.MeasurementIterations >= 5);
         Assert.Equal(3, BenchmarkProfiles.ScheduledDimensions.IndependentRuns);

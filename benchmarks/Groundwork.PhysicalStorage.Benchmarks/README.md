@@ -6,8 +6,10 @@ the three physical storage forms. It materializes real manifests, creates real s
 production sessions and bounded-query translation, and records provider-native query plans.
 
 It does **not** complete issue #50. The scheduled protocol now carries the ratified 1K/100K/1M
-dataset dimension and the accepted one-warm-up/three-measured-process scheduled protocol, but
-concrete payload/selectivity vectors remain explicit inputs until they are ratified. The harness contains no EF Core comparison, cannot promote
+dataset dimension, the accepted one-warm-up/three-measured-process scheduled protocol, and a
+ratified selectivity policy: 10% is the mandatory indexed-query acceptance shape and 50% is a
+retained scan characterization. Concrete payload vectors remain explicit inputs until they are
+ratified. The harness contains no EF Core comparison, cannot promote
 baselines, and cannot make an Elsa migration go/no-go decision.
 
 ## Current correctness and plan gates
@@ -17,12 +19,14 @@ Before timing, every selected provider and storage form must prove:
 1. storage-scope isolation, optimistic concurrency, unit-of-work rollback, bounded query/count
    agreement, and mixed-direction ordering; and
 2. on a separately initialized disposable target with the exact configured measured cardinality,
-   selectivity, and provider statistics, selection of the declared index through provider-native
-   `EXPLAIN`, `STATISTICS XML`, or MongoDB `explain`, with a full scan of the predicate-bearing
-   indexed relation rejected for every applicable timed selection and count shape. A linked form
-   may still use an optimizer-selected scan of its separate primary payload relation after the
-   linked predicate index has selected the bounded owner set; treating that as predicate fallback
-   would be a false positive.
+   selectivity, and provider statistics, capture provider-native `EXPLAIN`, `STATISTICS XML`, or
+   MongoDB `explain` evidence for every applicable timed selection and count shape. At the
+   mandatory 10% indexed-query acceptance shape, selection of the declared index is required and
+   a full scan of the predicate-bearing indexed relation is rejected. At the retained 50% scan
+   characterization shape, the exact native plan is retained but an optimizer-selected scan is
+   recorded rather than treated as a failure. A linked form may still use an optimizer-selected
+   scan of its separate primary payload relation after the linked predicate index has selected the
+   bounded owner set; treating that as predicate fallback would be a false positive.
 
 The backfill workload has an additional post-measurement check. Outside the timed region, it uses
 the additive model to run the bounded query and directly queries the newly projected `category`
@@ -31,8 +35,8 @@ field. Both counts must match the seeded migration row count.
 Relational statistics are finalized as part of deterministic seeding on both measured and plan
 targets. Correctness-gate documents are removed and statistics are finalized again before timing.
 Native-plan capture is read-only: it does not add or remove rows, change selectivity, or refresh
-statistics. A provider that chooses a scan for the configured measured shape fails the gate; the
-harness does not inflate a plan-only distribution to make the optimizer choose the declared index.
+statistics. A provider that chooses a scan at the mandatory 10% acceptance shape fails the gate;
+the retained 50% characterization is never changed or inflated just to force an index plan.
 
 After materialization, SQLite, SQL Server, and PostgreSQL stores are opened through their public
 production `OpenPhysicalAsync` factories. Factory admission must succeed before correctness gates
@@ -50,7 +54,7 @@ serialized as an immutable worker request and measured in a separate process:
 | Seed | 20260713 | 20260713 |
 | Primary dataset | 250 | 1,000; 100,000; 1,000,000 |
 | Payload padding | 0 bytes | 0 bytes (explicit control value) |
-| Query selectivity | 5,000 basis points | 5,000 basis points (explicit control value) |
+| Query selectivity | 1,000 basis points (mandatory index gate) | 1,000 basis points (mandatory index gate); 5,000 basis points (scan characterization) |
 | Untimed warm-up processes | 1 per tuple | 1 per tuple |
 | Independent measured processes | 1 | 3 |
 | Migration dataset | 100 | 5,000 |
@@ -65,8 +69,9 @@ serialized as an immutable worker request and measured in a separate process:
 
 Use `--payload-padding-bytes`, `--selectivity-bps`, and `--independent-runs` to supply reviewed
 overrides without changing code. These values are recorded in worker requests, fingerprints, and
-consumer evidence; providing payload/selectivity values does not ratify them or make a run
-promotable.
+consumer evidence. The reviewed 5,000-basis-point shape is the only non-gating characterization;
+every other selectivity retains the declared-index gate unless a later reviewed policy says
+otherwise. Providing payload values does not make a run promotable.
 
 Both profiles always emit `baselineEligibility.eligible: false`. Diagnostics explain that issue #50
 still requires controlled execution of the complete reviewed matrix, exact-HEAD live evidence from
@@ -81,12 +86,12 @@ not perform candidate promotion or migration-decision gating.
 The scheduled cardinality is calculated, not inferred:
 
 - `4 providers × 3 forms × 3 dataset sizes = 36` shards;
-- each shard has `14 workloads × (1 untimed warm-up + 3 measured repetitions) = 56` workers;
-- the complete schedule therefore has `2,016` workers: `504` warm-up and `1,512` measured; and
-- the mandatory 30-second measured floor alone is `1,512 × 30 = 45,360 seconds`, or 12.6 aggregate
+- each shard has `2 selectivity shapes × 14 workloads × (1 untimed warm-up + 3 measured repetitions) = 112` workers;
+- the complete schedule therefore has `4,032` workers: `1,008` warm-up and `3,024` measured; and
+- the mandatory 30-second measured floor alone is `3,024 × 30 = 90,720 seconds`, or 25.2 aggregate
   measured hours before setup, seeding, validation, and artifact work.
 
-With all 36 shard slots available, each shard carries 42 measured workers and therefore 21 minutes
+With all 36 shard slots available, each shard carries 84 measured workers and therefore 42 minutes
 of mandatory measured execution. The workflow budgets 20 minutes for one contract preflight, 280
 minutes for the parallel shard critical path, and 60 minutes for final verification/aggregation:
 360 minutes total execution budget, excluding external runner queueing. The controlled runner pool
@@ -96,7 +101,7 @@ change shard contents or invalidate otherwise complete evidence. The 280-minute 
 per running shard job, not as a guarantee that the organization will schedule all shards at once.
 
 All 36 shard artifacts are retained separately and downloaded into a retained aggregate artifact.
-The final job checks the exact 2,016 request tuples, successful responses, consumer-evidence file
+The final job checks the exact 4,032 request tuples, successful responses, consumer-evidence file
 digests, exact Git commit, and provider/form equality of the canonical result digest. It writes
 `coverage-verification.json` with `coverageVerified: true` only after every check succeeds. A
 missing, timed-out, duplicated, or unequal shard therefore cannot be described as complete
@@ -123,7 +128,7 @@ dotnet run -c Release --project benchmarks/Groundwork.PhysicalStorage.Benchmarks
   --independent-runs 3
 ```
 
-Run all cases represented by the scheduled scaffold locally (serial, and therefore at least 12.6
+Run all cases represented by the scheduled scaffold locally (serial, and therefore at least 25.2
 hours of mandatory measured time before setup overhead):
 
 ```bash
@@ -301,8 +306,9 @@ verdicts and any further dispositions are recorded here when that gate completes
 
 ## Remaining issue #50 acceptance work
 
-- Ratify concrete payload-size and selectivity vectors, then execute them across
-  the 1K/100K/1M dataset matrix, including the entity-form benefit classification.
+- Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
+  the 1K/100K/1M dataset matrix, including the entity-form benefit classification; ratify any
+  additional payload-size vectors before treating them as baseline controls.
 - Capture exact-HEAD live evidence from SQLite, SQL Server, PostgreSQL, and MongoDB.
 - Join the Groundwork results with an Elsa-owned EF Core oracle using matched workloads and controls.
 - Complete reliable provider database-work/round-trip signals and concurrent-load evidence.

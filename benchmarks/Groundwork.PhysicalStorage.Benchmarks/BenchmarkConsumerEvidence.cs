@@ -83,7 +83,10 @@ public sealed record BenchmarkConsumerEvidenceReport(
         ArgumentNullException.ThrowIfNull(machine);
         ArgumentNullException.ThrowIfNull(providers);
         ArgumentNullException.ThrowIfNull(layout);
-        var shape = report.DataShape ?? new BenchmarkDataShape(configuration.DatasetSize, 0, 5_000);
+        var shape = report.DataShape ?? new BenchmarkDataShape(
+            configuration.DatasetSize,
+            0,
+            BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
         shape.Validate();
         var results = report.Cases
             .OrderBy(result => result.Case.Identity, StringComparer.Ordinal)

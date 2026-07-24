@@ -50,8 +50,12 @@ public sealed class BenchmarkRunner
         if (request.Workloads.Count == 0)
             throw new ArgumentException("At least one workload must be selected.", nameof(request));
         var dataShape = request.DataShape ??
-                        new BenchmarkDataShape(request.Configuration.DatasetSize, 0, 5_000);
+                        new BenchmarkDataShape(
+                            request.Configuration.DatasetSize,
+                            0,
+                            BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
         dataShape.Validate();
+        var planAssertionMode = BenchmarkSelectivityPolicy.PlanAssertionModeFor(dataShape);
         var executionConfiguration = request.Configuration with { DataShape = dataShape };
         executionConfiguration.Validate();
 
@@ -136,7 +140,10 @@ public sealed class BenchmarkRunner
                             request.Configuration.Seed,
                             dataShape,
                             cancellationToken);
-                        var evidence = await planTarget.RunNativePlanGatesAsync(planRequests, cancellationToken);
+                        var evidence = await planTarget.CaptureNativePlansAsync(
+                            planRequests,
+                            planAssertionMode,
+                            cancellationToken);
                         if (evidence.Count != planRequests.Count || !evidence.Select(item => item.Request).SequenceEqual(planRequests))
                             throw new InvalidOperationException($"[{provider}/{form}] native-plan evidence did not match the requested typed shapes.");
                         foreach (var item in evidence)

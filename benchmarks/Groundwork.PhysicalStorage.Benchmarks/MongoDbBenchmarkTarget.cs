@@ -54,8 +54,9 @@ public sealed class MongoDbBenchmarkTarget(
         ProviderVersion = buildInfo.GetValue("version", "unknown").AsString;
     }
 
-    public override async Task<IReadOnlyList<NativePlanEvidence>> RunNativePlanGatesAsync(
+    public override async Task<IReadOnlyList<NativePlanEvidence>> CaptureNativePlansAsync(
         IReadOnlyList<BenchmarkPlanRequest> requests,
+        NativePlanAssertionMode assertionMode,
         CancellationToken cancellationToken)
     {
         var route = Model.Routes.Single();
@@ -74,22 +75,31 @@ public sealed class MongoDbBenchmarkTarget(
             var command = explanation.Commands.Single(candidate => candidate.Kind == commandKind);
             var planDocument = BsonDocument.Parse(command.NativePlan);
             var plan = planDocument.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { Indent = true });
-            try
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
             {
-                MongoWinningPlanInspector.EnsureIndexScan(planDocument, indexName);
-            }
-            catch (InvalidOperationException exception)
-            {
-                throw new InvalidOperationException(
-                    $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}",
-                    exception);
+                try
+                {
+                    MongoWinningPlanInspector.EnsureIndexScan(planDocument, indexName);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    throw new InvalidOperationException(
+                        $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}",
+                        exception);
+                }
             }
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 (route.LinkedIndexStorage ?? route.PrimaryStorage).Name.Identifier,
                 indexName, plan,
-                ["winningPlan contains IXSCAN", $"winningPlan selects index {indexName}", "winningPlan contains no COLLSCAN"]));
+                NativePlanEvidenceAssertions.For(
+                    assertionMode,
+                    [
+                        "winningPlan contains IXSCAN",
+                        $"winningPlan selects index {indexName}",
+                        "winningPlan contains no COLLSCAN"
+                    ])));
         }
         return evidence;
     }

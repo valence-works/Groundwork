@@ -84,6 +84,28 @@ public sealed class BenchmarkRunProtocolTests
     }
 
     [Theory]
+    [InlineData(BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints, NativePlanAssertionMode.RequireDeclaredIndex)]
+    [InlineData(BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints, NativePlanAssertionMode.ScanCharacterization)]
+    public void Ratified_selectivities_have_distinct_native_plan_interpretations(
+        int selectivityBasisPoints,
+        NativePlanAssertionMode expectedMode)
+    {
+        var mode = BenchmarkSelectivityPolicy.PlanAssertionModeFor(
+            new BenchmarkDataShape(1_000, 0, selectivityBasisPoints));
+
+        Assert.Equal(expectedMode, mode);
+    }
+
+    [Fact]
+    public void Unreviewed_selectivities_retain_the_declared_index_gate()
+    {
+        var mode = BenchmarkSelectivityPolicy.PlanAssertionModeFor(
+            new BenchmarkDataShape(1_000, 0, 2_500));
+
+        Assert.Equal(NativePlanAssertionMode.RequireDeclaredIndex, mode);
+    }
+
+    [Theory]
     [InlineData(1_000, 1_000, 100)]
     [InlineData(1_000, 5_000, 500)]
     [InlineData(100_000, 1_000, 10_000)]

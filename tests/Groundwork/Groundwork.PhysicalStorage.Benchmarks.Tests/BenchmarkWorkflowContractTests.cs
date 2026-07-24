@@ -49,14 +49,22 @@ public sealed class BenchmarkWorkflowContractTests
         var shardCount = providerCount * formCount * datasetCount;
         var workersPerShard =
             Enum.GetValues<BenchmarkWorkload>().Length *
+            BenchmarkProfiles.ScheduledDimensions.QuerySelectivityBasisPoints.Count *
             (1 + BenchmarkProfiles.ScheduledDimensions.IndependentRuns);
 
         Assert.Equal(Enum.GetValues<BenchmarkProvider>().Length, providerCount);
         Assert.Equal(Enum.GetValues<PhysicalStorageForm>().Length, formCount);
         Assert.Equal(BenchmarkProfiles.ScheduledDimensions.DatasetSizes.Count, datasetCount);
         Assert.Equal(36, shardCount);
-        Assert.Equal(56, workersPerShard);
-        Assert.Equal(2_016, shardCount * workersPerShard);
+        Assert.Equal(112, workersPerShard);
+        Assert.Equal(4_032, shardCount * workersPerShard);
+        Assert.Equal(
+            [
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints,
+                BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+            ],
+            BenchmarkProfiles.ScheduledDimensions.QuerySelectivityBasisPoints);
+        Assert.Contains(workflow, line => line.Contains("--selectivity-bps 1000,5000", StringComparison.Ordinal));
         Assert.Contains("      max-parallel: 36", workflow);
         Assert.Equal(360, JobTimeout(workflow, "scheduled-contracts") +
                           JobTimeout(workflow, "scheduled-shard") +
@@ -120,6 +128,8 @@ public sealed class BenchmarkWorkflowContractTests
             process.ArgumentList.Add("--forms");
             process.ArgumentList.Add("shared");
             process.ArgumentList.Add("--datasets");
+            process.ArgumentList.Add("1000");
+            process.ArgumentList.Add("--selectivity-bps");
             process.ArgumentList.Add("1000");
             process.ArgumentList.Add("--workloads");
             process.ArgumentList.Add("clientResetPointReadBatch");
@@ -237,7 +247,7 @@ public sealed class BenchmarkWorkflowContractTests
             request = new
             {
                 configuration = new { providers = new[] { requestToken }, storageForms = new[] { "sharedDocuments" } },
-                dataShape = new { datasetSize = 1000, payloadPaddingBytes = 0, querySelectivityBasisPoints = 5000 },
+                dataShape = new { datasetSize = 1000, payloadPaddingBytes = 0, querySelectivityBasisPoints = 1000 },
                 workloads = new[] { "clientResetPointReadBatch" }
             },
             role,
@@ -259,7 +269,7 @@ public sealed class BenchmarkWorkflowContractTests
                         workloadIdentity = "groundwork.physical-storage/client-reset-point-read-batch",
                         providerIdentity = ProviderIdentity(artifactToken),
                         storageForm = "sharedDocuments",
-                        dataShape = new { datasetSize = 1000, payloadPaddingBytes = 0, querySelectivityBasisPoints = 5000 },
+                        dataShape = new { datasetSize = 1000, payloadPaddingBytes = 0, querySelectivityBasisPoints = 1000 },
                         independentRun,
                         rawSampleCount = 1,
                         rawOperationLatencyCount = 1,

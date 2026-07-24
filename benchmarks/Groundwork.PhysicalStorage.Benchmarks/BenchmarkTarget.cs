@@ -45,6 +45,26 @@ public sealed record NativePlanEvidence(
     string NativePlan,
     IReadOnlyList<string> Assertions);
 
+public static class NativePlanEvidenceAssertions
+{
+    public static IReadOnlyList<string> For(
+        NativePlanAssertionMode assertionMode,
+        IReadOnlyList<string> acceptanceAssertions)
+    {
+        ArgumentNullException.ThrowIfNull(acceptanceAssertions);
+        return assertionMode switch
+        {
+            NativePlanAssertionMode.RequireDeclaredIndex => acceptanceAssertions,
+            NativePlanAssertionMode.ScanCharacterization =>
+            [
+                "provider-native plan captured as a non-gating scan characterization",
+                "index selection is not required at this selectivity"
+            ],
+            _ => throw new ArgumentOutOfRangeException(nameof(assertionMode), assertionMode, null)
+        };
+    }
+}
+
 public sealed record CorrectnessGateResult(
     bool ScopeIsolation,
     bool OptimisticConcurrency,
@@ -73,8 +93,9 @@ public interface IPhysicalStorageBenchmarkTarget : IAsyncDisposable
     Task SeedAsync(int seed, BenchmarkDataShape shape, CancellationToken cancellationToken) =>
         SeedAsync(seed, shape.DatasetSize, cancellationToken);
     Task<CorrectnessGateResult> RunCorrectnessGateAsync(CancellationToken cancellationToken);
-    Task<IReadOnlyList<NativePlanEvidence>> RunNativePlanGatesAsync(
+    Task<IReadOnlyList<NativePlanEvidence>> CaptureNativePlansAsync(
         IReadOnlyList<BenchmarkPlanRequest> requests,
+        NativePlanAssertionMode assertionMode,
         CancellationToken cancellationToken);
     Task PrepareWorkloadAsync(BenchmarkWorkload workload, int totalIterations, int operationsPerIteration, CancellationToken cancellationToken);
     Task PrepareIterationAsync(BenchmarkWorkload workload, int iteration, CancellationToken cancellationToken);
