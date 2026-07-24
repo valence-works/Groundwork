@@ -896,6 +896,176 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
     }
 
     [Fact]
+    public async Task Grouped_union_predicate_matches_full_membership_before_page_scoped_overflow()
+    {
+        var fixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var store = fixture.OpenStore(TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "mongo-grouped-over-bound-predicate"),
+            [
+                GroupRecord(
+                    "first",
+                    occurredAt,
+                    "api",
+                    1,
+                    "root",
+                    "a-0",
+                    "a-1",
+                    "a-2",
+                    "a-3",
+                    "a-4",
+                    "a-5",
+                    "a-6",
+                    "a-7"),
+                GroupRecord(
+                    "second",
+                    occurredAt.AddTicks(1),
+                    "api",
+                    2,
+                    "later",
+                    "a-8",
+                    "z-match")
+            ]));
+
+        var exception = await Assert.ThrowsAsync<DiagnosticRecordValidationException>(() =>
+            store.QueryGroupsAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                1,
+                new("start"),
+                new DiagnosticRecordGroupPredicate.Comparison(
+                    "tags",
+                    DiagnosticPredicateOperator.Contains,
+                    [DiagnosticFieldValue.String("match")]))).AsTask());
+
+        Assert.Contains(exception.Errors, error => error.Code == "group_query.union.too_large");
+    }
+
+    [Fact]
+    public async Task Grouped_first_by_string_order_uses_the_declared_ascii_ignore_case_key()
+    {
+        var definition = TestDefinition with
+        {
+            GroupReductionProfiles =
+            [
+                new(
+                    "case-first",
+                    "category",
+                    [
+                        new(
+                            "firstService",
+                            DiagnosticGroupReducerKind.FirstBy,
+                            "service",
+                            "service",
+                            DiagnosticSortDirection.Ascending,
+                            DiagnosticGroupFirstByTieBreak.CursorAscending)
+                    ],
+                    [],
+                    new HashSet<string> { "firstService" },
+                    10,
+                    1)
+            ]
+        };
+        var fixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var store = fixture.OpenStore(definition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        static DiagnosticRecordInput Record(string id, DateTimeOffset occurredAt, string service) =>
+            new(
+                id,
+                occurredAt,
+                "{}",
+                new Dictionary<string, IReadOnlyList<DiagnosticFieldValue>>(StringComparer.Ordinal)
+                {
+                    ["category"] = [DiagnosticFieldValue.String("one-group")],
+                    ["service"] = [DiagnosticFieldValue.String(service)]
+                });
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            definition.Stream,
+            new(fixture.GetUtcNow(), "mongo-grouped-first-by-case-policy"),
+            [
+                Record("raw-bson-first", occurredAt, "Z"),
+                Record("case-policy-first", occurredAt.AddTicks(1), "a")
+            ]));
+
+        var page = await store.QueryGroupsAsync(new(
+            scope,
+            definition.Stream,
+            "case-first",
+            10,
+            new("firstService")));
+
+        var group = Assert.Single(page.Groups);
+        Assert.Equal("a", Assert.Single(group.Fields["firstService"]).CanonicalValue);
+    }
+
+    [Fact]
+    public async Task Grouped_union_native_pipeline_bounds_identity_accumulation_before_array_materialization()
+    {
+        var commands = new ConcurrentQueue<BsonDocument>();
+        var settings = MongoClientSettings.FromConnectionString(replicaSet.ConnectionString);
+        settings.ClusterConfigurator = builder => builder.Subscribe<CommandStartedEvent>(started =>
+            commands.Enqueue(started.Command.DeepClone().AsBsonDocument));
+        using var client = new MongoClient(settings);
+        var database = client.GetDatabase($"groundwork_group_pipeline_{Guid.NewGuid():N}");
+        await MongoDbDiagnosticRecordMaterializer.MaterializeAsync(database, TestDefinition);
+        var store = new MongoDbDiagnosticRecordStore(database, TestDefinition);
+
+        try
+        {
+            await store.ExplainGroupedQueryAsync(new(
+                new("tenant-a", "shell-a"),
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start")));
+
+            var command = Assert.Single(commands.Where(item =>
+                item.TryGetValue("explain", out var explain) &&
+                explain.IsBsonDocument &&
+                explain.AsBsonDocument.Contains("pipeline")));
+            var pipeline = command["explain"]["pipeline"].AsBsonArray
+                .Select(stage => stage.AsBsonDocument)
+                .ToArray();
+            var unionLookupIndex = Array.FindIndex(
+                pipeline,
+                stage => stage.TryGetValue("$lookup", out var lookup) &&
+                         lookup["as"].AsString.StartsWith("_union_", StringComparison.Ordinal));
+            Assert.True(unionLookupIndex > 0);
+            Assert.Contains(
+                pipeline.Take(unionLookupIndex),
+                stage => stage.TryGetValue("$limit", out var limit) && limit.ToInt32() == 11);
+            var unionLookup = pipeline[unionLookupIndex]["$lookup"].AsBsonDocument;
+            var boundedPipeline = unionLookup["pipeline"].AsBsonArray
+                .Select(stage => stage.AsBsonDocument)
+                .ToArray();
+            var windowIndex = Array.FindIndex(boundedPipeline, stage => stage.Contains("$setWindowFields"));
+            var limitIndex = Array.FindIndex(boundedPipeline, stage => stage.Contains("$limit"));
+
+            Assert.True(windowIndex >= 0);
+            Assert.True(limitIndex > windowIndex);
+            Assert.Equal(9, boundedPipeline[limitIndex]["$limit"].ToInt32());
+            Assert.DoesNotContain(
+                boundedPipeline.Take(limitIndex),
+                stage => stage.ToJson().Contains("\"$push\"", StringComparison.Ordinal));
+            Assert.DoesNotContain(
+                pipeline,
+                stage => stage.TryGetValue("$group", out var group) &&
+                         group.ToJson().Contains("\"$push\"", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await client.DropDatabaseAsync(database.DatabaseNamespace.DatabaseName);
+        }
+    }
+
+    [Fact]
     public async Task Grouped_explain_returns_native_aggregation_plan()
     {
         var fixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();

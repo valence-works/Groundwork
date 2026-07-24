@@ -34,6 +34,12 @@ public sealed class SqlServerDiagnosticRecordStoreTests(SqlServerDiagnosticConta
         fixture ?? throw new InvalidOperationException("The SQL Server diagnostic fixture has not been initialized.");
 
     [Fact]
+    public async Task Grouped_sum_overflow_reaches_exact_int64_materialization()
+    {
+        await Assert.ThrowsAsync<OverflowException>(QueryGroupedInt64SumOverflowAsync);
+    }
+
+    [Fact]
     public async Task Materializer_uses_native_binary_utf8_text_and_all_durable_tables()
     {
         var fixture = (SqlServerDiagnosticRecordStoreFixture)CreateServerFixture();
@@ -212,6 +218,20 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
     public void AdvanceTime(TimeSpan duration) => timeProvider.Advance(duration);
     public void SetWallClock(DateTimeOffset utcNow) => timeProvider.Set(utcNow);
 
+    public async ValueTask<DiagnosticRecordNativePlan> ExplainGroupedQueryAsync(
+        DiagnosticRecordStreamDefinition definition,
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsurePlanSeedAsync(definition, cancellationToken);
+        return await SqlServerDiagnosticRecordStoreFactory
+            .CreatePlanInspector(ConnectionString)
+            .InspectGroupedQueryAsync(
+                DiagnosticRecordConformanceDeployment.Create(definition),
+                query,
+                cancellationToken);
+    }
+
     public async ValueTask<IReadOnlyList<string>> ExplainQueryAsync(
         DiagnosticRecordStreamDefinition definition,
         DiagnosticRecordQuery query,
@@ -266,6 +286,61 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
         }
         return false;
     }
+
+    public bool HasNativeScopedGroupedReduction(DiagnosticRecordNativePlan plan) =>
+        HasNativeScopedGroupedReductionPlan(plan);
+
+    internal static bool HasNativeScopedGroupedReductionPlan(DiagnosticRecordNativePlan plan)
+    {
+        if (plan.Provider != "sqlserver" ||
+            plan.Operation != DiagnosticRecordPlanOperation.GroupedQuery ||
+            plan.Format != DiagnosticRecordNativePlanFormats.SqlServerShowplanXml)
+        {
+            return false;
+        }
+
+        foreach (var xml in plan.RawPlans)
+        {
+            var document = XDocument.Parse(xml);
+            var ns = document.Root!.Name.Namespace;
+            foreach (var aggregate in document.Descendants(ns + "RelOp").Where(operation =>
+                operation.Attribute("LogicalOp")?.Value == "Aggregate" ||
+                operation.Attribute("PhysicalOp")?.Value.Contains(
+                    "Aggregate",
+                    StringComparison.Ordinal) == true))
+            {
+                if (HasScopedTableAccess(
+                        aggregate,
+                        ns,
+                        RelationalDiagnosticRecordSchema.RecordsTable) &&
+                    HasScopedTableAccess(
+                        aggregate,
+                        ns,
+                        RelationalDiagnosticRecordSchema.FieldsTable))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasScopedTableAccess(XElement aggregate, XNamespace ns, string table) =>
+        aggregate.Descendants(ns + "RelOp").Any(operation =>
+        {
+            var hasTable = operation.Descendants(ns + "Object")
+                .Any(node => NormalizeSqlIdentifier(node.Attribute("Table")?.Value) == table);
+            if (!hasTable)
+                return false;
+            var scopedPredicateColumns = operation
+                .Descendants()
+                .Where(node => node.Name == ns + "SeekPredicates" || node.Name == ns + "Predicate")
+                .SelectMany(node => node.Descendants(ns + "ColumnReference"))
+                .Select(node => NormalizeSqlIdentifier(node.Attribute("Column")?.Value))
+                .ToHashSet(StringComparer.Ordinal);
+            return scopedPredicateColumns.IsSupersetOf(["tenant_id", "scope_id", "stream_id"]);
+        });
 
     public ValueTask<IReadOnlyList<string>> ReadComparisonKeysAsync(
         DiagnosticStorageScope scope,
@@ -437,4 +512,107 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
             planSeedGate.Release();
         }
     }
+
+    private static string? NormalizeSqlIdentifier(string? identifier) =>
+        identifier?.Trim().Trim('[', ']');
+}
+
+public sealed class SqlServerDiagnosticPlanRecognizerTests
+{
+    [Fact]
+    public void Grouped_reduction_recognizer_accepts_scoped_inputs_inside_aggregate_subtree()
+    {
+        var plan = GroupedPlan(
+            $"""
+             <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
+               <StreamAggregate>
+                 {ScopedInputs()}
+               </StreamAggregate>
+             </RelOp>
+             """);
+
+        Assert.True(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_disconnected_evidence()
+    {
+        var plan = GroupedPlan(
+            $"""
+             <RelOp LogicalOp="Concatenation" PhysicalOp="Concatenation">
+               <Concat>
+                 <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
+                   <StreamAggregate />
+                 </RelOp>
+                 <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
+                   <NestedLoops>
+                     {ScopedInputs()}
+                   </NestedLoops>
+                 </RelOp>
+               </Concat>
+             </RelOp>
+             """);
+
+        Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_scope_predicates_disconnected_from_a_table_access()
+    {
+        var plan = GroupedPlan(
+            $"""
+             <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
+               <StreamAggregate>
+                 <RelOp LogicalOp="Table Scan" PhysicalOp="Table Scan">
+                   <TableScan><Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" /></TableScan>
+                 </RelOp>
+                 <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
+                   <IndexScan>
+                     <Object Table="[{RelationalDiagnosticRecordSchema.FieldsTable}]" />
+                     <SeekPredicates>{ScopeColumns()}</SeekPredicates>
+                   </IndexScan>
+                 </RelOp>
+                 <Predicate>{ScopeColumns()}</Predicate>
+               </StreamAggregate>
+             </RelOp>
+             """);
+
+        Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    private static DiagnosticRecordNativePlan GroupedPlan(string operation) =>
+        new(
+            "sqlserver",
+            DiagnosticRecordPlanOperation.GroupedQuery,
+            DiagnosticRecordNativePlanFormats.SqlServerShowplanXml,
+            [
+                $"""
+                 <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+                   <BatchSequence><Batch><Statements><StmtSimple><QueryPlan>{operation}</QueryPlan></StmtSimple></Statements></Batch></BatchSequence>
+                 </ShowPlanXML>
+                 """
+            ]);
+
+    private static string ScopedInputs() =>
+        $"""
+         <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
+           <IndexScan>
+             <Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" />
+             <SeekPredicates>{ScopeColumns()}</SeekPredicates>
+           </IndexScan>
+         </RelOp>
+         <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
+           <IndexScan>
+             <Object Table="[{RelationalDiagnosticRecordSchema.FieldsTable}]" />
+             <SeekPredicates>{ScopeColumns()}</SeekPredicates>
+           </IndexScan>
+         </RelOp>
+         """;
+
+    private static string ScopeColumns() =>
+        """
+        <ColumnReference Column="[tenant_id]" />
+        <ColumnReference Column="[scope_id]" />
+        <ColumnReference Column="[stream_id]" />
+        """;
 }

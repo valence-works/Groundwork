@@ -1,3 +1,4 @@
+using Groundwork.Core.Manifests;
 using Groundwork.DiagnosticRecords;
 using System.Collections.Frozen;
 using Xunit;
@@ -1305,6 +1306,131 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
     }
 
     [Fact]
+    public async Task Grouped_reduction_preserves_exact_types_and_meaningful_fields_across_pages()
+    {
+        var fixture = CreateFixture();
+        var store = OpenStore(fixture);
+        if (!store.Handlers.GroupedQuery.Capabilities.SupportsGroupedReduction)
+            return;
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var firstAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "typed-grouped-reduction"),
+            [
+                GroupedRecord("api-1", firstAt, "API", 1, null, "blue", "shared"),
+                GroupedRecord("api-2", firstAt.AddSeconds(2), "api", 2, "later", "green", "shared"),
+                GroupedRecord("worker-1", firstAt.AddSeconds(1), "worker", 3, "worker-root", "red")
+            ]));
+        var predicate = new DiagnosticRecordGroupPredicate.Comparison(
+            "status",
+            DiagnosticPredicateOperator.RangeInclusive,
+            [DiagnosticFieldValue.Int64(2), DiagnosticFieldValue.Int64(3)]);
+
+        var first = await store.QueryGroupsAsync(new(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start"),
+            predicate));
+        var api = Assert.Single(first.Groups);
+        var apiStart = Assert.Single(api.Fields["start"]);
+        var apiEnd = Assert.Single(api.Fields["end"]);
+        var apiSpanCount = Assert.Single(api.Fields["spanCount"]);
+        var apiStatus = Assert.Single(api.Fields["status"]);
+
+        Assert.Equal("API", api.GroupKey);
+        Assert.Equal(DiagnosticFieldType.Timestamp, apiStart.Type);
+        Assert.Equal(firstAt, DateTimeOffset.Parse(apiStart.CanonicalValue));
+        Assert.Equal(DiagnosticFieldType.Timestamp, apiEnd.Type);
+        Assert.Equal(firstAt.AddSeconds(2), DateTimeOffset.Parse(apiEnd.CanonicalValue));
+        Assert.Equal(DiagnosticFieldType.Int64, apiSpanCount.Type);
+        Assert.Equal(DiagnosticFieldValue.Int64(3), apiSpanCount);
+        Assert.Equal(
+            ["blue", "green", "shared"],
+            api.Fields["tags"].Select(value => value.CanonicalValue));
+        Assert.All(api.Fields["tags"], value => Assert.Equal(DiagnosticFieldType.String, value.Type));
+        Assert.Equal(DiagnosticFieldType.Int64, apiStatus.Type);
+        Assert.Equal(DiagnosticFieldValue.Int64(2), apiStatus);
+        Assert.Empty(api.Fields["rootName"]);
+        Assert.NotNull(first.Continuation);
+
+        var second = await store.QueryGroupsAsync(new(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start"),
+            predicate,
+            first.Continuation));
+        var worker = Assert.Single(second.Groups);
+        var workerStart = Assert.Single(worker.Fields["start"]);
+        var workerEnd = Assert.Single(worker.Fields["end"]);
+        var workerSpanCount = Assert.Single(worker.Fields["spanCount"]);
+        var workerTag = Assert.Single(worker.Fields["tags"]);
+        var workerStatus = Assert.Single(worker.Fields["status"]);
+        var workerRoot = Assert.Single(worker.Fields["rootName"]);
+
+        Assert.Equal("worker", worker.GroupKey);
+        Assert.Equal(DiagnosticFieldType.Timestamp, workerStart.Type);
+        Assert.Equal(firstAt.AddSeconds(1), DateTimeOffset.Parse(workerStart.CanonicalValue));
+        Assert.Equal(DiagnosticFieldType.Timestamp, workerEnd.Type);
+        Assert.Equal(firstAt.AddSeconds(1), DateTimeOffset.Parse(workerEnd.CanonicalValue));
+        Assert.Equal(DiagnosticFieldType.Int64, workerSpanCount.Type);
+        Assert.Equal(DiagnosticFieldValue.Int64(3), workerSpanCount);
+        Assert.Equal(DiagnosticFieldType.String, workerTag.Type);
+        Assert.Equal("red", workerTag.CanonicalValue);
+        Assert.Equal(DiagnosticFieldType.Int64, workerStatus.Type);
+        Assert.Equal(DiagnosticFieldValue.Int64(3), workerStatus);
+        Assert.Equal(DiagnosticFieldType.String, workerRoot.Type);
+        Assert.Equal("worker-root", workerRoot.CanonicalValue);
+        Assert.Null(second.Continuation);
+    }
+
+    [Fact]
+    public async Task Grouped_continuation_uses_group_key_tie_break_for_equal_order_values()
+    {
+        var fixture = CreateFixture();
+        var store = OpenStore(fixture);
+        if (!store.Handlers.GroupedQuery.Capabilities.SupportsGroupedReduction)
+            return;
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "equal-order-group-continuation"),
+            [
+                GroupedRecord("charlie", occurredAt, "charlie", 1, "root", "shared"),
+                GroupedRecord("alpha", occurredAt, "alpha", 1, "root", "shared"),
+                GroupedRecord("bravo", occurredAt, "bravo", 1, "root", "shared")
+            ]));
+
+        var groupKeys = new List<string>();
+        DiagnosticRecordGroupContinuation? continuation = null;
+        for (var pageIndex = 0; pageIndex < 3; pageIndex++)
+        {
+            var page = await store.QueryGroupsAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                1,
+                new("start"),
+                Continuation: continuation));
+            groupKeys.Add(Assert.Single(page.Groups).GroupKey);
+            continuation = page.Continuation;
+            if (pageIndex < 2)
+                Assert.NotNull(continuation);
+        }
+
+        Assert.Equal(["alpha", "bravo", "charlie"], groupKeys);
+        Assert.Equal(3, groupKeys.Distinct(StringComparer.Ordinal).Count());
+        Assert.Null(continuation);
+    }
+
+    [Fact]
     public async Task Trim_hook_observes_uncommitted_deletion_while_an_independent_store_sees_durable_records()
     {
         var fixture = CreateFixture();
@@ -1366,6 +1492,25 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
             DateTimeOffset.Parse("2026-07-12T12:00:01Z"),
             $"{{\"id\":\"{id}\"}}",
             fields.ToDictionary(x => x.Name, x => x.Values, StringComparer.Ordinal));
+
+    private static DiagnosticRecordInput GroupedRecord(
+        string id,
+        DateTimeOffset occurredAt,
+        string service,
+        long sequence,
+        string? category,
+        params string[] tags)
+    {
+        var fields = new Dictionary<string, IReadOnlyList<DiagnosticFieldValue>>(StringComparer.Ordinal)
+        {
+            ["service"] = [DiagnosticFieldValue.String(service)],
+            ["sequence"] = [DiagnosticFieldValue.Int64(sequence)],
+            ["tags"] = tags.Select(DiagnosticFieldValue.String).ToArray()
+        };
+        if (category is not null)
+            fields.Add("category", [DiagnosticFieldValue.String(category)]);
+        return new(id, occurredAt, "{}", fields);
+    }
 }
 
 public sealed class InMemoryDiagnosticRecordStoreConformanceTests : DiagnosticRecordStoreConformanceTests
@@ -1391,6 +1536,11 @@ public interface IRelationalDiagnosticRecordStoreConformanceFixture : IDiagnosti
 {
     string FieldsPrimaryAccessPath { get; }
 
+    ValueTask<DiagnosticRecordNativePlan> ExplainGroupedQueryAsync(
+        DiagnosticRecordStreamDefinition definition,
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default);
+
     ValueTask<IReadOnlyList<string>> ExplainQueryAsync(
         DiagnosticRecordStreamDefinition definition,
         DiagnosticRecordQuery query,
@@ -1406,6 +1556,8 @@ public interface IRelationalDiagnosticRecordStoreConformanceFixture : IDiagnosti
         string accessPath,
         IReadOnlyList<string> constrainedColumns);
 
+    bool HasNativeScopedGroupedReduction(DiagnosticRecordNativePlan plan);
+
     ValueTask<IReadOnlyList<string>> ReadComparisonKeysAsync(
         DiagnosticStorageScope scope,
         DiagnosticStreamId stream,
@@ -1415,6 +1567,21 @@ public interface IRelationalDiagnosticRecordStoreConformanceFixture : IDiagnosti
     ValueTask<long> CountOperationRowsAsync(
         DiagnosticOperationKind kind,
         CancellationToken cancellationToken = default);
+}
+
+public static class DiagnosticRecordConformanceDeployment
+{
+    public static DiagnosticRecordDeploymentManifest Create(
+        DiagnosticRecordStreamDefinition definition) =>
+        new(
+            new StorageManifest(
+                new("diagnostic-conformance"),
+                new("tests"),
+                new("1"),
+                [],
+                new HashSet<string>(),
+                []),
+            [definition]);
 }
 
 /// <summary>
@@ -1428,61 +1595,22 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
     protected abstract IRelationalDiagnosticRecordStoreConformanceFixture CreateRelationalFixture();
 
     [Fact]
-    public async Task Grouped_reduction_executes_reducers_predicate_order_and_continuation_in_provider()
+    public async Task Grouped_reduction_plan_is_native_scoped_and_aggregated()
     {
         var fixture = CreateRelationalFixture();
-        var store = new BoundedDiagnosticRecordStore(fixture.OpenStore(TestDefinition));
-        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
-        var firstAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
-        await store.AppendAsync(DiagnosticRecordBatch.Create(
-            scope,
-            TestDefinition.Stream,
-            new(fixture.GetUtcNow(), "grouped-reduction"),
-            [
-                GroupRecord("api-1", firstAt, "API", 1, null, "blue", "shared"),
-                GroupRecord("api-2", firstAt.AddSeconds(2), "api", 2, "later", "green", "shared"),
-                GroupRecord("worker-1", firstAt.AddSeconds(1), "worker", 3, "worker-root", "red")
-            ]));
+        var plan = await fixture.ExplainGroupedQueryAsync(
+            TestDefinition,
+            new(
+                new("tenant-a", "shell-a"),
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start")));
 
-        var first = await store.QueryGroupsAsync(new(
-            scope,
-            TestDefinition.Stream,
-            "service-summary",
-            1,
-            new("start"),
-            new DiagnosticRecordGroupPredicate.Comparison(
-                "status",
-                DiagnosticPredicateOperator.RangeInclusive,
-                [DiagnosticFieldValue.Int64(2), DiagnosticFieldValue.Int64(3)])));
-        var api = Assert.Single(first.Groups);
-
-        Assert.Equal("API", api.GroupKey);
-        Assert.Equal(firstAt, DateTimeOffset.Parse(Assert.Single(api.Fields["start"]).CanonicalValue));
-        Assert.Equal(firstAt.AddSeconds(2), DateTimeOffset.Parse(Assert.Single(api.Fields["end"]).CanonicalValue));
-        Assert.Equal(DiagnosticFieldValue.Int64(3), Assert.Single(api.Fields["spanCount"]));
-        Assert.Equal(
-            ["blue", "green", "shared"],
-            api.Fields["tags"].Select(value => value.CanonicalValue));
-        Assert.Equal(DiagnosticFieldValue.Int64(2), Assert.Single(api.Fields["status"]));
-        Assert.Empty(api.Fields["rootName"]);
-        Assert.NotNull(first.Continuation);
-
-        var second = await store.QueryGroupsAsync(new(
-            scope,
-            TestDefinition.Stream,
-            "service-summary",
-            1,
-            new("start"),
-            new DiagnosticRecordGroupPredicate.Comparison(
-                "status",
-                DiagnosticPredicateOperator.RangeInclusive,
-                [DiagnosticFieldValue.Int64(2), DiagnosticFieldValue.Int64(3)]),
-            first.Continuation));
-
-        var worker = Assert.Single(second.Groups);
-        Assert.Equal("worker", worker.GroupKey);
-        Assert.Equal("worker-root", Assert.Single(worker.Fields["rootName"]).CanonicalValue);
-        Assert.Null(second.Continuation);
+        Assert.Equal(DiagnosticRecordPlanOperation.GroupedQuery, plan.Operation);
+        Assert.True(
+            fixture.HasNativeScopedGroupedReduction(plan),
+            string.Join(Environment.NewLine, plan.RawPlans));
     }
 
     [Fact]
@@ -1512,6 +1640,67 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
                 "service-summary",
                 10,
                 new("start"))).AsTask());
+
+        Assert.Contains(exception.Errors, error => error.Code == "group_query.union.too_large");
+    }
+
+    [Fact]
+    public async Task Grouped_union_predicates_probe_full_membership_before_page_scoped_overflow()
+    {
+        var fixture = CreateRelationalFixture();
+        var store = new BoundedDiagnosticRecordStore(fixture.OpenStore(TestDefinition));
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        var records = new[]
+        {
+            GroupRecord("valid", occurredAt, "valid", 1, "root", "valid-marker")
+        }.Concat(Enumerable.Range(0, 9)
+            .Select(index => GroupRecord(
+                $"nonselected-{index}",
+                occurredAt.AddMinutes(1).AddSeconds(index),
+                "nonselected-overflow",
+                1,
+                "root",
+                $"nonselected-{index}")))
+            .Concat(Enumerable.Range(0, 9)
+                .Select(index => GroupRecord(
+                    $"selected-{index}",
+                    occurredAt.AddMinutes(2).AddSeconds(index),
+                    "selected-overflow",
+                    1,
+                    "root",
+                    $"selected-{index}")))
+            .ToArray();
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "grouped-predicate-over-bound-union"),
+            records));
+
+        var valid = await store.QueryGroupsAsync(new(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start"),
+            new DiagnosticRecordGroupPredicate.Comparison(
+                "tags",
+                DiagnosticPredicateOperator.Contains,
+                [DiagnosticFieldValue.String("valid-marker")])));
+
+        Assert.Equal("valid", Assert.Single(valid.Groups).GroupKey);
+
+        var exception = await Assert.ThrowsAsync<DiagnosticRecordValidationException>(() =>
+            store.QueryGroupsAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                1,
+                new("start"),
+                new DiagnosticRecordGroupPredicate.Comparison(
+                    "tags",
+                    DiagnosticPredicateOperator.Contains,
+                    [DiagnosticFieldValue.String("selected-8")]))).AsTask());
 
         Assert.Contains(exception.Errors, error => error.Code == "group_query.union.too_large");
     }
@@ -1563,8 +1752,7 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
         Assert.Contains(exception.Errors, error => error.Code == "group_query.union.too_large");
     }
 
-    [Fact]
-    public async Task Grouped_int64_sum_never_truncates_or_wraps_overflow()
+    protected async Task QueryGroupedInt64SumOverflowAsync()
     {
         var fixture = CreateRelationalFixture();
         var store = new BoundedDiagnosticRecordStore(fixture.OpenStore(TestDefinition));
@@ -1579,17 +1767,12 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
                 GroupRecord("one", occurredAt.AddTicks(1), "api", 1, "later", "shared")
             ]));
 
-        var exception = await Assert.ThrowsAnyAsync<Exception>(() =>
-            store.QueryGroupsAsync(new(
-                scope,
-                TestDefinition.Stream,
-                "service-summary",
-                10,
-                new("start"))).AsTask());
-
-        Assert.True(
-            exception is OverflowException or System.Data.Common.DbException,
-            $"Expected exact numeric overflow, received {exception.GetType().FullName}: {exception.Message}");
+        await store.QueryGroupsAsync(new(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            10,
+            new("start")));
     }
 
     private static DiagnosticRecordInput GroupRecord(

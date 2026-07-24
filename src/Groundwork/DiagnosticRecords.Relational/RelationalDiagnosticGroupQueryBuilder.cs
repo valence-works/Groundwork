@@ -443,7 +443,7 @@ internal sealed class RelationalDiagnosticGroupQueryBuilder(
             _ => throw new ArgumentOutOfRangeException(nameof(comparison.Operator))
         };
         return reducer.IsUnion
-            ? $"EXISTS (SELECT 1 FROM {reducer.ValuesCteName} {valueAlias} WHERE {valueAlias}.group_key_order = reduced.group_key_order AND {valueAlias}.value_rank <= {dialect.Parameter("maxUnion")} AND {condition})"
+            ? $"EXISTS (SELECT 1 FROM {reducer.DistinctCteName} {valueAlias} WHERE {valueAlias}.group_key_order = reduced.group_key_order AND {condition})"
             : condition;
     }
 

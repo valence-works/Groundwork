@@ -189,7 +189,10 @@ public static class SqliteDiagnosticRecordStoreFactory
         var result = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
-            result.Add(reader.GetString(3));
+        {
+            result.Add(FormattableString.Invariant(
+                $"id={reader.GetInt64(0)};parent={reader.GetInt64(1)};detail={reader.GetString(3)}"));
+        }
         return result;
     }
 
