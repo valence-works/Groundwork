@@ -24,7 +24,9 @@ public enum QueryComparisonOperator
     LessThanOrEqual,
 
     /// <summary>Case-insensitive complement of <see cref="Contains"/>. A null/absent field matches.</summary>
-    NotContains
+    NotContains,
+    CollectionContains,
+    CollectionContainsAll
 }
 
 /// <summary>
@@ -40,19 +42,26 @@ public sealed record QueryComparison
 
         ArgumentNullException.ThrowIfNull(values);
 
+        var snapshot = values.ToArray();
         switch (@operator)
         {
-            case not QueryComparisonOperator.In when values.Count != 1:
+            case not (QueryComparisonOperator.In or QueryComparisonOperator.CollectionContainsAll) when snapshot.Length != 1:
                 throw new ArgumentException($"{@operator} requires exactly one value.", nameof(values));
+            case QueryComparisonOperator.CollectionContainsAll when snapshot.Length == 0:
+                throw new ArgumentException("CollectionContainsAll requires at least one value.", nameof(values));
             case QueryComparisonOperator.Contains or QueryComparisonOperator.NotContains or QueryComparisonOperator.StartsWith or
                 QueryComparisonOperator.GreaterThan or QueryComparisonOperator.GreaterThanOrEqual or
-                QueryComparisonOperator.LessThan or QueryComparisonOperator.LessThanOrEqual when values[0] is null:
+                QueryComparisonOperator.LessThan or QueryComparisonOperator.LessThanOrEqual or
+                QueryComparisonOperator.CollectionContains or QueryComparisonOperator.CollectionContainsAll
+                when snapshot.Any(value => value is null):
                 throw new ArgumentException($"{@operator} does not accept a null value.", nameof(values));
         }
+        if (@operator == QueryComparisonOperator.CollectionContainsAll)
+            snapshot = snapshot.Distinct(StringComparer.Ordinal).ToArray();
 
         IndexName = indexName;
         Operator = @operator;
-        Values = Array.AsReadOnly(values.ToArray());
+        Values = Array.AsReadOnly(snapshot);
     }
 
     public string IndexName { get; }
@@ -92,6 +101,11 @@ public sealed record QueryComparison
 
     public static QueryComparison LessThanOrEqual(string indexName, string value) =>
         new(indexName, QueryComparisonOperator.LessThanOrEqual, [value ?? throw new ArgumentNullException(nameof(value))]);
+    public static QueryComparison CollectionContains(string indexName, string value) =>
+        new(indexName, QueryComparisonOperator.CollectionContains, [value ?? throw new ArgumentNullException(nameof(value))]);
+    public static QueryComparison CollectionContainsAll(string indexName, IEnumerable<string> values) =>
+        new(indexName, QueryComparisonOperator.CollectionContainsAll,
+            (values ?? throw new ArgumentNullException(nameof(values))).Cast<string?>().ToArray());
 }
 
 /// <summary>
@@ -124,18 +138,25 @@ public sealed class DocumentQueryComparison
         if (string.IsNullOrWhiteSpace(path))
             throw new ArgumentException("A stable predicate path is required.", nameof(path));
         ArgumentNullException.ThrowIfNull(values);
-        if (@operator != QueryComparisonOperator.In && values.Count != 1)
+        var snapshot = values.ToArray();
+        if (@operator is not (QueryComparisonOperator.In or QueryComparisonOperator.CollectionContainsAll) && snapshot.Length != 1)
             throw new ArgumentException($"{@operator} requires exactly one value.", nameof(values));
-        if (@operator is QueryComparisonOperator.Contains or QueryComparisonOperator.NotContains or QueryComparisonOperator.StartsWith or
-            QueryComparisonOperator.GreaterThan or QueryComparisonOperator.GreaterThanOrEqual or
-            QueryComparisonOperator.LessThan or QueryComparisonOperator.LessThanOrEqual && values[0] is null)
+        if (@operator == QueryComparisonOperator.CollectionContainsAll && snapshot.Length == 0)
+            throw new ArgumentException("CollectionContainsAll requires at least one value.", nameof(values));
+        if ((@operator is QueryComparisonOperator.Contains or QueryComparisonOperator.NotContains or QueryComparisonOperator.StartsWith or
+             QueryComparisonOperator.GreaterThan or QueryComparisonOperator.GreaterThanOrEqual or
+             QueryComparisonOperator.LessThan or QueryComparisonOperator.LessThanOrEqual or
+             QueryComparisonOperator.CollectionContains or QueryComparisonOperator.CollectionContainsAll) &&
+            snapshot.Any(value => value is null))
         {
             throw new ArgumentException($"{@operator} does not accept a null value.", nameof(values));
         }
 
         Path = path;
         Operator = @operator;
-        Values = Array.AsReadOnly(values.ToArray());
+        if (@operator == QueryComparisonOperator.CollectionContainsAll)
+            snapshot = snapshot.Distinct(StringComparer.Ordinal).ToArray();
+        Values = Array.AsReadOnly(snapshot);
     }
 
     public string Path { get; }
@@ -153,6 +174,10 @@ public sealed class DocumentQueryComparison
     public static DocumentQueryComparison GreaterThanOrEqual(string path, string value) => new(path, QueryComparisonOperator.GreaterThanOrEqual, [value]);
     public static DocumentQueryComparison LessThan(string path, string value) => new(path, QueryComparisonOperator.LessThan, [value]);
     public static DocumentQueryComparison LessThanOrEqual(string path, string value) => new(path, QueryComparisonOperator.LessThanOrEqual, [value]);
+    public static DocumentQueryComparison CollectionContains(string path, string value) => new(path, QueryComparisonOperator.CollectionContains, [value]);
+    public static DocumentQueryComparison CollectionContainsAll(string path, IEnumerable<string> values) =>
+        new(path, QueryComparisonOperator.CollectionContainsAll,
+            (values ?? throw new ArgumentNullException(nameof(values))).Cast<string?>().ToArray());
 }
 
 /// <summary>An OR clause in the bounded runtime query; clauses compose with AND.</summary>

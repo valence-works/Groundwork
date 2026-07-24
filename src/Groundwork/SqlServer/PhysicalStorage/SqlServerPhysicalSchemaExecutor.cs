@@ -236,18 +236,33 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
     public override void ValidateCollectionElementStorage(ExecutableCollectionElementStorageRoute storage)
     {
         base.ValidateCollectionElementStorage(storage);
-        var key = new[]
+        var ownerKey = new[]
         {
             (storage.DocumentKind.Column.Identifier, EnvelopeType(RelationalEnvelopeColumnKind.DocumentKind)),
             (storage.StorageScope.Column.Identifier, EnvelopeType(RelationalEnvelopeColumnKind.StorageScope)),
             (storage.IdLookupKey.Column.Identifier, EnvelopeType(RelationalEnvelopeColumnKind.IdentityLookup)),
             (storage.Ordinal.Column.Identifier, ProjectedType(CollectionOrdinalDefinition))
         };
-        var bytes = key.Sum(column => BoundedKeyBytes(column.Item2));
+        ValidateCollectionIndexKey("owner", ownerKey);
+        var membershipKey = new[]
+        {
+            (storage.Value.Column.Identifier, ProjectedType(storage.Value.Definition with { IsNullable = false })),
+            (storage.DocumentKind.Column.Identifier, EnvelopeType(RelationalEnvelopeColumnKind.DocumentKind)),
+            (storage.StorageScope.Column.Identifier, EnvelopeType(RelationalEnvelopeColumnKind.StorageScope)),
+            (storage.IdLookupKey.Column.Identifier, EnvelopeType(RelationalEnvelopeColumnKind.IdentityLookup))
+        };
+        ValidateCollectionIndexKey("membership", membershipKey);
+    }
+
+    private static void ValidateCollectionIndexKey(
+        string name,
+        IReadOnlyList<(string Column, string Type)> key)
+    {
+        var bytes = key.Sum(column => BoundedKeyBytes(column.Type));
         if (bytes > 1700)
         {
             throw new InvalidOperationException(
-                $"SQL Server collection owner key ({string.Join(", ", key.Select(column => column.Item1))}) " +
+                $"SQL Server collection {name} key ({string.Join(", ", key.Select(column => column.Column))}) " +
                 $"requires {bytes} bytes, exceeding the 1700-byte nonclustered-key limit.");
         }
     }
@@ -270,7 +285,7 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
         if (normalized.StartsWith("binary(", StringComparison.Ordinal) && normalized.EndsWith(')'))
             return ParseLength(normalized, "binary");
         throw new InvalidOperationException(
-            $"SQL Server collection owner key type '{type}' is not a bounded index-key type.");
+            $"SQL Server collection index key type '{type}' is not a bounded index-key type.");
     }
 
     private static int ParseLength(string type, string prefix)
@@ -278,7 +293,7 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
         var length = type[(prefix.Length + 1)..^1];
         if (!int.TryParse(length, CultureInfo.InvariantCulture, out var parsed) || parsed < 1)
             throw new InvalidOperationException(
-                $"SQL Server collection owner key type '{type}' is not a bounded index-key type.");
+                $"SQL Server collection index key type '{type}' is not a bounded index-key type.");
         return parsed;
     }
 

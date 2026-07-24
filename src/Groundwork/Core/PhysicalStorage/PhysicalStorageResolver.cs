@@ -1016,6 +1016,17 @@ public static class PhysicalStorageResolver
                 valid = false;
                 continue;
             }
+            if (logicalIndex.Fields.Count == 1 &&
+                query.Operations.Count != 0 &&
+                query.Operations.All(operation => operation is
+                    PortableQueryOperation.CollectionContains or
+                    PortableQueryOperation.CollectionContainsAll) &&
+                definition.ProjectedColumns.Any(column =>
+                    column.Path == logicalIndex.Fields[0].Path &&
+                    column.Cardinality == ProjectionCardinality.CollectionElements))
+            {
+                continue;
+            }
             var expectedColumns = ResolveExpectedIndexColumns(
                 unit,
                 logicalIndex,
@@ -1145,6 +1156,13 @@ public static class PhysicalStorageResolver
             .Select(column => (
                 PhysicalObjectKind.PhysicalIndex,
                 ExecutableStorageRouteCompiler.CollectionElementOwnerOrdinalKeyLogicalName(column.LogicalName),
+                unit.Identity,
+                true)));
+        defaultNames.AddRange(definition.ProjectedColumns
+            .Where(column => column.Cardinality == ProjectionCardinality.CollectionElements)
+            .Select(column => (
+                PhysicalObjectKind.PhysicalIndex,
+                ExecutableStorageRouteCompiler.CollectionElementMembershipKeyLogicalName(column.LogicalName),
                 unit.Identity,
                 true)));
         defaultNames.AddRange(definition.ProjectedColumns

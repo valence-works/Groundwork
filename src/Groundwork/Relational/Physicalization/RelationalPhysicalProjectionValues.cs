@@ -20,10 +20,11 @@ public static class RelationalPhysicalProjectionValues
     {
         ArgumentNullException.ThrowIfNull(canonicalJson);
         ArgumentNullException.ThrowIfNull(columns);
-        foreach (var column in columns)
-            CanonicalCollectionElementProjection.RequireScalar(column.Definition);
+        var scalarColumns = columns
+            .Where(column => column.Definition.Cardinality == ProjectionCardinality.Scalar)
+            .ToArray();
         using var document = JsonDocument.Parse(canonicalJson);
-        return columns.ToDictionary(
+        return scalarColumns.ToDictionary(
             column => column.Definition.LogicalName,
             column => Read(document.RootElement, column.Definition),
             StringComparer.Ordinal);

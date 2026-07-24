@@ -27,7 +27,8 @@ public enum CanonicalJsonBackfillSubjectKind
 {
     ProjectedColumn,
     PhysicalIndex,
-    LogicalIndex
+    LogicalIndex,
+    CollectionElements
 }
 
 /// <summary>
@@ -258,6 +259,28 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
     {
     }
 
+    internal BackfillCanonicalJsonOperation(
+        ExecutableStorageRoute route,
+        ExecutableCollectionElementStorageRoute collectionStorage,
+        string dependencyFingerprint)
+        : this(
+            route.StorageUnit,
+            route,
+            ExecutableStorageObjectRole.CollectionElementStorage,
+            CanonicalJsonBackfillSubjectKind.CollectionElements,
+            collectionStorage.Projection.Definition.LogicalName,
+            [collectionStorage.Projection.Definition.Path],
+            [
+                dependencyFingerprint,
+                collectionStorage.Storage.Name.LogicalName,
+                collectionStorage.Storage.Name.Identifier,
+                PhysicalSchemaOperationCanonicalizer.CollectionElementStorage(collectionStorage)
+            ],
+            null,
+            collectionStorage)
+    {
+    }
+
     private BackfillCanonicalJsonOperation(
         StorageUnitIdentity storageUnit,
         ExecutableStorageRoute? route,
@@ -266,7 +289,8 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
         string subjectIdentity,
         IReadOnlyList<string> sourcePaths,
         IReadOnlyList<string?> semanticParts,
-        IndexDeclaration? logicalIndex)
+        IndexDeclaration? logicalIndex,
+        ExecutableCollectionElementStorageRoute? collectionStorage = null)
         : base(
             PhysicalSchemaOperationKind.BackfillCanonicalJson,
             storageUnit,
@@ -289,6 +313,7 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
         SubjectKind = subjectKind;
         SourcePaths = Array.AsReadOnly(sourcePaths.Order(StringComparer.Ordinal).ToArray());
         LogicalIndex = logicalIndex;
+        CollectionStorage = collectionStorage;
     }
 
     public ExecutableStorageRoute? Route { get; }
@@ -301,9 +326,10 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
 
     public IndexDeclaration? LogicalIndex { get; }
 
-    public ExecutableStorageObjectRoute? Storage => Route is null
-        ? null
-        : PhysicalSchemaOperationStorage.Resolve(Route, Target);
+    public ExecutableCollectionElementStorageRoute? CollectionStorage { get; }
+
+    public ExecutableStorageObjectRoute? Storage => CollectionStorage?.Storage ??
+        (Route is null ? null : PhysicalSchemaOperationStorage.Resolve(Route, Target));
 
     MaterializationOperationKind IProviderMaterializationOperation.Kind =>
         MaterializationOperationKind.BackfillCanonicalJson;
@@ -571,7 +597,16 @@ internal static class PhysicalSchemaOperationCanonicalizer
             storage.OwnerOrdinalKey.Name.CollisionScope,
             storage.OwnerOrdinalKey.Name.NamingOwner.Value,
             storage.OwnerOrdinalKey.Target.ToString(),
-            .. storage.OwnerOrdinalKey.Columns.Select(column => Column(column.Column))
+            .. storage.OwnerOrdinalKey.Columns.Select(column => Column(column.Column)),
+            storage.MembershipKey.Name.ObjectKind.ToString(),
+            storage.MembershipKey.Name.FeatureDefaultLogicalName,
+            storage.MembershipKey.Name.LogicalName,
+            storage.MembershipKey.Name.Identifier,
+            storage.MembershipKey.Name.CollisionScope,
+            storage.MembershipKey.Name.NamingOwner.Value,
+            storage.MembershipKey.Target.ToString(),
+            ProjectedColumn(storage.MembershipKey.Value),
+            .. storage.MembershipKey.OwnerColumns.Select(column => Column(column.Column))
         ]);
     public static string PrimaryStorage(ExecutableStorageRoute route) => string.Join(
         '\u001f',

@@ -62,7 +62,8 @@ internal static class MongoDbLinkedDocumentStorage
             primary[route.Envelope.Id.Identifier].AsString);
         var absent = new List<string>();
         foreach (var projection in route.ProjectedColumns.Where(column =>
-                     column.Target == ExecutableStorageObjectRole.LinkedIndexStorage))
+                     column.Target == ExecutableStorageObjectRole.LinkedIndexStorage &&
+                     column.Definition.Cardinality == ProjectionCardinality.Scalar))
         {
             var value = projectedValues[projection];
             if (value.IsPresent)

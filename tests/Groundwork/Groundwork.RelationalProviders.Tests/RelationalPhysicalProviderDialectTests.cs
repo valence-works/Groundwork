@@ -34,7 +34,8 @@ public sealed class RelationalPhysicalProviderDialectTests
                 PhysicalQuerySourceKind.LinkedIndex,
                 PhysicalQuerySourceKind.PrimaryEnvelope,
                 PhysicalQuerySourceKind.PrimaryCanonicalJson,
-                PhysicalQuerySourceKind.PrimaryProjectedColumns
+                PhysicalQuerySourceKind.PrimaryProjectedColumns,
+                PhysicalQuerySourceKind.CollectionElements
             },
             capabilities.HandlerIdentities.Keys.Order());
         Assert.All(capabilities.HandlerIdentities, registration =>
@@ -515,6 +516,46 @@ public sealed class RelationalPhysicalProviderDialectTests
             dialect.ValidateRoute(route);
         else
             Assert.Throws<InvalidOperationException>(() => dialect.ValidateRoute(route));
+    }
+
+    [Theory]
+    [InlineData(256, true)]
+    [InlineData(257, false)]
+    public void Sql_server_enforces_the_1700_byte_collection_membership_key_boundary(
+        int length,
+        bool supported)
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: false,
+            includeCollection: true);
+        var original = Assert.Single(model.Target.Routes.Single().CollectionElementStorages);
+        var value = original.Value with
+        {
+            Definition = original.Value.Definition with { Length = length }
+        };
+        var storage = new ExecutableCollectionElementStorageRoute(
+            original.Storage,
+            original.Projection,
+            original.DocumentKind,
+            original.StorageScope,
+            original.IdComparisonKey,
+            original.IdLookupKey,
+            original.Ordinal,
+            value,
+            original.OwnerOrdinalKey,
+            new ExecutableCollectionElementMembershipKeyRoute(
+                original.MembershipKey.Name,
+                original.MembershipKey.Target,
+                value,
+                original.MembershipKey.OwnerColumns));
+        var dialect = new SqlServerPhysicalSchemaDialect();
+
+        if (supported)
+            dialect.ValidateCollectionElementStorage(storage);
+        else
+            Assert.Throws<InvalidOperationException>(() => dialect.ValidateCollectionElementStorage(storage));
     }
 
     [Theory]

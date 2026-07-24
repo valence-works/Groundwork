@@ -41,6 +41,7 @@ internal static class RelationalPhysicalStorageTestModels
         QueryPagingSupport categoryPaging = QueryPagingSupport.Offset,
         bool includeLatestPerCategory = false,
         bool includeCollection = false,
+        bool includeCollectionMembershipQuery = false,
         string? collectionCollation = "ordinal")
     {
         mutationOptions ??= new RelationalMutationScenarioOptions();
@@ -135,6 +136,30 @@ internal static class RelationalPhysicalStorageTestModels
             });
         var logicalIndexes = new List<LogicalIndexDeclaration> { logicalIndex };
         var boundedQueries = new List<BoundedQueryDeclaration> { boundedQuery };
+        if (includeCollectionMembershipQuery)
+        {
+            if (!includeCollection)
+                throw new ArgumentException("Collection membership queries require the collection projection.", nameof(includeCollectionMembershipQuery));
+            var permissions = new LogicalIndexDeclaration(
+                "by-permissions",
+                [new IndexField("permissions")],
+                IndexValueKind.String,
+                false,
+                MissingValueBehavior.Excluded);
+            logicalIndexes.Add(permissions);
+            boundedQueries.Add(new BoundedQueryDeclaration(
+                "list-by-permissions",
+                permissions.Identity,
+                new HashSet<PortableQueryOperation>
+                {
+                    PortableQueryOperation.CollectionContains,
+                    PortableQueryOperation.CollectionContainsAll
+                },
+                QuerySortSupport.None,
+                QueryPagingSupport.Offset,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true));
+        }
         if (includePriority)
         {
             var compound = new LogicalIndexDeclaration(

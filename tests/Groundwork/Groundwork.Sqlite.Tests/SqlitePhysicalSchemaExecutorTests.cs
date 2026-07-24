@@ -1191,6 +1191,94 @@ public sealed class SqlitePhysicalSchemaExecutorTests
     }
 
     [Fact]
+    public async Task Collection_membership_queries_use_element_rows_without_duplicate_documents()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var model = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            scoped: true,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+        var store = new SqlitePhysicalDocumentStore(
+            connection,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":["a","b","b"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "two", "1", """{"category":"x","permissions":["a"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "three", "1", """{"category":"x","permissions":["b","c"]}"""));
+        var queries = SqlitePhysicalQueryRuntime.Create(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider);
+
+        var contains = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
+        var containsAll = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["b", "a", "b"]))]));
+
+        Assert.Equal(2, contains.TotalCount);
+        Assert.Equal(["one", "three"], contains.Documents.Select(document => document.Id).Order());
+        Assert.Equal("one", Assert.Single(containsAll.Documents).Id);
+    }
+
+    [Fact]
+    public async Task Collection_contains_all_deduplicates_after_typed_conversion()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var model = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true,
+            collectionType: PortablePhysicalType.Int32,
+            collectionLogicalValueKind: IndexValueKind.Number);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+        var store = new SqlitePhysicalDocumentStore(
+            connection,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Global);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":[1,2]}"""));
+        var runtime = SqlitePhysicalQueryRuntime.Create(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider);
+        var query = new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["1", "01"]))]);
+
+        var result = await runtime.QueryAsync(query);
+        var explanation = await Assert.IsAssignableFrom<IPhysicalDocumentQueryExplainer>(runtime).ExplainAsync(query);
+        var page = Assert.Single(explanation.Commands, command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        var membershipIndex = Assert.Single(model.Target.Routes.Single().CollectionElementStorages)
+            .MembershipKey.Name.Identifier;
+
+        Assert.Equal("one", Assert.Single(result.Documents).Id);
+        Assert.Equal(1, page.NativePlan.Split(membershipIndex, StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
     public async Task Collection_element_storage_uses_typed_non_nullable_value_and_exact_owner_ordinal_key()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -1220,6 +1308,12 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             columns.Where(column => column.PrimaryKeyOrder > 0)
                 .OrderBy(column => column.PrimaryKeyOrder)
                 .Select(column => column.Name));
+        Assert.Contains(first.AppliedState!.Snapshot.Routes.Single().ResolvedNames, name =>
+            name.Identifier == storage.MembershipKey.Name.Identifier);
+        Assert.Equal(
+            new[] { storage.MembershipKey.Value.Column.Identifier }
+                .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier)),
+            await IndexColumnsAsync(connection, storage.MembershipKey.Name.Identifier));
     }
 
     [Theory]
@@ -1229,6 +1323,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
     [InlineData("wrong-value-default")]
     [InlineData("wrong-value-collation")]
     [InlineData("wrong-owner-ordinal-key-order")]
+    [InlineData("wrong-membership-index-order")]
     public async Task Collection_element_storage_rejects_schema_drift(string drift)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -1244,7 +1339,12 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection)));
 
-        Assert.Contains(storage.Storage.Name.Identifier, exception.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            drift == "wrong-membership-index-order"
+                ? storage.MembershipKey.Name.Identifier
+                : storage.Storage.Name.Identifier,
+            exception.Message,
+            StringComparison.Ordinal);
     }
 
     private static IReadOnlyList<ExecutableColumnRoute> CollectionOwnerColumns(
@@ -1280,7 +1380,15 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             ? storage.OwnerOrdinalKey.Columns.Reverse().Select(column => column.Column)
             : storage.OwnerOrdinalKey.Columns.Select(column => column.Column);
         definitions.Add($"PRIMARY KEY ({string.Join(", ", key.Select(column => Q(column.Identifier)))})");
-        return $"CREATE TABLE {Q(storage.Storage.Name.Identifier)} ({string.Join(", ", definitions)});";
+        var table = $"CREATE TABLE {Q(storage.Storage.Name.Identifier)} ({string.Join(", ", definitions)});";
+        if (drift != "wrong-membership-index-order")
+            return table;
+        var wrongColumns = storage.MembershipKey.OwnerColumns
+            .Select(column => column.Column.Identifier)
+            .Append(storage.MembershipKey.Value.Column.Identifier);
+        return table +
+            $" CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {Q(storage.Storage.Name.Identifier)} " +
+            $"({string.Join(", ", wrongColumns.Select(Q))});";
     }
 
     private static async Task ExecuteSqlAsync(SqliteConnection connection, string sql)
@@ -1288,6 +1396,22 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<IReadOnlyList<string>> IndexColumnsAsync(
+        SqliteConnection connection,
+        string index)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA index_xinfo({Q(index)});";
+        var columns = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (reader.GetInt64(5) != 0)
+                columns.Add(reader.GetString(2));
+        }
+        return columns;
     }
 
     private static async Task<IReadOnlyList<CollectionTableColumn>> CollectionTableColumnsAsync(
@@ -1331,7 +1455,10 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         QueryPagingSupport categoryPaging = QueryPagingSupport.Offset,
         QueryPagingSupport compoundPaging = QueryPagingSupport.None,
         bool includeLatestPerCategory = false,
-        bool includeCollection = false)
+        bool includeCollection = false,
+        bool includeCollectionMembershipQuery = false,
+        PortablePhysicalType collectionType = PortablePhysicalType.String,
+        IndexValueKind collectionLogicalValueKind = IndexValueKind.String)
     {
         var template = SqliteTestManifests.MetadataManifest();
         var columns = new List<ProjectedColumnDefinition>
@@ -1343,10 +1470,10 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             columns.Add(new ProjectedColumnDefinition(
                 "permissions",
                 "permissions",
-                PortablePhysicalType.String,
-                Length: 128,
+                collectionType,
+                Length: collectionType == PortablePhysicalType.String ? 128 : null,
                 IsNullable: true,
-                Collation: "NOCASE",
+                Collation: collectionType == PortablePhysicalType.String ? "NOCASE" : null,
                 Cardinality: ProjectionCardinality.CollectionElements,
                 MaxCollectionElements: 8));
         }
@@ -1426,6 +1553,28 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             });
         var logicalIndexes = new List<LogicalIndexDeclaration> { logicalIndex };
         var boundedQueries = new List<BoundedQueryDeclaration> { boundedQuery };
+        if (includeCollectionMembershipQuery)
+        {
+            var permissions = new LogicalIndexDeclaration(
+                "by-permissions",
+                [new IndexField("permissions")],
+                collectionLogicalValueKind,
+                false,
+                MissingValueBehavior.Excluded);
+            logicalIndexes.Add(permissions);
+            boundedQueries.Add(new BoundedQueryDeclaration(
+                "list-by-permissions",
+                permissions.Identity,
+                new HashSet<PortableQueryOperation>
+                {
+                    PortableQueryOperation.CollectionContains,
+                    PortableQueryOperation.CollectionContainsAll
+                },
+                QuerySortSupport.None,
+                QueryPagingSupport.Offset,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true));
+        }
         if (includePriority)
         {
             var compound = new LogicalIndexDeclaration(

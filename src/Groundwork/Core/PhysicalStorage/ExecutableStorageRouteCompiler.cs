@@ -210,6 +210,22 @@ public static class ExecutableStorageRouteCompiler
                 diagnostics);
             if (keyName is null)
                 continue;
+            var membershipKeyFeatureDefault =
+                CollectionElementMembershipKeyLogicalName(projection.Definition.LogicalName);
+            expectedNames.Add((PhysicalObjectKind.PhysicalIndex, membershipKeyFeatureDefault));
+            var membershipKeyName = RequireName(
+                providerDefinition,
+                PhysicalObjectKind.PhysicalIndex,
+                membershipKeyFeatureDefault,
+                target,
+                diagnostics);
+            if (membershipKeyName is null)
+                continue;
+            var valueRoute = new ExecutableProjectedColumnRoute(
+                projection.Definition,
+                value!,
+                ExecutableStorageObjectRole.CollectionElementStorage,
+                name);
             collectionElementStorages.Add(new ExecutableCollectionElementStorageRoute(
                 new ExecutableStorageObjectRoute(
                     ExecutableStorageObjectRole.CollectionElementStorage,
@@ -222,11 +238,7 @@ public static class ExecutableStorageRouteCompiler
                 new(ExecutableCollectionElementFieldRole.IdentityComparison, idComparison!),
                 new(ExecutableCollectionElementFieldRole.IdentityLookup, idLookup!),
                 new(ExecutableCollectionElementFieldRole.Ordinal, ordinal!),
-                new ExecutableProjectedColumnRoute(
-                    projection.Definition,
-                    value!,
-                    ExecutableStorageObjectRole.CollectionElementStorage,
-                    name),
+                valueRoute,
                 new ExecutableCollectionElementKeyRoute(
                     keyName,
                     ExecutableStorageObjectRole.CollectionElementStorage,
@@ -235,6 +247,15 @@ public static class ExecutableStorageRouteCompiler
                         new(ExecutableCollectionElementFieldRole.StorageScope, storageScope!),
                         new(ExecutableCollectionElementFieldRole.IdentityLookup, idLookup!),
                         new(ExecutableCollectionElementFieldRole.Ordinal, ordinal!)
+                    ]),
+                new ExecutableCollectionElementMembershipKeyRoute(
+                    membershipKeyName,
+                    ExecutableStorageObjectRole.CollectionElementStorage,
+                    valueRoute,
+                    [
+                        new(ExecutableCollectionElementFieldRole.DocumentKind, documentKind!),
+                        new(ExecutableCollectionElementFieldRole.StorageScope, storageScope!),
+                        new(ExecutableCollectionElementFieldRole.IdentityLookup, idLookup!)
                     ])));
         }
 
@@ -277,7 +298,14 @@ public static class ExecutableStorageRouteCompiler
         }
 
         ValidateUnexpectedNames(providerDefinition, expectedNames, target, diagnostics);
-        ValidateScaleBearingRoutes(providerDefinition, indexes, projections, envelope, target, diagnostics);
+        ValidateScaleBearingRoutes(
+            providerDefinition,
+            indexes,
+            collectionElementStorages,
+            projections,
+            envelope,
+            target,
+            diagnostics);
         if (primaryName is null ||
             envelope is null ||
             (linkedName is null) != (linkedRelationship is null) ||
@@ -327,7 +355,11 @@ public static class ExecutableStorageRouteCompiler
         var maintenance = Enum.GetValues<ExecutableMaintenanceOperation>()
             .Select(operation => new ExecutableMaintenanceRoute(operation, maintenanceTargets))
             .ToArray();
-        var queryPaths = CompileQueryPaths(primaryKey, indexes, providerDefinition.Resolved.ScaleBearingDemand);
+        var queryPaths = CompileQueryPaths(
+            primaryKey,
+            indexes,
+            collectionElementStorages,
+            providerDefinition.Resolved.ScaleBearingDemand);
         var capabilities = ResolveCapabilities(
             definition.Form,
             providerDefinition.Resolved.ScopePolicy,
@@ -367,6 +399,9 @@ public static class ExecutableStorageRouteCompiler
 
     internal static string CollectionElementOwnerOrdinalKeyLogicalName(string projectionLogicalName) =>
         $"{projectionLogicalName}__owner_ordinal_unique";
+
+    internal static string CollectionElementMembershipKeyLogicalName(string projectionLogicalName) =>
+        $"{projectionLogicalName}__value_owner";
 
     private static ExecutableDocumentEnvelopeRoute? CompileEnvelope(
         ProviderPhysicalTableDefinition definition,
@@ -579,6 +614,7 @@ public static class ExecutableStorageRouteCompiler
     private static void ValidateScaleBearingRoutes(
         ProviderPhysicalTableDefinition definition,
         IReadOnlyList<ExecutablePhysicalIndexRoute> indexes,
+        IReadOnlyList<ExecutableCollectionElementStorageRoute> collectionElementStorages,
         IReadOnlyList<ExecutableProjectedColumnRoute> projections,
         ExecutableDocumentEnvelopeRoute? envelope,
         string target,
@@ -596,7 +632,9 @@ public static class ExecutableStorageRouteCompiler
                     $"{target}.scaleBearingDemand"));
             }
 
-            if (indexes.All(index => index.Identity != demand.IndexIdentity))
+            var collectionMembership = collectionElementStorages.Any(storage =>
+                storage.Projection.Definition.Path == demand.Path);
+            if (!collectionMembership && indexes.All(index => index.Identity != demand.IndexIdentity))
             {
                 diagnostics.Add(Error(
                     "GW-ROUTE-006",
@@ -609,6 +647,7 @@ public static class ExecutableStorageRouteCompiler
     private static IReadOnlyList<ExecutableQueryPathRoute> CompileQueryPaths(
         ExecutableKeyRoute primaryKey,
         IReadOnlyList<ExecutablePhysicalIndexRoute> indexes,
+        IReadOnlyList<ExecutableCollectionElementStorageRoute> collectionElementStorages,
         IReadOnlyList<ScaleBearingPathDemand> demand)
     {
         var paths = new List<ExecutableQueryPathRoute>
@@ -635,6 +674,29 @@ public static class ExecutableStorageRouteCompiler
                 index.Target,
                 index.Name,
                 index.Columns,
+                queries,
+                queries.Length != 0);
+        }));
+        paths.AddRange(collectionElementStorages.Select(storage =>
+        {
+            var queries = demand
+                .Where(item => item.Path == storage.Projection.Definition.Path)
+                .Select(item => item.QueryIdentity)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            var columns = new[] { storage.MembershipKey.Value.Column }
+                .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column))
+                .Select((column, order) => new ExecutableIndexColumnRoute(
+                    column,
+                    order,
+                    PhysicalSortDirection.Ascending))
+                .ToArray();
+            return new ExecutableQueryPathRoute(
+                storage.MembershipKey.Name.LogicalName,
+                ExecutableQueryPathKind.PhysicalIndex,
+                ExecutableStorageObjectRole.CollectionElementStorage,
+                storage.MembershipKey.Name,
+                columns,
                 queries,
                 queries.Length != 0);
         }));

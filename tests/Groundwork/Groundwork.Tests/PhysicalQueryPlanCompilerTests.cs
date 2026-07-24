@@ -2162,6 +2162,85 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
+    public void CollectionMembershipPlanBindsTheValueLedMembershipIndex()
+    {
+        var fixture = CreateCollectionFixture();
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements)));
+        var collection = Assert.Single(fixture.Route.CollectionElementStorages);
+
+        Assert.Equal(PhysicalQueryAccessKind.CollectionElementsThenPrimary, plan.AccessKind);
+        Assert.Equal(collection.Storage.Name, plan.LookupObject);
+        Assert.Equal(collection.MembershipKey.Name, plan.IndexName);
+        Assert.Equal(collection.Value.Column.Identifier, Assert.Single(plan.Predicates).Field.Identifier);
+    }
+
+    [Theory]
+    [InlineData(QueryPagingSupport.Cursor, false)]
+    [InlineData(QueryPagingSupport.Offset, true)]
+    public void CollectionMembershipPlanRejectsUncertifiedPagingAndLatestPerKeyShapes(
+        QueryPagingSupport paging,
+        bool latestPerKey)
+    {
+        var fixture = CreateCollectionFixture(pagingSupport: paging, latestPerKey: latestPerKey);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-008" &&
+            diagnostic.Message.Contains("collection", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void CollectionMembershipPlanRejectsLogicalAndPhysicalValueKindDrift()
+    {
+        var fixture = CreateCollectionFixture(
+            logicalValueKind: IndexValueKind.String,
+            physicalType: PortablePhysicalType.Int32);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-009" &&
+            diagnostic.Message.Contains("Int32", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CollectionSelectedMutationsAreRejectedBeforeOwnerAndElementRowsCanDiverge(bool transition)
+    {
+        var action = transition
+            ? BoundedMutationAction.Transition("values", ["a"], "b")
+            : BoundedMutationAction.Delete();
+        var fixture = CreateCollectionFixture(action: action);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-MUTATION-007" &&
+            diagnostic.Message.Contains("owner-and-element", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void CompoundPrefixDirectionAndIdentityTieBreakAreDeterministic()
     {
         var logicalIndex = new LogicalIndexDeclaration(
@@ -3031,6 +3110,70 @@ public sealed class PhysicalQueryPlanCompilerTests
             [logicalIndex],
             [query]);
         return Resolve(storage, null);
+    }
+
+    private static PlanningFixture CreateCollectionFixture(
+        QueryPagingSupport pagingSupport = QueryPagingSupport.Offset,
+        bool latestPerKey = false,
+        IndexValueKind logicalValueKind = IndexValueKind.String,
+        PortablePhysicalType physicalType = PortablePhysicalType.String,
+        BoundedMutationAction? action = null)
+    {
+        var logicalIndex = new LogicalIndexDeclaration(
+            "by-values",
+            [new IndexField("values")],
+            logicalValueKind,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-by-values",
+            logicalIndex.Identity,
+            new HashSet<PortableQueryOperation>
+            {
+                PortableQueryOperation.CollectionContains,
+                PortableQueryOperation.CollectionContainsAll
+            },
+            latestPerKey ? QuerySortSupport.Both : QuerySortSupport.None,
+            pagingSupport,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: latestPerKey
+                ? [new BoundedQuerySortField("values", PhysicalSortDirection.Ascending)]
+                : null,
+            latestPerKeyPath: latestPerKey ? "values" : null);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "collection_entities",
+            [
+                new ProjectedColumnDefinition(
+                    "values",
+                    "values",
+                    physicalType,
+                    Length: physicalType == PortablePhysicalType.String ? 128 : null,
+                    IsNullable: true,
+                    Cardinality: ProjectionCardinality.CollectionElements,
+                    MaxCollectionElements: 16)
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [logicalIndex],
+            [query]);
+        var fixture = Resolve(storage, null);
+        if (action is null)
+            return fixture;
+        var mutationStorage = new StorageUnitPhysicalStorage(
+            storage.ProvisioningMode,
+            storage.Policy,
+            storage.LogicalIndexes,
+            storage.BoundedQueries,
+            storage.NameOverrides,
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "mutate-by-values",
+                    query.Identity,
+                    action)
+            ]);
+        return new PlanningFixture(fixture.Route, mutationStorage);
     }
 
     private static PlanningFixture CreateTypedFixture(

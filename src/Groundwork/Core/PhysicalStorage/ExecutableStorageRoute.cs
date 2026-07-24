@@ -186,7 +186,8 @@ public sealed class ExecutableCollectionElementStorageRoute : IEquatable<Executa
         ExecutableCollectionElementFieldRoute idLookupKey,
         ExecutableCollectionElementFieldRoute ordinal,
         ExecutableProjectedColumnRoute value,
-        ExecutableCollectionElementKeyRoute ownerOrdinalKey)
+        ExecutableCollectionElementKeyRoute ownerOrdinalKey,
+        ExecutableCollectionElementMembershipKeyRoute membershipKey)
     {
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(projection);
@@ -197,6 +198,7 @@ public sealed class ExecutableCollectionElementStorageRoute : IEquatable<Executa
         ArgumentNullException.ThrowIfNull(ordinal);
         ArgumentNullException.ThrowIfNull(value);
         ArgumentNullException.ThrowIfNull(ownerOrdinalKey);
+        ArgumentNullException.ThrowIfNull(membershipKey);
         Storage = storage;
         Projection = projection;
         DocumentKind = documentKind;
@@ -206,6 +208,7 @@ public sealed class ExecutableCollectionElementStorageRoute : IEquatable<Executa
         Ordinal = ordinal;
         Value = value;
         OwnerOrdinalKey = ownerOrdinalKey;
+        MembershipKey = membershipKey;
         if (Storage.Role != ExecutableStorageObjectRole.CollectionElementStorage ||
             Value.Target != Storage.Role ||
             Value.Name != Storage.Name ||
@@ -214,7 +217,9 @@ public sealed class ExecutableCollectionElementStorageRoute : IEquatable<Executa
             IdComparisonKey.Role != ExecutableCollectionElementFieldRole.IdentityComparison ||
             IdLookupKey.Role != ExecutableCollectionElementFieldRole.IdentityLookup ||
             Ordinal.Role != ExecutableCollectionElementFieldRole.Ordinal ||
-            !OwnerOrdinalKey.Columns.SequenceEqual([DocumentKind, StorageScope, IdLookupKey, Ordinal]))
+            !OwnerOrdinalKey.Columns.SequenceEqual([DocumentKind, StorageScope, IdLookupKey, Ordinal]) ||
+            MembershipKey.Value != Value ||
+            !MembershipKey.OwnerColumns.SequenceEqual([DocumentKind, StorageScope, IdLookupKey]))
         {
             throw new ArgumentException("Collection element storage fields and owner key do not match the required roles.");
         }
@@ -229,6 +234,7 @@ public sealed class ExecutableCollectionElementStorageRoute : IEquatable<Executa
     public ExecutableCollectionElementFieldRoute Ordinal { get; }
     public ExecutableProjectedColumnRoute Value { get; }
     public ExecutableCollectionElementKeyRoute OwnerOrdinalKey { get; }
+    public ExecutableCollectionElementMembershipKeyRoute MembershipKey { get; }
 
     public bool Equals(ExecutableCollectionElementStorageRoute? other) =>
         other is not null &&
@@ -240,7 +246,8 @@ public sealed class ExecutableCollectionElementStorageRoute : IEquatable<Executa
         IdLookupKey == other.IdLookupKey &&
         Ordinal == other.Ordinal &&
         Value == other.Value &&
-        OwnerOrdinalKey.Equals(other.OwnerOrdinalKey);
+        OwnerOrdinalKey.Equals(other.OwnerOrdinalKey) &&
+        MembershipKey.Equals(other.MembershipKey);
 
     public override bool Equals(object? obj) => Equals(obj as ExecutableCollectionElementStorageRoute);
 
@@ -256,6 +263,65 @@ public sealed class ExecutableCollectionElementStorageRoute : IEquatable<Executa
         hash.Add(Ordinal);
         hash.Add(Value);
         hash.Add(OwnerOrdinalKey);
+        hash.Add(MembershipKey);
+        return hash.ToHashCode();
+    }
+}
+
+/// <summary>Provider-resolved value-led lookup index for exact collection membership.</summary>
+public sealed class ExecutableCollectionElementMembershipKeyRoute :
+    IEquatable<ExecutableCollectionElementMembershipKeyRoute>
+{
+    public ExecutableCollectionElementMembershipKeyRoute(
+        ProviderPhysicalObjectName name,
+        ExecutableStorageObjectRole target,
+        ExecutableProjectedColumnRoute value,
+        IEnumerable<ExecutableCollectionElementFieldRoute> ownerColumns)
+    {
+        Name = name;
+        Target = target;
+        Value = value ?? throw new ArgumentNullException(nameof(value));
+        OwnerColumns = Array.AsReadOnly(ownerColumns?.ToArray() ??
+            throw new ArgumentNullException(nameof(ownerColumns)));
+        ExecutableCollectionElementFieldRole[] expected =
+        [
+            ExecutableCollectionElementFieldRole.DocumentKind,
+            ExecutableCollectionElementFieldRole.StorageScope,
+            ExecutableCollectionElementFieldRole.IdentityLookup
+        ];
+        if (Name.ObjectKind != PhysicalObjectKind.PhysicalIndex ||
+            Target != ExecutableStorageObjectRole.CollectionElementStorage ||
+            Value.Target != Target ||
+            !OwnerColumns.Select(column => column.Role).SequenceEqual(expected))
+        {
+            throw new ArgumentException(
+                "Collection membership keys require value followed by document kind, storage scope, and identity lookup.");
+        }
+    }
+
+    public ProviderPhysicalObjectName Name { get; }
+    public ExecutableStorageObjectRole Target { get; }
+    public ExecutableProjectedColumnRoute Value { get; }
+    public IReadOnlyList<ExecutableCollectionElementFieldRoute> OwnerColumns { get; }
+
+    public bool Equals(ExecutableCollectionElementMembershipKeyRoute? other) =>
+        other is not null &&
+        Name == other.Name &&
+        Target == other.Target &&
+        Value == other.Value &&
+        OwnerColumns.SequenceEqual(other.OwnerColumns);
+
+    public override bool Equals(object? obj) =>
+        Equals(obj as ExecutableCollectionElementMembershipKeyRoute);
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.Add(Name);
+        hash.Add(Target);
+        hash.Add(Value);
+        foreach (var column in OwnerColumns)
+            hash.Add(column);
         return hash.ToHashCode();
     }
 }

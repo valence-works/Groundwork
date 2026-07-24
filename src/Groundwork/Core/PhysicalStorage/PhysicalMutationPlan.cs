@@ -124,6 +124,15 @@ public static class PhysicalMutationPlanCompiler
                     $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"));
                 continue;
             }
+            if (predicate.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-MUTATION-007",
+                    $"Bounded mutation '{mutation.Identity}' selects documents through collection membership. " +
+                    "Collection-selected transitions and deletes require atomic owner-and-element maintenance.",
+                    $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"));
+                continue;
+            }
 
             var action = CompileAction(mutation, predicate, route, diagnostics);
             if (action is not null)
@@ -160,6 +169,17 @@ public static class PhysicalMutationPlanCompiler
                 "GW-MUTATION-005",
                 $"Transition path '{transition.Path}' must resolve to document content; " +
                 $"field source '{field.Field.Source}' is immutable mutation identity or envelope state.",
+                $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
+            return null;
+        }
+        var projection = route.ProjectedColumns.SingleOrDefault(candidate =>
+            string.Equals(candidate.Definition.Path, transition.Path, StringComparison.Ordinal));
+        if (projection?.Definition.Cardinality == ProjectionCardinality.CollectionElements)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MUTATION-007",
+                $"Transition path '{transition.Path}' targets a collection projection. " +
+                "Collection transitions require an atomic collection-replacement primitive.",
                 $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
             return null;
         }

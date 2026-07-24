@@ -54,6 +54,7 @@ public static class SqlitePhysicalQueryRuntime
     {
         var sources = new[]
         {
+            PhysicalQuerySourceKind.CollectionElements,
             PhysicalQuerySourceKind.LinkedIndex,
             PhysicalQuerySourceKind.PrimaryProjectedColumns,
             PhysicalQuerySourceKind.PrimaryEnvelope,

@@ -478,6 +478,57 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         CancellationToken ct)
     {
         var route = operation.Route ?? throw new InvalidOperationException($"{dialect.ProviderDisplayName} physical backfill requires an executable route.");
+        if (operation.CollectionStorage is { } collection)
+        {
+            await ForEachCanonicalDocumentBatchAsync(connection, transaction, route, ct, async document =>
+            {
+                var identity = route.Envelope.Identity.Project(document.Id);
+                var elements = RelationalPhysicalProjectionValues.ReadCollection(
+                    document.CanonicalJson,
+                    collection.Projection);
+                await using (var delete = Command(
+                                 connection,
+                                 transaction,
+                                 $"DELETE FROM {dialect.Q(collection.Storage.Name.Identifier)} WHERE " +
+                                 $"{dialect.Q(collection.DocumentKind.Column.Identifier)} = @kind AND " +
+                                 $"{dialect.Q(collection.StorageScope.Column.Identifier)} = @scope AND " +
+                                 $"{dialect.Q(collection.IdLookupKey.Column.Identifier)} = @idLookup AND " +
+                                 $"{dialect.Q(collection.IdComparisonKey.Column.Identifier)} = @idComparison;"))
+                {
+                    Add(delete, "kind", route.Discriminator.Value);
+                    Add(delete, "scope", document.Scope);
+                    Add(delete, "idLookup", dialect.ConvertDocumentIdentityLookup(identity.LookupKey));
+                    Add(delete, "idComparison", dialect.ConvertDocumentIdentityComparison(identity.ComparisonKey));
+                    await delete.ExecuteNonQueryAsync(ct);
+                }
+                var columns = new[]
+                {
+                    collection.DocumentKind.Column.Identifier,
+                    collection.StorageScope.Column.Identifier,
+                    collection.IdComparisonKey.Column.Identifier,
+                    collection.IdLookupKey.Column.Identifier,
+                    collection.Ordinal.Column.Identifier,
+                    collection.Value.Column.Identifier
+                };
+                foreach (var element in elements)
+                {
+                    await using var command = Command(
+                        connection,
+                        transaction,
+                        $"INSERT INTO {dialect.Q(collection.Storage.Name.Identifier)} " +
+                        $"({string.Join(", ", columns.Select(dialect.Q))}) VALUES " +
+                        $"({string.Join(", ", Enumerable.Range(0, columns.Length).Select(index => $"@v{index}"))});");
+                    Add(command, "v0", route.Discriminator.Value);
+                    Add(command, "v1", document.Scope);
+                    Add(command, "v2", dialect.ConvertDocumentIdentityComparison(identity.ComparisonKey));
+                    Add(command, "v3", dialect.ConvertDocumentIdentityLookup(identity.LookupKey));
+                    Add(command, "v4", element.Ordinal);
+                    Add(command, "v5", dialect.ConvertStorageValue(element.Value, collection.Value.Definition));
+                    await command.ExecuteNonQueryAsync(ct);
+                }
+            });
+            return;
+        }
         if (operation.Target == ExecutableStorageObjectRole.PrimaryStorage)
         {
             var selected = SelectBackfillColumns(route, operation, ExecutableStorageObjectRole.PrimaryStorage);
@@ -764,7 +815,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 column.ComputedDefinition);
     }
 
-    private Task ValidateCollectionElementAsync(
+    private async Task ValidateCollectionElementAsync(
         DbConnection connection,
         DbTransaction transaction,
         ExecutableCollectionElementStorageRoute storage,
@@ -772,7 +823,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     {
         dialect.ValidateCollectionElementStorage(storage);
         var value = storage.Value.Definition with { IsNullable = false };
-        return ValidateTableAsync(connection, transaction, storage.Storage.Name.Identifier,
+        await ValidateTableAsync(connection, transaction, storage.Storage.Name.Identifier,
         [
             Envelope(storage.DocumentKind.Column.Identifier, RelationalEnvelopeColumnKind.DocumentKind),
             Envelope(storage.StorageScope.Column.Identifier, RelationalEnvelopeColumnKind.StorageScope),
@@ -781,6 +832,23 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             Projected(storage.Ordinal.Column.Identifier, RelationalServerPhysicalSchemaDialect.CollectionOrdinalDefinition),
             Projected(storage.Value.Column.Identifier, value)
         ], storage.OwnerOrdinalKey.Columns.Select(column => column.Column.Identifier).ToArray(), ct);
+        var membership = await dialect.ReadIndexAsync(
+            connection,
+            transaction,
+            storage.Storage.Name.Identifier,
+            storage.MembershipKey.Name.Identifier,
+            ct) ?? throw new InvalidOperationException(
+            $"Collection membership index '{storage.MembershipKey.Name.Identifier}' is missing from '{storage.Storage.Name.Identifier}'.");
+        var expectedColumns = new[] { storage.MembershipKey.Value.Column.Identifier }
+            .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier))
+            .ToArray();
+        if (membership.IsUnique || membership.Filter is not null ||
+            !membership.Columns.Select(column => column.Name).SequenceEqual(expectedColumns) ||
+            membership.Columns.Any(column => column.Direction != PhysicalSortDirection.Ascending))
+        {
+            throw new InvalidOperationException(
+                $"Collection membership index '{storage.MembershipKey.Name.Identifier}' does not match the compiled value-led route.");
+        }
 
         ExpectedColumn Envelope(string name, RelationalEnvelopeColumnKind kind) =>
             new(name, dialect.EnvelopeType(kind), false, null, dialect.EnvelopeCollation(kind));
@@ -1367,7 +1435,7 @@ public abstract class RelationalServerPhysicalSchemaDialect
     public virtual string CreateCollectionElementTableSql(ExecutableCollectionElementStorageRoute storage)
     {
         ValidateCollectionElementStorage(storage);
-        return CreateTableSql(storage.Storage.Name.Identifier,
+        var table = CreateTableSql(storage.Storage.Name.Identifier,
         [
             EnvelopeColumn(storage.DocumentKind.Column.Identifier, RelationalEnvelopeColumnKind.DocumentKind),
             EnvelopeColumn(storage.StorageScope.Column.Identifier, RelationalEnvelopeColumnKind.StorageScope),
@@ -1376,6 +1444,10 @@ public abstract class RelationalServerPhysicalSchemaDialect
             ProjectedColumnSql(storage.Ordinal.Column.Identifier, CollectionOrdinalDefinition),
             ProjectedColumnSql(storage.Value.Column.Identifier, storage.Value.Definition with { IsNullable = false })
         ], storage.OwnerOrdinalKey.Columns.Select(column => column.Column.Identifier).ToArray());
+        var membershipColumns = new[] { storage.MembershipKey.Value.Column.Identifier }
+            .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier));
+        return $"{table}; CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON " +
+               $"{Q(storage.Storage.Name.Identifier)} ({string.Join(", ", membershipColumns.Select(Q))})";
     }
     public abstract string ProjectedColumnSql(string column, ProjectedColumnDefinition definition);
     public abstract string AddColumnSql(string table, string column, ProjectedColumnDefinition definition);

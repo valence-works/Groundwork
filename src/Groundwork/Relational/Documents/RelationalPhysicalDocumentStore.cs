@@ -749,6 +749,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 return request.ExpectedVersion is null ? DocumentStoreWriteResult.NotFound : DocumentStoreWriteResult.ConcurrencyConflict;
             }
             await MaintainLinkedAsync(route, sql, request, scope, projectedValues, transaction, ct);
+            await MaintainCollectionsAsync(route, request, scope, transaction, ct);
         }
         catch (DbException exception) when (dialect.IsUniqueConstraintException(exception))
         {
@@ -798,6 +799,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
 
         if (route.LinkedIndexStorage is not null)
             await DeleteLinkedAsync(route, sql, request.Id, scope, transaction, ct);
+        await DeleteCollectionsAsync(route, request.Id, scope, transaction, ct);
         await using var command = CreatePhysicalCommand(
             transaction.Connection!,
             sql.DeletePrimary(request.ExpectedVersion is not null),
@@ -918,6 +920,70 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 transaction,
                 ct);
             throw;
+        }
+    }
+
+    private async Task MaintainCollectionsAsync(
+        ExecutableStorageRoute route,
+        SaveDocumentRequest request,
+        DocumentScopeSelection scope,
+        DbTransaction transaction,
+        CancellationToken ct)
+    {
+        await DeleteCollectionsAsync(route, request.Id, scope, transaction, ct);
+        var identity = route.Envelope.Identity.Project(request.Id);
+        foreach (var storage in route.CollectionElementStorages)
+        {
+            var columns = new[]
+            {
+                storage.DocumentKind.Column.Identifier,
+                storage.StorageScope.Column.Identifier,
+                storage.IdComparisonKey.Column.Identifier,
+                storage.IdLookupKey.Column.Identifier,
+                storage.Ordinal.Column.Identifier,
+                storage.Value.Column.Identifier
+            };
+            var sql = $"INSERT INTO {dialect.QuoteIdentifier(storage.Storage.Name.Identifier)} " +
+                      $"({string.Join(", ", columns.Select(dialect.QuoteIdentifier))}) VALUES " +
+                      $"({string.Join(", ", Enumerable.Range(0, columns.Length).Select(index => dialect.Parameter($"v{index}")))})";
+            foreach (var element in RelationalPhysicalProjectionValues.ReadCollection(request.ContentJson, storage.Projection))
+            {
+                await using var command = CreatePhysicalCommand(transaction.Connection!, sql, transaction);
+                AddValues(command,
+                [
+                    route.Discriminator.Value,
+                    scope.StorageKey!,
+                    dialect.ConvertDocumentIdentityComparison(identity.ComparisonKey),
+                    dialect.ConvertDocumentIdentityLookup(identity.LookupKey),
+                    element.Ordinal,
+                    element.Value
+                ]);
+                await command.ExecuteNonQueryAsync(ct);
+            }
+        }
+    }
+
+    private async Task DeleteCollectionsAsync(
+        ExecutableStorageRoute route,
+        string id,
+        DocumentScopeSelection scope,
+        DbTransaction transaction,
+        CancellationToken ct)
+    {
+        var identity = route.Envelope.Identity.Project(id);
+        foreach (var storage in route.CollectionElementStorages)
+        {
+            var sql = $"DELETE FROM {dialect.QuoteIdentifier(storage.Storage.Name.Identifier)} WHERE " +
+                      $"{dialect.QuoteIdentifier(storage.DocumentKind.Column.Identifier)} = {dialect.Parameter("kind")} AND " +
+                      $"{dialect.QuoteIdentifier(storage.StorageScope.Column.Identifier)} = {dialect.Parameter("scope")} AND " +
+                      $"{dialect.QuoteIdentifier(storage.IdLookupKey.Column.Identifier)} = {dialect.Parameter("idLookup")} AND " +
+                      $"{dialect.QuoteIdentifier(storage.IdComparisonKey.Column.Identifier)} = {dialect.Parameter("idComparison")}";
+            await using var command = CreatePhysicalCommand(transaction.Connection!, sql, transaction);
+            AddPhysicalParameter(command, "kind", route.Discriminator.Value);
+            AddPhysicalParameter(command, "scope", scope.StorageKey!);
+            AddPhysicalParameter(command, "idLookup", dialect.ConvertDocumentIdentityLookup(identity.LookupKey));
+            AddPhysicalParameter(command, "idComparison", dialect.ConvertDocumentIdentityComparison(identity.ComparisonKey));
+            await command.ExecuteNonQueryAsync(ct);
         }
     }
 

@@ -211,9 +211,24 @@ public sealed class MongoDbPhysicalDocumentStore :
         ValidateScaleBearingOperations(storage);
         ValidateTypedPaths(route, storage);
         var linkedPlans = plans.Plans.Where(plan => plan.AccessKind == PhysicalQueryAccessKind.LinkedIndexThenPrimary).ToArray();
-        var nativePlans = plans.Plans.Where(plan => plan.AccessKind != PhysicalQueryAccessKind.LinkedIndexThenPrimary).ToArray();
+        var collectionPlans = plans.Plans.Where(plan => plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary).ToArray();
+        var nativePlans = plans.Plans.Where(plan => plan.AccessKind is not (
+            PhysicalQueryAccessKind.LinkedIndexThenPrimary or PhysicalQueryAccessKind.CollectionElementsThenPrimary)).ToArray();
         var handlers = new IPhysicalDocumentQueryHandler[]
         {
+            new MongoDbPhysicalQueryHandler(
+                MongoDbPhysicalQueryHandler.CollectionIdentity,
+                PhysicalQuerySourceKind.CollectionElements,
+                database,
+                route,
+                storage,
+                () => ResolveScope(Unit(route.StorageUnit.Value), StorageScopeOperation.Query, allowAcrossScopes: true),
+                collectionPlans.Select(Certification).ToArray(),
+                capabilities.NativeFieldIdentifiers,
+                options,
+                timeProvider,
+                hooks,
+                transactionCapability),
             new MongoDbPhysicalQueryHandler(
                 MongoDbPhysicalQueryHandler.LinkedIdentity,
                 PhysicalQuerySourceKind.LinkedIndex,
@@ -569,6 +584,7 @@ public sealed class MongoDbPhysicalDocumentStore :
             projectedValues,
             session,
             cancellationToken);
+        await MaintainCollectionsAsync(route, request, scope.StorageKey!, session, cancellationToken);
         return DocumentStoreWriteResult.Saved(ReadEnvelope(route, document));
     }
 
@@ -598,6 +614,7 @@ public sealed class MongoDbPhysicalDocumentStore :
             await database.GetCollection<BsonDocument>(route.LinkedIndexStorage.Name.Identifier)
                 .DeleteOneAsync(session, linkedFilter, cancellationToken: cancellationToken);
         }
+        await DeleteCollectionsAsync(route, request.Id, scope.StorageKey!, session, cancellationToken);
         return DocumentStoreWriteResult.Deleted(deleted[route.Envelope.Id.Identifier].AsString);
     }
 
@@ -690,7 +707,9 @@ public sealed class MongoDbPhysicalDocumentStore :
             [UpdatedField] = updated.UtcDateTime
         };
         MongoDbPhysicalDocumentIdentity.WritePrimary(document, route, request.Id);
-        foreach (var projection in route.ProjectedColumns.Where(column => column.Target == ExecutableStorageObjectRole.PrimaryStorage))
+        foreach (var projection in route.ProjectedColumns.Where(column =>
+                     column.Target == ExecutableStorageObjectRole.PrimaryStorage &&
+                     column.Definition.Cardinality == ProjectionCardinality.Scalar))
         {
             var value = projectedValues[projection];
             if (value.IsPresent)
@@ -733,6 +752,55 @@ public sealed class MongoDbPhysicalDocumentStore :
             linked.Document,
             new ReplaceOptions { IsUpsert = true },
             cancellationToken);
+    }
+
+    private async Task MaintainCollectionsAsync(
+        ExecutableStorageRoute route,
+        SaveDocumentRequest request,
+        string scope,
+        IClientSessionHandle session,
+        CancellationToken cancellationToken)
+    {
+        await DeleteCollectionsAsync(route, request.Id, scope, session, cancellationToken);
+        var identity = route.Envelope.Identity.Project(request.Id);
+        foreach (var storage in route.CollectionElementStorages)
+        {
+            var documents = MongoDbPhysicalProjectionValues.ResolveCollection(request.ContentJson, storage.Projection)
+                .Select(element => new BsonDocument
+                {
+                    [storage.DocumentKind.Column.Identifier] = route.Discriminator.Value,
+                    [storage.StorageScope.Column.Identifier] = scope,
+                    [storage.IdComparisonKey.Column.Identifier] = identity.ComparisonKey,
+                    [storage.IdLookupKey.Column.Identifier] = identity.LookupKey,
+                    [storage.Ordinal.Column.Identifier] = element.Ordinal,
+                    [storage.Value.Column.Identifier] = element.Value
+                })
+                .ToArray();
+            if (documents.Length != 0)
+            {
+                await database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+                    .InsertManyAsync(session, documents, cancellationToken: cancellationToken);
+            }
+        }
+    }
+
+    private async Task DeleteCollectionsAsync(
+        ExecutableStorageRoute route,
+        string id,
+        string scope,
+        IClientSessionHandle session,
+        CancellationToken cancellationToken)
+    {
+        var identity = route.Envelope.Identity.Project(id);
+        foreach (var storage in route.CollectionElementStorages)
+        {
+            var filter = Builders<BsonDocument>.Filter.Eq(storage.DocumentKind.Column.Identifier, route.Discriminator.Value) &
+                         Builders<BsonDocument>.Filter.Eq(storage.StorageScope.Column.Identifier, scope) &
+                         Builders<BsonDocument>.Filter.Eq(storage.IdLookupKey.Column.Identifier, identity.LookupKey) &
+                         Builders<BsonDocument>.Filter.Eq(storage.IdComparisonKey.Column.Identifier, identity.ComparisonKey);
+            await database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+                .DeleteManyAsync(session, filter, new DeleteOptions(), cancellationToken);
+        }
     }
 
     internal static DocumentEnvelope ReadEnvelope(ExecutableStorageRoute route, BsonDocument document) =>
@@ -1061,6 +1129,7 @@ internal sealed record MongoDbPhysicalQueryPredicate(
 internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandler
 {
     internal const string LinkedIdentity = "Groundwork.MongoDb.LinkedIndex.v1";
+    internal const string CollectionIdentity = "Groundwork.MongoDb.CollectionElements.v1";
     internal const string NativeIdentity = "Groundwork.MongoDb.NativeDocumentFields.v1";
     internal static IReadOnlySet<PortableQueryOperation> Operations { get; } =
         Enum.GetValues<PortableQueryOperation>().ToFrozenSet();
@@ -1126,6 +1195,8 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
 
     public async Task<DocumentQueryResult> QueryAsync(DocumentQuery query, PhysicalQueryPlan plan, CancellationToken cancellationToken)
     {
+        if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+            return await QueryCollectionMembershipAsync(query, plan, cancellationToken);
         var collection = database.GetCollection<BsonDocument>(plan.LookupObject.Identifier);
         var resolvedScope = scope();
         DocumentQueryContinuationCodec.ValidateScope(plan, resolvedScope);
@@ -1231,8 +1302,195 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         }
     }
 
+    private async Task<DocumentQueryResult> QueryCollectionMembershipAsync(
+        DocumentQuery query,
+        PhysicalQueryPlan plan,
+        CancellationToken cancellationToken)
+    {
+        var elementStorage = route.CollectionElementStorages.Single(storage =>
+            storage.Storage.Name == plan.LookupObject);
+        var resolvedScope = scope();
+        var pipeline = CollectionMembershipPipeline(query, plan, route, resolvedScope);
+
+        await transactionCapability.EnsureSupportedAsync(
+            [route.StorageUnit.Value],
+            "physical collection membership query",
+            cancellationToken);
+        using var session = await database.Client.StartSessionAsync(cancellationToken: cancellationToken);
+        session.StartTransaction(new TransactionOptions(ReadConcern.Snapshot));
+        try
+        {
+            var result = await database.GetCollection<BsonDocument>(elementStorage.Storage.Name.Identifier)
+                .Aggregate<BsonDocument>(session, pipeline.ToArray())
+                .SingleAsync(cancellationToken);
+            await MongoDbPhysicalDocumentStore.AbortTransactionIgnoringFailureAsync(session);
+            var total = result["metadata"].AsBsonArray.Count == 0
+                ? 0
+                : result["metadata"].AsBsonArray[0]["total"].ToInt64();
+            var documents = result["data"].AsBsonArray
+                .Select(item => MongoDbPhysicalDocumentStore.ReadEnvelope(route, item.AsBsonDocument))
+                .ToArray();
+            return new DocumentQueryResult(documents, total);
+        }
+        catch
+        {
+            await MongoDbPhysicalDocumentStore.AbortTransactionIgnoringFailureAsync(session);
+            throw;
+        }
+    }
+
+    internal static IReadOnlyList<BsonDocument> CollectionMembershipPipeline(
+        DocumentQuery query,
+        PhysicalQueryPlan plan,
+        ExecutableStorageRoute route,
+        DocumentScopeSelection resolvedScope)
+    {
+        if (query.Continuation is not null || query.LatestPerKeyPath is not null)
+            throw new NotSupportedException("Collection membership queries do not support cursor or latest-per-key execution.");
+        DocumentQueryContinuationCodec.ValidateScope(plan, resolvedScope);
+        var elementStorage = route.CollectionElementStorages.Single(storage =>
+            storage.Storage.Name == plan.LookupObject);
+        var allValues = query.Clauses
+            .SelectMany(clause => clause.Comparisons)
+            .SelectMany(comparison => comparison.Values)
+            .Select(value => value ?? throw new InvalidOperationException("Collection membership values cannot be null."))
+            .Select(value => MongoDbPhysicalProjectionValues.ParseQueryValue(elementStorage.Value, value))
+            .Distinct()
+            .ToArray();
+        if (allValues.Length == 0)
+            throw new InvalidOperationException("Collection membership execution requires at least one requested value.");
+
+        var match = new BsonDocument
+        {
+            [elementStorage.DocumentKind.Column.Identifier] = route.Discriminator.Value,
+            [elementStorage.Value.Column.Identifier] = new BsonDocument("$in", new BsonArray(allValues))
+        };
+        if (!resolvedScope.AcrossScopes)
+            match[elementStorage.StorageScope.Column.Identifier] = resolvedScope.StorageKey;
+
+        BsonDocument ComparisonExpression(DocumentQueryComparison comparison)
+        {
+            var requested = comparison.Values
+                .Select(value => value ?? throw new InvalidOperationException("Collection membership values cannot be null."))
+                .Select(value => MongoDbPhysicalProjectionValues.ParseQueryValue(elementStorage.Value, value))
+                .Distinct()
+                .ToArray();
+            return comparison.Operator switch
+            {
+                QueryComparisonOperator.CollectionContains => new BsonDocument(
+                    "$in",
+                    new BsonArray { requested.Single(), "$matchedValues" }),
+                QueryComparisonOperator.CollectionContainsAll => new BsonDocument(
+                    "$setIsSubset",
+                    new BsonArray { new BsonArray(requested), "$matchedValues" }),
+                _ => throw new InvalidOperationException(
+                    $"Collection membership plans do not support '{comparison.Operator}'.")
+            };
+        }
+
+        var ownerId = new BsonDocument
+        {
+            ["kind"] = $"${elementStorage.DocumentKind.Column.Identifier}",
+            ["scope"] = $"${elementStorage.StorageScope.Column.Identifier}",
+            ["lookup"] = $"${elementStorage.IdLookupKey.Column.Identifier}",
+            ["comparison"] = $"${elementStorage.IdComparisonKey.Column.Identifier}"
+        };
+        var pipeline = new List<BsonDocument>
+        {
+            new("$match", match),
+            new("$group", new BsonDocument
+            {
+                ["_id"] = ownerId,
+                ["matchedValues"] = new BsonDocument("$addToSet", $"${elementStorage.Value.Column.Identifier}")
+            })
+        };
+        var clauseExpressions = query.Clauses.Select(clause =>
+            clause.Comparisons.Count == 0
+                ? new BsonDocument("$eq", new BsonArray { 1, 0 })
+                : new BsonDocument("$or", new BsonArray(clause.Comparisons.Select(ComparisonExpression)))).ToArray();
+        if (clauseExpressions.Length != 0)
+            pipeline.Add(new BsonDocument("$match", new BsonDocument(
+                "$expr",
+                new BsonDocument("$and", new BsonArray(clauseExpressions)))));
+        pipeline.Add(new BsonDocument("$lookup", new BsonDocument
+        {
+            ["from"] = route.PrimaryStorage.Name.Identifier,
+            ["let"] = new BsonDocument
+            {
+                ["kind"] = "$_id.kind",
+                ["scope"] = "$_id.scope",
+                ["lookup"] = "$_id.lookup",
+                ["comparison"] = "$_id.comparison"
+            },
+            ["pipeline"] = new BsonArray
+            {
+                new BsonDocument("$match", new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
+                {
+                    new BsonDocument("$eq", new BsonArray { $"${route.Discriminator.Column.Identifier}", "$$kind" }),
+                    new BsonDocument("$eq", new BsonArray { $"${route.ScopeKey.Column.Identifier}", "$$scope" }),
+                    new BsonDocument("$eq", new BsonArray { $"${route.Envelope.Identity.LookupKey.Identifier}", "$$lookup" }),
+                    new BsonDocument("$eq", new BsonArray { $"${route.Envelope.Identity.ComparisonKey.Identifier}", "$$comparison" })
+                })))
+            },
+            ["as"] = "document"
+        }));
+        pipeline.Add(new BsonDocument("$unwind", "$document"));
+        pipeline.Add(new BsonDocument("$replaceWith", "$document"));
+
+        var dataPipeline = new BsonArray();
+        var order = DocumentQueryOrderResolver.Resolve(query, plan);
+        if (order.Count != 0)
+        {
+            dataPipeline.Add(new BsonDocument("$sort", new BsonDocument(order.Select(item =>
+                new BsonElement(item.Field.Identifier, item.Direction == PhysicalSortDirection.Ascending ? 1 : -1)))));
+        }
+        if (query.Skip is > 0)
+            dataPipeline.Add(new BsonDocument("$skip", query.Skip.Value));
+
+        switch (query.ResultOperation)
+        {
+            case BoundedQueryResultOperation.Documents:
+                if (query.Take is { } take)
+                    dataPipeline.Add(new BsonDocument("$limit", take));
+                pipeline.Add(new BsonDocument("$facet", new BsonDocument
+                {
+                    ["metadata"] = new BsonArray { new BsonDocument("$count", "total") },
+                    ["data"] = dataPipeline
+                }));
+                break;
+            case BoundedQueryResultOperation.Count:
+                pipeline.Add(new BsonDocument("$count", "total"));
+                break;
+            case BoundedQueryResultOperation.Any:
+                pipeline.Add(new BsonDocument("$limit", 1));
+                break;
+            case BoundedQueryResultOperation.First:
+                foreach (var stage in dataPipeline)
+                    pipeline.Add(stage.AsBsonDocument);
+                pipeline.Add(new BsonDocument("$limit", 1));
+                break;
+            default:
+                throw new NotSupportedException(
+                    $"Collection membership execution does not support result operation '{query.ResultOperation}'.");
+        }
+        return pipeline;
+    }
+
     public async Task<long> CountAsync(DocumentQuery query, PhysicalQueryPlan plan, CancellationToken cancellationToken)
     {
+        if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+        {
+            await transactionCapability.EnsureSupportedAsync(
+                [route.StorageUnit.Value],
+                "physical collection membership count",
+                cancellationToken);
+            var elementStorage = route.CollectionElementStorages.Single(storage =>
+                storage.Storage.Name == plan.LookupObject);
+            var result = await database.GetCollection<BsonDocument>(elementStorage.Storage.Name.Identifier)
+                .Aggregate<BsonDocument>(CollectionMembershipPipeline(query, plan, route, scope()).ToArray())
+                .SingleOrDefaultAsync(cancellationToken);
+            return result?.GetValue("total", 0).ToInt64() ?? 0;
+        }
         var collection = database.GetCollection<BsonDocument>(plan.LookupObject.Identifier);
         var filter = BuildFilter(query, plan, scope(), storage, route);
         await transactionCapability.EnsureSupportedAsync(
@@ -1252,6 +1510,21 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
 
     public async Task<DocumentEnvelope?> FirstOrDefaultAsync(DocumentQuery query, PhysicalQueryPlan plan, CancellationToken cancellationToken)
     {
+        if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+        {
+            await transactionCapability.EnsureSupportedAsync(
+                [route.StorageUnit.Value],
+                "physical collection membership first",
+                cancellationToken);
+            var elementStorage = route.CollectionElementStorages.Single(storage =>
+                storage.Storage.Name == plan.LookupObject);
+            var document = await database.GetCollection<BsonDocument>(elementStorage.Storage.Name.Identifier)
+                .Aggregate<BsonDocument>(CollectionMembershipPipeline(query, plan, route, scope()).ToArray())
+                .SingleOrDefaultAsync(cancellationToken);
+            return document is null
+                ? null
+                : MongoDbPhysicalDocumentStore.ReadEnvelope(route, document);
+        }
         var result = await QueryAsync(new DocumentQuery(
             query.DocumentKind, query.QueryIdentity, query.Clauses, query.Order, query.Skip, 1,
             query.Continuation, query.LatestPerKeyPath), plan, cancellationToken);
@@ -1260,6 +1533,18 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
 
     public async Task<bool> AnyAsync(DocumentQuery query, PhysicalQueryPlan plan, CancellationToken cancellationToken)
     {
+        if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+        {
+            await transactionCapability.EnsureSupportedAsync(
+                [route.StorageUnit.Value],
+                "physical collection membership existence",
+                cancellationToken);
+            var elementStorage = route.CollectionElementStorages.Single(storage =>
+                storage.Storage.Name == plan.LookupObject);
+            return await database.GetCollection<BsonDocument>(elementStorage.Storage.Name.Identifier)
+                .Aggregate<BsonDocument>(CollectionMembershipPipeline(query, plan, route, scope()).ToArray())
+                .AnyAsync(cancellationToken);
+        }
         var filter = BuildFilter(query, plan, scope(), storage, route);
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],

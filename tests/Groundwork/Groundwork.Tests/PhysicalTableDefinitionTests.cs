@@ -125,6 +125,10 @@ public sealed class PhysicalTableDefinitionTests
             ["document_kind", "storage_scope", "id_lookup_key", "ordinal"],
             elementStorage.OwnerOrdinalKey.Columns.Select(column => column.Column.LogicalName));
         Assert.Equal("redirect_uri__owner_ordinal_unique", elementStorage.OwnerOrdinalKey.Name.Identifier);
+        Assert.Equal("redirect_uri__value_owner", elementStorage.MembershipKey.Name.Identifier);
+        Assert.Equal(
+            ["document_kind", "storage_scope", "id_lookup_key"],
+            elementStorage.MembershipKey.OwnerColumns.Select(column => column.Column.LogicalName));
         Assert.Throws<ArgumentException>(() => new ExecutableCollectionElementKeyRoute(
             elementStorage.OwnerOrdinalKey.Name,
             elementStorage.OwnerOrdinalKey.Target,
@@ -138,7 +142,8 @@ public sealed class PhysicalTableDefinitionTests
             elementStorage.IdLookupKey,
             elementStorage.Ordinal,
             elementStorage.Value,
-            elementStorage.OwnerOrdinalKey));
+            elementStorage.OwnerOrdinalKey,
+            elementStorage.MembershipKey));
         var canonical = ExecutableStorageRouteSerializer.Serialize(route);
         const string documentKind =
             "\"documentKind\":{\"logical\":\"document_kind\",\"identifier\":\"redirect_uri__document_kind\"}";
@@ -148,10 +153,9 @@ public sealed class PhysicalTableDefinitionTests
                 documentKind,
                 "\"documentKind\":{\"logical\":\"storage_scope\",\"identifier\":\"redirect_uri__document_kind\"}",
                 StringComparison.Ordinal)));
-        Assert.Throws<NotSupportedException>(() =>
-            RelationalPhysicalProjectionValues.Read(
-                "{\"redirectUris\":[\"https://one.example/callback\"]}",
-                restored.ProjectedColumns));
+        Assert.Empty(RelationalPhysicalProjectionValues.Read(
+            "{\"redirectUris\":[\"https://one.example/callback\"]}",
+            restored.ProjectedColumns));
 
         var values = RelationalPhysicalProjectionValues.ReadCollection(
             "{\"redirectUris\":[\"https://one.example/callback\",\"https://two.example/callback\",\"https://one.example/callback\"]}",

@@ -35,6 +35,54 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     private readonly MsSqlContainer container = fixture.Container;
 
     [Fact]
+    public async Task Collection_membership_and_contains_all_execute_from_typed_element_storage()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        var connectionString = container.GetConnectionString();
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new SqlServerPhysicalSchemaExecutor(connectionString));
+        var store = new SqlServerPhysicalDocumentStore(
+            connectionString,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Global);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":["a","b","b"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "two", "1", """{"category":"x","permissions":["a"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "three", "1", """{"category":"x","permissions":["b","c"]}"""));
+        var queries = SqlServerPhysicalQueryRuntime.Create(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider);
+
+        var contains = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
+        var containsAll = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["b", "a", "b"]))]));
+
+        Assert.Equal(2, contains.TotalCount);
+        Assert.Equal(["one", "three"], contains.Documents.Select(document => document.Id).Order());
+        Assert.Equal("one", Assert.Single(containsAll.Documents).Id);
+    }
+
+    [Fact]
     public async Task Deadlock_victim_unit_of_work_save_returns_a_portable_concurrency_conflict()
     {
         var model = RelationalPhysicalStorageTestModels.Create(

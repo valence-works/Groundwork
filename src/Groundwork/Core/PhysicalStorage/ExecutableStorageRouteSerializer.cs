@@ -60,7 +60,19 @@ public static class ExecutableStorageRouteSerializer
                     ReadName(element.GetProperty("ownerOrdinalKey").GetProperty("name")),
                     ReadEnum<ExecutableStorageObjectRole>(element.GetProperty("ownerOrdinalKey"), "target"),
                     element.GetProperty("ownerOrdinalKey").GetProperty("columns").EnumerateArray().Select((column, index) => new ExecutableCollectionElementFieldRoute(
-                        index switch { 0 => ExecutableCollectionElementFieldRole.DocumentKind, 1 => ExecutableCollectionElementFieldRole.StorageScope, 2 => ExecutableCollectionElementFieldRole.IdentityLookup, _ => ExecutableCollectionElementFieldRole.Ordinal }, ReadColumn(column))))))
+                        index switch { 0 => ExecutableCollectionElementFieldRole.DocumentKind, 1 => ExecutableCollectionElementFieldRole.StorageScope, 2 => ExecutableCollectionElementFieldRole.IdentityLookup, _ => ExecutableCollectionElementFieldRole.Ordinal }, ReadColumn(column)))),
+                new ExecutableCollectionElementMembershipKeyRoute(
+                    ReadName(element.GetProperty("membershipKey").GetProperty("name")),
+                    ReadEnum<ExecutableStorageObjectRole>(element.GetProperty("membershipKey"), "target"),
+                    new ExecutableProjectedColumnRoute(
+                        projectedColumns.Single(projection => projection.Definition.LogicalName == element.GetProperty("projection").GetString()).Definition,
+                        ReadColumn(element.GetProperty("value")),
+                        ExecutableStorageObjectRole.CollectionElementStorage,
+                        ReadStorageObject(element.GetProperty("storage")).Name),
+                    element.GetProperty("membershipKey").GetProperty("ownerColumns").EnumerateArray()
+                        .Select((column, index) => new ExecutableCollectionElementFieldRoute(
+                            index switch { 0 => ExecutableCollectionElementFieldRole.DocumentKind, 1 => ExecutableCollectionElementFieldRole.StorageScope, _ => ExecutableCollectionElementFieldRole.IdentityLookup },
+                            ReadColumn(column))))))
             .ToArray();
         var route = new ExecutableStorageRoute(
             new StorageUnitIdentity(root.GetProperty("storageUnit").GetString()!),
@@ -269,6 +281,16 @@ public static class ExecutableStorageRouteSerializer
                     writer.WritePropertyName("columns");
                     writer.WriteStartArray();
                     foreach (var column in collection.OwnerOrdinalKey.Columns)
+                        WriteColumnValue(writer, column.Column);
+                    writer.WriteEndArray();
+                    writer.WriteEndObject();
+                    writer.WritePropertyName("membershipKey");
+                    writer.WriteStartObject();
+                    WriteName(writer, "name", collection.MembershipKey.Name);
+                    writer.WriteString("target", collection.MembershipKey.Target.ToString());
+                    writer.WritePropertyName("ownerColumns");
+                    writer.WriteStartArray();
+                    foreach (var column in collection.MembershipKey.OwnerColumns)
                         WriteColumnValue(writer, column.Column);
                     writer.WriteEndArray();
                     writer.WriteEndObject();

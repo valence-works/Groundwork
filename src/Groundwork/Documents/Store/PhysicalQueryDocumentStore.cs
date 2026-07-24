@@ -89,8 +89,12 @@ public sealed class PhysicalQueryHandlerCertification : IEquatable<PhysicalQuery
         }
 
         return PlanFields(plan).All(field =>
-            field.Target == Target &&
-            field.ObjectName == LookupObject &&
+            (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary
+                ? field.Target is ExecutableStorageObjectRole.PrimaryStorage or ExecutableStorageObjectRole.CollectionElementStorage &&
+                  field.ObjectName == (field.Target == ExecutableStorageObjectRole.PrimaryStorage
+                      ? PrimaryObject
+                      : LookupObject)
+                : field.Target == Target && field.ObjectName == LookupObject) &&
             FieldIdentifiers.TryGetValue(field.Path, out var identifier) &&
             identifier == field.Identifier);
     }
@@ -426,6 +430,8 @@ internal static class DocumentQueryOperations
         QueryComparisonOperator.In => PortableQueryOperation.In,
         QueryComparisonOperator.Contains => PortableQueryOperation.Contains,
         QueryComparisonOperator.NotContains => PortableQueryOperation.NotContains,
+        QueryComparisonOperator.CollectionContains => PortableQueryOperation.CollectionContains,
+        QueryComparisonOperator.CollectionContainsAll => PortableQueryOperation.CollectionContainsAll,
         QueryComparisonOperator.NotEqual => PortableQueryOperation.NotEqual,
         QueryComparisonOperator.StartsWith => PortableQueryOperation.StartsWith,
         QueryComparisonOperator.GreaterThan => PortableQueryOperation.GreaterThan,

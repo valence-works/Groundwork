@@ -24,10 +24,11 @@ internal static class MongoDbPhysicalProjectionValues
         IReadOnlyList<ExecutableProjectedColumnRoute> projections)
     {
         ArgumentNullException.ThrowIfNull(canonicalJson);
-        foreach (var projection in projections)
-            CanonicalCollectionElementProjection.RequireScalar(projection.Definition);
+        var scalarProjections = projections
+            .Where(projection => projection.Definition.Cardinality == ProjectionCardinality.Scalar)
+            .ToArray();
         using var document = JsonDocument.Parse(canonicalJson);
-        return projections.ToDictionary(
+        return scalarProjections.ToDictionary(
             projection => projection,
             projection => Resolve(document.RootElement, projection));
     }

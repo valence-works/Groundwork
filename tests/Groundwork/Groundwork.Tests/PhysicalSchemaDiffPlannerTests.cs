@@ -565,7 +565,15 @@ public sealed class PhysicalSchemaDiffPlannerTests
         Assert.Equal("category__elements", create.Storage.Storage.Name.Identifier);
         Assert.Empty(plan.Operations.OfType<AddProjectedColumnOperation>());
         Assert.Empty(plan.Operations.OfType<FinalizeProjectedColumnOperation>());
-        Assert.Empty(plan.Operations.OfType<BackfillCanonicalJsonOperation>());
+        var backfill = Assert.Single(plan.Operations.OfType<BackfillCanonicalJsonOperation>());
+        Assert.Equal(CanonicalJsonBackfillSubjectKind.CollectionElements, backfill.SubjectKind);
+        Assert.Same(create.Storage, backfill.CollectionStorage);
+        Assert.Equal(create.Storage.Storage, backfill.Storage);
+        Assert.Equal(["category"], backfill.SourcePaths);
+        var orderedOperations = plan.Operations.ToList();
+        Assert.True(
+            orderedOperations.IndexOf(create) < orderedOperations.IndexOf(backfill),
+            "Collection storage must exist before its canonical backfill runs.");
         Assert.Equal(ExecutableStorageObjectRole.CollectionElementStorage, create.Storage.Value.Target);
         Assert.Equal("ordinal", create.Storage.Ordinal.Column.LogicalName);
         Assert.Equal("value", create.Storage.Value.Column.LogicalName);

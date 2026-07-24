@@ -112,8 +112,15 @@ public static class PhysicalSchemaDiffPlanner
             if (route.LinkedIndexStorage is not null)
                 operations.Add(new CreateLinkedStorageOperation(route));
 
-            operations.AddRange(route.CollectionElementStorages.Select(storage =>
-                new CreateCollectionElementStorageOperation(route, storage)));
+            foreach (var storage in route.CollectionElementStorages)
+            {
+                var createCollection = new CreateCollectionElementStorageOperation(route, storage);
+                operations.Add(createCollection);
+                operations.Add(new BackfillCanonicalJsonOperation(
+                    route,
+                    storage,
+                    createCollection.Fingerprint));
+            }
 
             foreach (var column in route.ProjectedColumns.Where(column =>
                          column.Definition.Cardinality == ProjectionCardinality.Scalar))
@@ -315,7 +322,8 @@ public static class PhysicalSchemaDiffPlanner
             ColumnName("CollectionIdLookupKey", storage.IdLookupKey.Column, ExecutableStorageObjectRole.CollectionElementStorage),
             ColumnName("CollectionOrdinal", storage.Ordinal.Column, ExecutableStorageObjectRole.CollectionElementStorage),
             ColumnName("CollectionValue", storage.Value.Column, ExecutableStorageObjectRole.CollectionElementStorage),
-            ObjectName(storage.OwnerOrdinalKey.Name, ExecutableStorageObjectRole.CollectionElementStorage)
+            ObjectName(storage.OwnerOrdinalKey.Name, ExecutableStorageObjectRole.CollectionElementStorage),
+            ObjectName(storage.MembershipKey.Name, ExecutableStorageObjectRole.CollectionElementStorage)
         }));
         names.AddRange(route.Indexes.Select(index =>
             new PhysicalSchemaResolvedName("PhysicalIndex", index.Identity, index.Name.Identifier, index.Target)));
@@ -351,7 +359,10 @@ public static class PhysicalSchemaDiffPlanner
         PhysicalSchemaOperationKind.BackfillCanonicalJson => operation is BackfillCanonicalJsonOperation
         {
             SubjectKind: CanonicalJsonBackfillSubjectKind.ProjectedColumn
-        } ? 3 : 6,
+        } ? 3 : operation is BackfillCanonicalJsonOperation
+        {
+            SubjectKind: CanonicalJsonBackfillSubjectKind.CollectionElements
+        } ? 2 : 6,
         PhysicalSchemaOperationKind.FinalizeProjectedColumn => 4,
         PhysicalSchemaOperationKind.CreatePhysicalIndex => 5,
         PhysicalSchemaOperationKind.ApplyProviderDefinition => 7,

@@ -19,7 +19,8 @@ public enum PhysicalQuerySourceKind
     PrimaryEnvelope,
     PrimaryCanonicalJson,
     PrimaryProjectedColumns,
-    NativeDocumentFields
+    NativeDocumentFields,
+    CollectionElements
 }
 
 /// <summary>The selected provider-neutral access strategy exposed through plan diagnostics.</summary>
@@ -29,7 +30,8 @@ public enum PhysicalQueryAccessKind
     PrimaryEnvelope,
     PrimaryCanonicalJson,
     PrimaryProjectedColumns,
-    NativeDocumentFields
+    NativeDocumentFields,
+    CollectionElementsThenPrimary
 }
 
 public enum PhysicalQueryFieldSource
@@ -38,7 +40,8 @@ public enum PhysicalQueryFieldSource
     LinkedRelationship,
     CanonicalJsonPath,
     ProjectedColumn,
-    NativeDocumentField
+    NativeDocumentField,
+    CollectionElementValue
 }
 
 /// <summary>
