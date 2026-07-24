@@ -233,6 +233,338 @@ public static class BenchmarkRunGroupVerifier
     }
 }
 
+/// <summary>
+/// Verifies that one scheduled shard contains complete, sealed worker evidence.
+/// The aggregate verifier owns cross-shard matrix coverage; this verifier owns the
+/// evidence inside a single run group before any aggregate code reads its claims.
+/// </summary>
+public static class BenchmarkScheduledGroupVerifier
+{
+    public const string ContractVersion = "groundwork.physical-storage.scheduled-group-verification/v1";
+
+    public static async Task<BenchmarkScheduledGroupVerificationSummary> VerifyAsync(
+        string runGroupRoot,
+        string expectedGitCommit,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runGroupRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedGitCommit);
+
+        var root = Path.GetFullPath(runGroupRoot);
+        var runGroup = await BenchmarkRunGroupVerifier.VerifyAsync(root, cancellationToken);
+        VerifyGroupProvenance(runGroup, expectedGitCommit);
+
+        var workers = new List<ScheduledWorker>();
+        foreach (var entry in runGroup.Runs)
+        {
+            var invocation = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkWorkerInvocation>(
+                BenchmarkRunGroupVerifier.Resolve(root, entry.Request),
+                cancellationToken);
+            var tuple = BenchmarkRunTuple.From(invocation);
+            VerifyInvocationProvenance(invocation, runGroup, expectedGitCommit);
+            VerifyScheduledConfiguration(invocation.Request.Configuration, tuple, invocation.Request.DataShape, "worker request");
+
+            var workerRoot = Path.Combine(root, "runs", entry.Ordinal.ToString("D6"));
+            var workerManifest = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunManifest>(
+                Path.Combine(workerRoot, "manifest.json"),
+                cancellationToken);
+            var configuration = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunConfiguration>(
+                Path.Combine(workerRoot, "metadata", "configuration.json"),
+                cancellationToken);
+            var machine = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkMachineMetadata>(
+                Path.Combine(workerRoot, "metadata", "machine.json"),
+                cancellationToken);
+
+            VerifyWorkerProvenance(
+                entry,
+                invocation,
+                workerManifest,
+                configuration,
+                machine,
+                runGroup,
+                expectedGitCommit,
+                tuple);
+            VerifyArtifactIntegrityLedger(workerRoot, workerManifest);
+
+            if (entry.Role == BenchmarkExecutionRole.Measured)
+            {
+                // ReadBaselineAsync is the canonical sealed-artifact verifier. Besides
+                // validating the per-run integrity ledger, it reconstructs and verifies
+                // every consumer-evidence claim from the report, configuration, machine,
+                // provider metadata, raw measurements, and native-plan artifacts.
+                var baseline = await BenchmarkArtifactWriter.ReadBaselineAsync(workerRoot, cancellationToken);
+                await VerifyMeasuredWorker(
+                    baseline,
+                    workerRoot,
+                    tuple,
+                    entry.IndependentRun,
+                    expectedGitCommit,
+                    cancellationToken);
+            }
+
+            workers.Add(new ScheduledWorker(tuple, entry.Role, entry.IndependentRun));
+        }
+
+        VerifyWorkerRoles(workers);
+        var measuredWorkers = workers.Count(worker => worker.Role == BenchmarkExecutionRole.Measured);
+        var warmupWorkers = workers.Count - measuredWorkers;
+        return new BenchmarkScheduledGroupVerificationSummary(
+            ContractVersion,
+            true,
+            runGroup.RunGroupId,
+            runGroup.GitCommit,
+            runGroup.GitTreeDigest,
+            workers.Count,
+            warmupWorkers,
+            measuredWorkers,
+            workers.Select(worker => worker.Tuple).Distinct().Count());
+    }
+
+    private static void VerifyGroupProvenance(BenchmarkRunGroupManifest runGroup, string expectedGitCommit)
+    {
+        if (!string.Equals(runGroup.GitCommit, expectedGitCommit, StringComparison.Ordinal) || runGroup.GitDirty)
+        {
+            throw new InvalidOperationException(
+                "Scheduled run-group evidence must be produced by the expected clean Git commit.");
+        }
+        if (!IsSha256(runGroup.GitTreeDigest))
+            throw new InvalidOperationException("Scheduled run-group evidence has an invalid Git tree digest.");
+    }
+
+    private static void VerifyInvocationProvenance(
+        BenchmarkWorkerInvocation invocation,
+        BenchmarkRunGroupManifest runGroup,
+        string expectedGitCommit)
+    {
+        if (!string.Equals(invocation.ExpectedGitCommit, expectedGitCommit, StringComparison.Ordinal) ||
+            !string.Equals(invocation.ExpectedGitTreeDigest, runGroup.GitTreeDigest, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Scheduled worker invocation Git provenance does not match its run group.");
+        }
+    }
+
+    private static void VerifyWorkerProvenance(
+        BenchmarkRunGroupEntry entry,
+        BenchmarkWorkerInvocation invocation,
+        BenchmarkRunManifest workerManifest,
+        BenchmarkRunConfiguration configuration,
+        BenchmarkMachineMetadata machine,
+        BenchmarkRunGroupManifest runGroup,
+        string expectedGitCommit,
+        BenchmarkRunTuple tuple)
+    {
+        if (workerManifest.Status != "completed" ||
+            !string.Equals(workerManifest.GitCommit, expectedGitCommit, StringComparison.Ordinal) ||
+            workerManifest.GitDirty ||
+            string.IsNullOrWhiteSpace(workerManifest.ArtifactIntegrity))
+        {
+            throw new InvalidOperationException(
+                "Scheduled worker manifest must be completed, clean, exact-head, and sealed by an artifact-integrity ledger.");
+        }
+        if (!string.Equals(machine.GitCommit, expectedGitCommit, StringComparison.Ordinal) ||
+            machine.GitDirty ||
+            !string.Equals(machine.GitTreeDigest, runGroup.GitTreeDigest, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Scheduled worker machine provenance does not match the clean run-group Git identity.");
+        }
+        if (workerManifest.Mode != BenchmarkRunMode.Scheduled ||
+            configuration.Mode != BenchmarkRunMode.Scheduled ||
+            workerManifest.Mode != configuration.Mode ||
+            invocation.Role != entry.Role ||
+            invocation.IndependentRun != entry.IndependentRun)
+        {
+            throw new InvalidOperationException("Scheduled worker role or mode provenance is inconsistent.");
+        }
+        if ((entry.Role == BenchmarkExecutionRole.Measured) != (workerManifest.ConsumerEvidence is not null))
+        {
+            throw new InvalidOperationException("Scheduled worker manifest consumer-evidence role binding is inconsistent.");
+        }
+        VerifyScheduledConfiguration(configuration, tuple, configuration.DataShape, "persisted worker configuration");
+    }
+
+    private static async Task VerifyMeasuredWorker(
+        BenchmarkBaseline baseline,
+        string workerRoot,
+        BenchmarkRunTuple tuple,
+        int independentRun,
+        string expectedGitCommit,
+        CancellationToken cancellationToken)
+    {
+        if (!baseline.HasProvenance || baseline.Manifest is null || baseline.Configuration is null ||
+            baseline.Machine is null || baseline.Providers is null || baseline.ConsumerEvidence is null)
+        {
+            throw new InvalidOperationException("Measured scheduled worker has incomplete sealed provenance.");
+        }
+
+        var report = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunReport>(
+            Path.Combine(workerRoot, "reports", "summary.json"),
+            cancellationToken);
+        if (report.SchemaVersion != BenchmarkProfiles.SchemaVersion ||
+            report.Mode != BenchmarkRunMode.Scheduled ||
+            report.RunId != baseline.Manifest.RunId ||
+            report.DataShape != tuple.DataShape ||
+            report.Cases.Count != 1)
+        {
+            throw new InvalidOperationException("Measured scheduled worker summary is not an exact one-tuple scheduled report.");
+        }
+        if (baseline.Providers.Count != 1 || baseline.Providers[0].Provider != tuple.Provider)
+            throw new InvalidOperationException("Measured scheduled worker provider metadata does not match its requested tuple.");
+        if (!string.Equals(baseline.ConsumerEvidence.GitCommit, expectedGitCommit, StringComparison.Ordinal) ||
+            baseline.ConsumerEvidence.GitDirty || baseline.ConsumerEvidence.Results.Count != 1)
+        {
+            throw new InvalidOperationException("Measured scheduled worker consumer evidence is not clean exact-head evidence.");
+        }
+
+        var result = report.Cases[0];
+        if (result.Case.Provider != tuple.Provider ||
+            result.Case.StorageForm != tuple.StorageForm ||
+            result.Case.Workload != tuple.Workload ||
+            !AllPassed(result.Correctness))
+        {
+            throw new InvalidOperationException("Measured scheduled worker summary does not match its requested tuple or correctness gate.");
+        }
+        if (baseline.Records.Count != result.Samples.Count ||
+            baseline.Records.Any(record => record.Case != result.Case) ||
+            !baseline.Records.Select(record => record.Sample).Zip(result.Samples, JsonEqual).All(equal => equal))
+        {
+            throw new InvalidOperationException("Measured scheduled worker raw measurements do not exactly bind its summary samples.");
+        }
+
+        var recomputedSummary = BenchmarkSummarizer.Summarize(result.Case.Identity, result.Samples);
+        if (!JsonEqual(recomputedSummary, result.Summary))
+            throw new InvalidOperationException("Measured scheduled worker summary claims do not match its raw samples.");
+
+        var operations = baseline.Records.Sum(record => (long)record.Sample.Operations);
+        var elapsedNanoseconds = baseline.Records.Sum(record => record.Sample.ElapsedNanoseconds);
+        if (baseline.Records.Count < baseline.Configuration.MeasurementIterations ||
+            operations < BenchmarkProfiles.Scheduled.MinimumMeasuredOperations ||
+            elapsedNanoseconds < BenchmarkProfiles.Scheduled.MinimumSteadyStateDurationSeconds * 1_000_000_000L)
+        {
+            throw new InvalidOperationException(
+                "Measured scheduled worker raw measurements do not satisfy the 100-operation and 30-second protocol floors.");
+        }
+
+        var consumerResult = baseline.ConsumerEvidence.Results[0];
+        if (consumerResult.ProviderIdentity != BenchmarkConsumerEvidenceReport.ProviderIdentity(tuple.Provider) ||
+            consumerResult.StorageForm != tuple.StorageForm ||
+            consumerResult.WorkloadIdentity != BenchmarkConsumerEvidenceReport.WorkloadIdentity(tuple.Workload) ||
+            consumerResult.DataShape != tuple.DataShape ||
+            consumerResult.IndependentRun != independentRun ||
+            consumerResult.RawSampleCount != baseline.Records.Count ||
+            consumerResult.RawOperationLatencyCount != baseline.Records.Sum(record => record.Sample.OperationLatencyNanoseconds.Count))
+        {
+            throw new InvalidOperationException("Measured scheduled worker consumer evidence does not match its exact tuple and raw sample inventory.");
+        }
+    }
+
+    private static void VerifyArtifactIntegrityLedger(string workerRoot, BenchmarkRunManifest workerManifest)
+    {
+        try
+        {
+            _ = BenchmarkRunGroupVerifier.Resolve(workerRoot, workerManifest.ArtifactIntegrity!);
+        }
+        catch (FileNotFoundException exception)
+        {
+            throw new InvalidOperationException(
+                "Scheduled worker artifact-integrity ledger is missing.",
+                exception);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new InvalidOperationException(
+                "Scheduled worker artifact-integrity ledger path is invalid.",
+                exception);
+        }
+    }
+
+    private static void VerifyScheduledConfiguration(
+        BenchmarkRunConfiguration configuration,
+        BenchmarkRunTuple tuple,
+        BenchmarkDataShape? dataShape,
+        string source)
+    {
+        configuration.Validate();
+        var scheduled = BenchmarkProfiles.Scheduled;
+        if (configuration.SchemaVersion != scheduled.SchemaVersion ||
+            configuration.Mode != BenchmarkRunMode.Scheduled ||
+            configuration.Seed != scheduled.Seed ||
+            configuration.DatasetSize != tuple.DataShape.DatasetSize ||
+            configuration.MigrationDatasetSize != scheduled.MigrationDatasetSize ||
+            configuration.WarmupIterations != scheduled.WarmupIterations ||
+            configuration.MeasurementIterations != scheduled.MeasurementIterations ||
+            configuration.MinimumMeasuredOperations != scheduled.MinimumMeasuredOperations ||
+            configuration.MinimumSteadyStateDurationSeconds != scheduled.MinimumSteadyStateDurationSeconds ||
+            configuration.OperationsPerIteration != scheduled.OperationsPerIteration ||
+            configuration.Concurrency != scheduled.Concurrency ||
+            configuration.Providers.Count != 1 || configuration.Providers[0] != tuple.Provider ||
+            configuration.StorageForms.Count != 1 || configuration.StorageForms[0] != tuple.StorageForm ||
+            dataShape != tuple.DataShape)
+        {
+            throw new InvalidOperationException(
+                $"{source} does not use the required fixed scheduled controls for its exact worker tuple.");
+        }
+    }
+
+    private static void VerifyWorkerRoles(IReadOnlyList<ScheduledWorker> workers)
+    {
+        foreach (var tupleWorkers in workers.GroupBy(worker => worker.Tuple))
+        {
+            var warmups = tupleWorkers.Where(worker => worker.Role == BenchmarkExecutionRole.UntimedWarmup).ToArray();
+            var measured = tupleWorkers.Where(worker => worker.Role == BenchmarkExecutionRole.Measured).ToArray();
+            if (warmups.Length != 1 || warmups[0].IndependentRun != 0 ||
+                measured.Length < RegressionPolicy.Scheduled.MinimumIndependentRuns ||
+                measured.Any(worker => worker.IndependentRun <= 0) ||
+                measured.Select(worker => worker.IndependentRun).Distinct().Count() != measured.Length)
+            {
+                throw new InvalidOperationException(
+                    "Every scheduled semantic tuple requires one untimed warm-up and at least three independent measured processes.");
+            }
+        }
+    }
+
+    private static bool AllPassed(CorrectnessGateResult result) =>
+        result.ScopeIsolation && result.OptimisticConcurrency && result.UnitOfWorkRollback &&
+        result.BoundedQuery && result.MixedOrdering;
+
+    private static bool IsSha256(string value)
+    {
+        if (value.Length != 64)
+            return false;
+        try
+        {
+            _ = Convert.FromHexString(value);
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
+    private sealed record ScheduledWorker(
+        BenchmarkRunTuple Tuple,
+        BenchmarkExecutionRole Role,
+        int IndependentRun);
+
+    private static bool JsonEqual<T>(T left, T right) =>
+        CryptographicOperations.FixedTimeEquals(
+            JsonSerializer.SerializeToUtf8Bytes(left, BenchmarkJson.CompactOptions),
+            JsonSerializer.SerializeToUtf8Bytes(right, BenchmarkJson.CompactOptions));
+}
+
+public sealed record BenchmarkScheduledGroupVerificationSummary(
+    string Contract,
+    bool ScheduledGroupVerified,
+    string RunGroupId,
+    string GitCommit,
+    string GitTreeDigest,
+    int VerifiedWorkerCount,
+    int VerifiedWarmupWorkerCount,
+    int VerifiedMeasuredWorkerCount,
+    int SemanticTupleCount);
+
 public static class BenchmarkRunGroupRegressionEvaluator
 {
     public static async Task<BenchmarkRunGroupRegressionReport> CompareAsync(

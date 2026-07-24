@@ -9,6 +9,7 @@ import itertools
 import json
 import pathlib
 import re
+import subprocess
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -69,6 +70,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--expected-git-commit", required=True)
     parser.add_argument(
+        "--group-verifier",
+        type=pathlib.Path,
+        help=(
+            "Path to the built Groundwork.PhysicalStorage.Benchmarks.dll used to verify each "
+            "scheduled evidence group before this aggregate reads it."
+        ),
+    )
+    parser.add_argument(
+        "--skip-deep-verification",
+        action="store_true",
+        help=(
+            "Permit skeletal, matrix-only fixtures in --test-mode. "
+            "Never permitted for scheduled evidence."
+        ),
+    )
+    parser.add_argument(
         "--test-mode",
         action="store_true",
         help="Permit a deliberately narrowed matrix for executable verifier tests.",
@@ -90,6 +107,17 @@ def parse_args() -> argparse.Namespace:
     )
     if any(option is not None for option in narrowed_options) and not args.test_mode:
         parser.error("matrix overrides require --test-mode; production verification is fixed at 36 shards and 4,032 workers")
+    if args.skip_deep_verification and not args.test_mode:
+        parser.error("--skip-deep-verification is only permitted with --test-mode")
+    if args.group_verifier is not None and args.skip_deep_verification:
+        parser.error("--group-verifier and --skip-deep-verification cannot be used together")
+    if args.group_verifier is None and not args.skip_deep_verification:
+        parser.error(
+            "--group-verifier is required unless a skeletal --test-mode fixture explicitly uses "
+            "--skip-deep-verification"
+        )
+    if args.group_verifier is not None and not args.group_verifier.is_file():
+        parser.error(f"--group-verifier must name a built verifier file: {args.group_verifier}")
     return args
 
 
@@ -154,11 +182,73 @@ def matrix_from_args(args: argparse.Namespace) -> VerificationMatrix:
     )
 
 
+def resolve_evidence_file(
+        evidence_root: pathlib.Path,
+        serialized_path: object,
+        artifact_name: str,
+        artifact_kind: str) -> pathlib.Path:
+    """Resolve an evidence file without allowing its manifest to escape its group root."""
+    if not isinstance(serialized_path, str) or not serialized_path:
+        raise SystemExit(f"{artifact_name} has an invalid {artifact_kind} path")
+
+    posix_path = pathlib.PurePosixPath(serialized_path)
+    windows_path = pathlib.PureWindowsPath(serialized_path)
+    if posix_path.is_absolute() or windows_path.is_absolute():
+        raise SystemExit(f"{artifact_name} {artifact_kind} path must be relative")
+    if ".." in posix_path.parts or ".." in windows_path.parts:
+        raise SystemExit(f"{artifact_name} {artifact_kind} path must not contain '..'")
+    if "\\" in serialized_path:
+        raise SystemExit(f"{artifact_name} {artifact_kind} path must use canonical '/' separators")
+
+    try:
+        canonical_root = evidence_root.resolve(strict=True)
+        candidate = (canonical_root / posix_path).resolve(strict=True)
+    except FileNotFoundError as error:
+        raise SystemExit(f"{artifact_name} has a missing {artifact_kind} artifact") from error
+
+    try:
+        candidate.relative_to(canonical_root)
+    except ValueError as error:
+        raise SystemExit(f"{artifact_name} {artifact_kind} path escapes its evidence root") from error
+    if not candidate.is_file():
+        raise SystemExit(f"{artifact_name} {artifact_kind} path must name a file")
+    return candidate
+
+
+def verify_scheduled_group(
+        group_verifier: pathlib.Path,
+        shard_root: pathlib.Path,
+        expected_git_commit: str,
+        artifact_name: str) -> None:
+    """Require the harness to validate a group before aggregate-level inspection."""
+    command = [
+        "dotnet",
+        str(group_verifier),
+        "verify-scheduled-group",
+        "--root",
+        str(shard_root),
+        "--expected-git-commit",
+        expected_git_commit,
+    ]
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    except OSError as error:
+        raise SystemExit(f"{artifact_name} deep group verifier could not run: {error}") from error
+    if completed.returncode != 0:
+        diagnostic = (completed.stderr or completed.stdout).strip()
+        raise SystemExit(
+            f"{artifact_name} deep group verification failed with exit code {completed.returncode}"
+            f"{': ' + diagnostic if diagnostic else ''}"
+        )
+
+
 def verify(
         root: pathlib.Path,
         run_id: str,
         expected_git_commit: str,
-        matrix: VerificationMatrix) -> dict[str, object]:
+        matrix: VerificationMatrix,
+        group_verifier: pathlib.Path | None,
+        skip_deep_verification: bool) -> dict[str, object]:
     shards_root = root / "shards"
     expected_shards = {
         f"physical-storage-scheduled-{run_id}-{provider.artifact_token}-{form}-n{dataset}":
@@ -196,6 +286,8 @@ def verify(
 
     for artifact_name, (provider, form, dataset) in sorted(expected_shards.items()):
         shard_root = shards_root / artifact_name / "evidence"
+        if group_verifier is not None:
+            verify_scheduled_group(group_verifier, shard_root, expected_git_commit, artifact_name)
         manifest_path = shard_root / "run-group.json"
         if not manifest_path.is_file():
             raise SystemExit(f"{artifact_name} has no run-group.json")
@@ -215,10 +307,8 @@ def verify(
             raise SystemExit(f"{artifact_name} has {len(runs)} workers; expected {expected_runs_per_shard}")
 
         for entry in runs:
-            request_path = shard_root / entry["request"]
-            response_path = shard_root / entry["response"]
-            if not request_path.is_file() or not response_path.is_file():
-                raise SystemExit(f"{artifact_name} has a missing request/response artifact")
+            request_path = resolve_evidence_file(shard_root, entry.get("request"), artifact_name, "request")
+            response_path = resolve_evidence_file(shard_root, entry.get("response"), artifact_name, "response")
             invocation = json.loads(request_path.read_text())
             response = json.loads(response_path.read_text())
             if response.get("succeeded") is not True:
@@ -253,7 +343,11 @@ def verify(
 
             if role == "measured":
                 measured_count += 1
-                evidence_path = shard_root / entry["consumerEvidence"]
+                evidence_path = resolve_evidence_file(
+                    shard_root,
+                    entry.get("consumerEvidence"),
+                    artifact_name,
+                    "consumer evidence")
                 evidence_bytes = evidence_path.read_bytes()
                 evidence_digest = hashlib.sha256(evidence_bytes).hexdigest()
                 if evidence_digest != entry["consumerEvidenceDigest"]:
@@ -314,6 +408,7 @@ def verify(
     return {
         "contract": "groundwork.physical-storage.scheduled-coverage/v1",
         "coverageVerified": True,
+        "deepGroupVerification": not skip_deep_verification,
         "promotable": False,
         "requiredShardCount": len(expected_shards),
         "verifiedWorkerCount": len(actual_workers),
@@ -330,7 +425,9 @@ def main() -> None:
         args.root,
         args.run_id,
         args.expected_git_commit,
-        matrix_from_args(args))
+        matrix_from_args(args),
+        args.group_verifier,
+        args.skip_deep_verification)
     (args.root / "coverage-verification.json").write_text(
         json.dumps(verification, indent=2, sort_keys=True) + "\n")
     print(json.dumps(verification, indent=2, sort_keys=True))

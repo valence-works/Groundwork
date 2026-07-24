@@ -78,6 +78,11 @@ public sealed class BenchmarkWorkflowContractTests
 
         Assert.Contains("python3 tools/verify_physical_storage_scheduled_coverage.py", workflow, StringComparison.Ordinal);
         Assert.Contains("--expected-git-commit \"${{ github.sha }}\"", workflow, StringComparison.Ordinal);
+        Assert.Contains(
+            "--group-verifier \"$GITHUB_WORKSPACE/benchmarks/Groundwork.PhysicalStorage.Benchmarks/bin/Release/net10.0/Groundwork.PhysicalStorage.Benchmarks.dll\"",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("--skip-deep-verification", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("python3 - <<'PY'", workflow, StringComparison.Ordinal);
         Assert.Contains("physical-storage-scheduled-aggregate-${{ github.run_id }}", workflow, StringComparison.Ordinal);
     }
@@ -95,13 +100,28 @@ public sealed class BenchmarkWorkflowContractTests
             workflow,
             aggregateJob,
             line => line.Contains("python3 tools/verify_physical_storage_scheduled_coverage.py", StringComparison.Ordinal));
+        var dotnet = Array.FindIndex(
+            workflow,
+            aggregateJob,
+            line => line.Trim() == "uses: actions/setup-dotnet@v4");
+        var restore = Array.FindIndex(
+            workflow,
+            aggregateJob,
+            line => line.Contains("Restore benchmark group verifier", StringComparison.Ordinal));
+        var build = Array.FindIndex(
+            workflow,
+            aggregateJob,
+            line => line.Contains("Build benchmark group verifier", StringComparison.Ordinal));
 
         Assert.True(checkout > aggregateJob, "The aggregate job must check out the verifier script.");
-        Assert.True(verifier > checkout, "The aggregate job must check out the repository before running the verifier.");
+        Assert.True(dotnet > checkout, "The aggregate job must provision .NET after checkout.");
+        Assert.True(restore > dotnet, "The aggregate job must restore the group verifier after provisioning .NET.");
+        Assert.True(build > restore, "The aggregate job must build the group verifier after restore.");
+        Assert.True(verifier > build, "The aggregate job must build the group verifier before aggregate verification.");
     }
 
     [Fact]
-    public void Scheduled_aggregate_verifier_accepts_serialized_enum_tokens_for_every_provider()
+    public void Skeletal_test_mode_fixture_is_matrix_only_and_not_canonical_evidence()
     {
         const string runId = "fixture-run";
         var root = Path.Combine(Path.GetTempPath(), $"physical-storage-aggregate-{Guid.NewGuid():N}");
@@ -111,48 +131,81 @@ public sealed class BenchmarkWorkflowContractTests
             foreach (var (artifactToken, requestToken) in ProviderTokens)
                 WriteScheduledFixture(root, runId, artifactToken, requestToken);
 
-            var process = new ProcessStartInfo("python3")
-            {
-                WorkingDirectory = RepositoryRoot,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
-            };
-            process.ArgumentList.Add(Path.Combine(RepositoryRoot, "tools/verify_physical_storage_scheduled_coverage.py"));
-            process.ArgumentList.Add("--root");
-            process.ArgumentList.Add(root);
-            process.ArgumentList.Add("--run-id");
-            process.ArgumentList.Add(runId);
-            process.ArgumentList.Add("--expected-git-commit");
-            process.ArgumentList.Add("fixture-commit");
-            process.ArgumentList.Add("--test-mode");
-            process.ArgumentList.Add("--providers");
-            process.ArgumentList.Add("sqlite,sqlserver,postgresql,mongodb");
-            process.ArgumentList.Add("--forms");
-            process.ArgumentList.Add("shared");
-            process.ArgumentList.Add("--datasets");
-            process.ArgumentList.Add("1000");
-            process.ArgumentList.Add("--selectivity-bps");
-            process.ArgumentList.Add("1000");
-            process.ArgumentList.Add("--workloads");
-            process.ArgumentList.Add("clientResetPointReadBatch");
-            process.ArgumentList.Add("--independent-runs");
-            process.ArgumentList.Add("1");
+            var commandResult = RunSkeletalMatrixVerifier(root, runId);
+            Assert.True(commandResult.ExitCode == 0, $"Verifier failed: {commandResult.Output}");
+
+            using var verification = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "coverage-verification.json")));
+            var verificationResult = verification.RootElement;
+            Assert.True(verificationResult.GetProperty("coverageVerified").GetBoolean());
+            Assert.False(verificationResult.GetProperty("promotable").GetBoolean());
+            Assert.False(verificationResult.GetProperty("deepGroupVerification").GetBoolean());
+            Assert.Equal(4, verificationResult.GetProperty("requiredShardCount").GetInt32());
+            Assert.Equal(8, verificationResult.GetProperty("verifiedWorkerCount").GetInt32());
+            Assert.Equal(4, verificationResult.GetProperty("verifiedMeasuredWorkerCount").GetInt32());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("--skip-deep-verification", "only permitted with --test-mode")]
+    [InlineData("", "--group-verifier is required")]
+    public void Scheduled_aggregate_requires_a_deep_group_verifier_outside_explicit_skeletal_test_mode(
+        string extraArgument,
+        string expectedError)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"physical-storage-aggregate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var process = CreateVerifierProcess(root, "fixture-run");
+            if (!string.IsNullOrEmpty(extraArgument))
+                process.ArgumentList.Add(extraArgument);
 
             using var verifier = Process.Start(process);
             Assert.NotNull(verifier);
-            var standardOutput = verifier.StandardOutput.ReadToEnd();
-            var standardError = verifier.StandardError.ReadToEnd();
+            var output = verifier.StandardOutput.ReadToEnd() + verifier.StandardError.ReadToEnd();
             verifier.WaitForExit();
-            Assert.True(verifier.ExitCode == 0, $"Verifier failed: {standardOutput}{standardError}");
 
-            using var verification = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "coverage-verification.json")));
-            var result = verification.RootElement;
-            Assert.True(result.GetProperty("coverageVerified").GetBoolean());
-            Assert.False(result.GetProperty("promotable").GetBoolean());
-            Assert.Equal(4, result.GetProperty("requiredShardCount").GetInt32());
-            Assert.Equal(8, result.GetProperty("verifiedWorkerCount").GetInt32());
-            Assert.Equal(4, result.GetProperty("verifiedMeasuredWorkerCount").GetInt32());
+            Assert.NotEqual(0, verifier.ExitCode);
+            Assert.Contains(expectedError, output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("/tmp/request.json", "request path must be relative")]
+    [InlineData("../request.json", "request path must not contain '..'")]
+    [InlineData("request-via-symlink.json", "request path escapes its evidence root")]
+    public void Skeletal_matrix_verifier_rejects_noncanonical_request_paths(
+        string replacementRequestPath,
+        string expectedError)
+    {
+        const string runId = "fixture-run";
+        var root = Path.Combine(Path.GetTempPath(), $"physical-storage-aggregate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            foreach (var (artifactToken, requestToken) in ProviderTokens)
+                WriteScheduledFixture(root, runId, artifactToken, requestToken);
+
+            var evidenceRoot = ScheduledFixtureEvidenceRoot(root, runId, "sqlite");
+            if (replacementRequestPath == "request-via-symlink.json")
+            {
+                var outside = Path.Combine(root, "outside-request.json");
+                File.WriteAllText(outside, "{}");
+                File.CreateSymbolicLink(Path.Combine(evidenceRoot, replacementRequestPath), outside);
+            }
+            ReplaceFirstRequestPath(evidenceRoot, replacementRequestPath);
+
+            var result = RunSkeletalMatrixVerifier(root, runId);
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains(expectedError, result.Output, StringComparison.Ordinal);
         }
         finally
         {
@@ -215,17 +268,73 @@ public sealed class BenchmarkWorkflowContractTests
         ("mongodb", "mongoDb")
     ];
 
+    private static VerifierCommandResult RunSkeletalMatrixVerifier(string root, string runId)
+    {
+        var process = CreateVerifierProcess(root, runId);
+        process.ArgumentList.Add("--test-mode");
+        process.ArgumentList.Add("--skip-deep-verification");
+        process.ArgumentList.Add("--providers");
+        process.ArgumentList.Add("sqlite,sqlserver,postgresql,mongodb");
+        process.ArgumentList.Add("--forms");
+        process.ArgumentList.Add("shared");
+        process.ArgumentList.Add("--datasets");
+        process.ArgumentList.Add("1000");
+        process.ArgumentList.Add("--selectivity-bps");
+        process.ArgumentList.Add("1000");
+        process.ArgumentList.Add("--workloads");
+        process.ArgumentList.Add("clientResetPointReadBatch");
+        process.ArgumentList.Add("--independent-runs");
+        process.ArgumentList.Add("1");
+
+        using var verifier = Process.Start(process);
+        Assert.NotNull(verifier);
+        var output = verifier.StandardOutput.ReadToEnd() + verifier.StandardError.ReadToEnd();
+        verifier.WaitForExit();
+        return new VerifierCommandResult(verifier.ExitCode, output);
+    }
+
+    private static ProcessStartInfo CreateVerifierProcess(string root, string runId)
+    {
+        var process = new ProcessStartInfo("python3")
+        {
+            WorkingDirectory = RepositoryRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        process.ArgumentList.Add(Path.Combine(RepositoryRoot, "tools/verify_physical_storage_scheduled_coverage.py"));
+        process.ArgumentList.Add("--root");
+        process.ArgumentList.Add(root);
+        process.ArgumentList.Add("--run-id");
+        process.ArgumentList.Add(runId);
+        process.ArgumentList.Add("--expected-git-commit");
+        process.ArgumentList.Add("fixture-commit");
+        return process;
+    }
+
+    private static string ScheduledFixtureEvidenceRoot(string root, string runId, string artifactToken) =>
+        Path.Combine(
+            root,
+            "shards",
+            $"physical-storage-scheduled-{runId}-{artifactToken}-shared-n1000",
+            "evidence");
+
+    private static void ReplaceFirstRequestPath(string evidenceRoot, string replacement)
+    {
+        var manifestPath = Path.Combine(evidenceRoot, "run-group.json");
+        const string original = "\"request\":\"request-untimedWarmup-0.json\"";
+        var manifest = File.ReadAllText(manifestPath);
+        Assert.Contains(original, manifest, StringComparison.Ordinal);
+        File.WriteAllText(manifestPath, manifest.Replace(original, $"\"request\":\"{replacement}\"", StringComparison.Ordinal));
+    }
+
     private static void WriteScheduledFixture(
         string root,
         string runId,
         string artifactToken,
         string requestToken)
     {
-        var evidenceRoot = Path.Combine(
-            root,
-            "shards",
-            $"physical-storage-scheduled-{runId}-{artifactToken}-shared-n1000",
-            "evidence");
+        var evidenceRoot = ScheduledFixtureEvidenceRoot(root, runId, artifactToken);
         Directory.CreateDirectory(evidenceRoot);
 
         var runs = new List<object>();
@@ -319,6 +428,8 @@ public sealed class BenchmarkWorkflowContractTests
 
     private static void WriteJson(string path, object value) =>
         File.WriteAllText(path, JsonSerializer.Serialize(value));
+
+    private sealed record VerifierCommandResult(int ExitCode, string Output);
 
     private static string FindRepositoryRoot()
     {

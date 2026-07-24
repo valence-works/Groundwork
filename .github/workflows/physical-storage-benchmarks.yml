@@ -156,6 +156,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore benchmark group verifier
+        run: dotnet restore benchmarks/Groundwork.PhysicalStorage.Benchmarks/Groundwork.PhysicalStorage.Benchmarks.csproj
+
+      - name: Build benchmark group verifier
+        run: dotnet build benchmarks/Groundwork.PhysicalStorage.Benchmarks/Groundwork.PhysicalStorage.Benchmarks.csproj --configuration Release --no-restore
+
       - name: Download every scheduled shard
         uses: actions/download-artifact@v4
         with:
@@ -168,7 +179,8 @@ jobs:
           python3 tools/verify_physical_storage_scheduled_coverage.py \
             --root "${{ runner.temp }}/physical-storage-scheduled-aggregate" \
             --run-id "${{ github.run_id }}" \
-            --expected-git-commit "${{ github.sha }}"
+            --expected-git-commit "${{ github.sha }}" \
+            --group-verifier "$GITHUB_WORKSPACE/benchmarks/Groundwork.PhysicalStorage.Benchmarks/bin/Release/net10.0/Groundwork.PhysicalStorage.Benchmarks.dll"
 
       - name: Upload aggregate inputs and verification result
         if: always()
