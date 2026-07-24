@@ -1,8 +1,6 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Text;
@@ -75,7 +73,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 throw;
             }
             await dialect.ReleaseApplicationLockAsync(connection, BootstrapLockResource, CancellationToken.None);
-            var resource = LockResource(target);
+            var resource = RelationalPhysicalSchemaLockResource.For(target);
             await dialect.AcquireApplicationLockAsync(connection, resource, cancellationToken);
             acquiredResource = resource;
             var owner = Guid.NewGuid().ToString("N");
@@ -1068,12 +1066,6 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             .Select(column => column.Column.Identifier)
             .Order(StringComparer.Ordinal)
             .ToArray();
-    }
-
-    private static string LockResource(PhysicalSchemaTargetIdentity target)
-    {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(target.ToString()));
-        return $"groundwork:physical:{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
 
     protected static long ReadLockSessionId(IPhysicalSchemaApplicationLock applicationLock) =>

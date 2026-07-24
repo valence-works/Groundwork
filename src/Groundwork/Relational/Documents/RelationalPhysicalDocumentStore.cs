@@ -1,8 +1,10 @@
 using System.Data;
 using System.Data.Common;
 using System.Text.Json;
+using Groundwork.Core.Capabilities;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Scoping;
 using Groundwork.Core.Text;
 using Groundwork.Core.Transactions;
@@ -10,6 +12,7 @@ using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.Documents.UnitOfWork;
 using Groundwork.Provider.Relational;
+using Groundwork.Relational.PhysicalStorage;
 using Groundwork.Relational.Physicalization;
 
 namespace Groundwork.Relational.Documents;
@@ -30,7 +33,8 @@ public sealed record RelationalPhysicalIdentityPrefixRange(object Lower, object?
 internal enum RelationalPhysicalWriteExecutionPoint
 {
     BeforePrimaryLock,
-    AfterPrimaryLock
+    AfterPrimaryLock,
+    AfterPrimaryMutation
 }
 
 internal enum RelationalPhysicalWriteOperation
@@ -70,6 +74,16 @@ internal sealed class RelationalPhysicalMutationTransaction(DbTransaction transa
 /// <summary>Provider SQL primitives used by the reusable route-driven relational document store.</summary>
 public abstract class RelationalPhysicalDocumentDialect
 {
+    private sealed class NoSchemaTransitionLease : IAsyncDisposable
+    {
+        public static NoSchemaTransitionLease Instance { get; } = new();
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    public virtual ProviderIdentity? PhysicalSchemaProvider => null;
+    public virtual string PhysicalSchemaAppliedStatePredicate =>
+        "manifest_id = @manifestId AND provider_name = @providerName";
+
     public virtual void ValidateRoute(ExecutableStorageRoute route) => ArgumentNullException.ThrowIfNull(route);
 
     /// <summary>
@@ -119,6 +133,7 @@ public abstract class RelationalPhysicalDocumentDialect
     public abstract bool IsUniqueConstraintException(DbException exception);
     /// <summary>Returns whether a provider exception proves that the active write transaction lost a concurrent race.</summary>
     public virtual bool IsWriteConflictException(DbException exception) => false;
+    public virtual bool IsMissingPhysicalSchemaStateException(DbException exception) => false;
     public abstract string JsonValue(string canonicalJsonExpression, string stablePath);
     public virtual string SetJsonValue(
         string canonicalJsonExpression,
@@ -232,6 +247,17 @@ public abstract class RelationalPhysicalDocumentDialect
         string operationLock,
         CancellationToken cancellationToken) =>
         Task.CompletedTask;
+    public virtual ValueTask<IAsyncDisposable> AcquireSchemaTransitionLeaseAsync(
+        DbConnection connection,
+        PhysicalSchemaTargetIdentity target,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult<IAsyncDisposable>(NoSchemaTransitionLease.Instance);
+    public virtual Task AcquireSchemaTransitionWriterLockAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string resource,
+        CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 
     protected string Qualified(string? alias, string identifier) =>
         alias is null ? QuoteIdentifier(identifier) : $"{alias}.{QuoteIdentifier(identifier)}";
@@ -249,6 +275,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
     private readonly IReadOnlyDictionary<string, ExecutableStorageRoute> routes;
     private readonly IReadOnlyDictionary<string, RelationalPhysicalMutationSql> mutationSql;
     private readonly RelationalPhysicalDocumentDialect dialect;
+    private readonly ProviderIdentity? physicalSchemaProvider;
     private readonly IStorageScopeObserver scopeObserver;
     private readonly Func<CancellationToken, ValueTask>? beforeNonSuccessAbort;
     private readonly Func<DbTransaction, IRelationalPhysicalMutationTransaction> createMutationTransaction;
@@ -262,8 +289,18 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         IReadOnlyList<ExecutableStorageRoute> routes,
         RelationalPhysicalDocumentDialect dialect,
         DocumentStoreAccess access,
-        IStorageScopeObserver? scopeObserver = null)
-        : this(connection ?? throw new ArgumentNullException(nameof(connection)), null, manifest, routes, dialect, access, scopeObserver, null)
+        IStorageScopeObserver? scopeObserver = null,
+        ProviderIdentity? physicalSchemaProvider = null)
+        : this(
+            connection ?? throw new ArgumentNullException(nameof(connection)),
+            null,
+            manifest,
+            routes,
+            dialect,
+            access,
+            scopeObserver,
+            null,
+            physicalSchemaProvider)
     {
     }
 
@@ -275,7 +312,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         DocumentStoreAccess access,
         Func<CancellationToken, ValueTask> beforeNonSuccessAbort,
         IStorageScopeObserver? scopeObserver = null)
-        : this(connection, null, manifest, routes, dialect, access, scopeObserver, null)
+        : this(connection, null, manifest, routes, dialect, access, scopeObserver, null, null)
     {
         this.beforeNonSuccessAbort = beforeNonSuccessAbort ??
             throw new ArgumentNullException(nameof(beforeNonSuccessAbort));
@@ -297,7 +334,8 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
             dialect,
             access,
             scopeObserver,
-            createMutationTransaction ?? throw new ArgumentNullException(nameof(createMutationTransaction)))
+            createMutationTransaction ?? throw new ArgumentNullException(nameof(createMutationTransaction)),
+            null)
     {
     }
 
@@ -307,8 +345,18 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         IReadOnlyList<ExecutableStorageRoute> routes,
         RelationalPhysicalDocumentDialect dialect,
         DocumentStoreAccess access,
-        IStorageScopeObserver? scopeObserver = null)
-        : this(null, sessionFactory ?? throw new ArgumentNullException(nameof(sessionFactory)), manifest, routes, dialect, access, scopeObserver, null)
+        IStorageScopeObserver? scopeObserver = null,
+        ProviderIdentity? physicalSchemaProvider = null)
+        : this(
+            null,
+            sessionFactory ?? throw new ArgumentNullException(nameof(sessionFactory)),
+            manifest,
+            routes,
+            dialect,
+            access,
+            scopeObserver,
+            null,
+            physicalSchemaProvider)
     {
     }
 
@@ -320,12 +368,14 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         RelationalPhysicalDocumentDialect dialect,
         DocumentStoreAccess access,
         IStorageScopeObserver? scopeObserver,
-        Func<DbTransaction, IRelationalPhysicalMutationTransaction>? createMutationTransaction)
+        Func<DbTransaction, IRelationalPhysicalMutationTransaction>? createMutationTransaction,
+        ProviderIdentity? physicalSchemaProvider)
     {
         this.connection = connection;
         this.sessionFactory = sessionFactory;
         this.manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
         this.dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
+        this.physicalSchemaProvider = physicalSchemaProvider ?? dialect.PhysicalSchemaProvider;
         this.createMutationTransaction = createMutationTransaction ??
             (transaction => new RelationalPhysicalMutationTransaction(transaction));
         Access = access ?? throw new ArgumentNullException(nameof(access));
@@ -358,7 +408,9 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         ValidateDocumentIdentity(request.Id);
         return await ExecuteAsync(async (current, ct) =>
         {
+            await using var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
             await using var transaction = await current.BeginTransactionAsync(ct);
+            await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
             var result = await SaveCoreAsync(request, transaction, ct);
             if (result.Status == DocumentStoreWriteStatus.Saved)
                 await transaction.CommitAsync(ct);
@@ -378,7 +430,9 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         ValidateDocumentIdentity(request.Id);
         return await ExecuteAsync(async (current, ct) =>
         {
+            await using var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
             await using var transaction = await current.BeginTransactionAsync(ct);
+            await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
             var result = await DeleteCoreAsync(request, transaction, ct);
             if (result.Status == DocumentStoreWriteStatus.Deleted)
                 await transaction.CommitAsync(ct);
@@ -396,17 +450,61 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
             throw DocumentStoreScopeResolver.RejectMixedUnitOfWork(scopeObserver, ScopePolicy(units[0]));
 
         if (sessionFactory is not null)
-            return new UnitOfWork(this, scope, await sessionFactory.BeginUnitOfWorkAsync(cancellationToken));
+        {
+            var owned = await sessionFactory.BeginUnitOfWorkAsync(
+                AcquireSchemaTransitionLeaseAsync,
+                cancellationToken);
+            try
+            {
+                await owned.Executor.ExecuteAsync(
+                    async (current, transaction, ct) =>
+                    {
+                        await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
+                        return true;
+                    },
+                    cancellationToken);
+                return new UnitOfWork(this, scope, owned);
+            }
+            catch (Exception primaryFailure)
+            {
+                await AttachCleanupFailureAsync(primaryFailure, owned.DisposeAsync);
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+                throw;
+            }
+        }
 
         await connectionGate.WaitAsync(cancellationToken);
+        IAsyncDisposable? transitionLease = null;
         try
         {
             await EnsureOpenAsync(cancellationToken);
-            return new UnitOfWork(this, scope, await connection!.BeginTransactionAsync(cancellationToken));
+            transitionLease = await AcquireSchemaTransitionLeaseAsync(connection!, cancellationToken);
+            var transaction = await connection!.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await ValidateSchemaTransitionWriterAsync(connection, transaction, cancellationToken);
+                return new UnitOfWork(this, scope, transaction, transitionLease);
+            }
+            catch (Exception primaryFailure)
+            {
+                await AttachCleanupFailureAsync(primaryFailure, transaction.DisposeAsync);
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+                throw;
+            }
         }
-        catch
+        catch (Exception primaryFailure)
         {
-            connectionGate.Release();
+            if (transitionLease is not null)
+                await AttachCleanupFailureAsync(primaryFailure, transitionLease.DisposeAsync);
+            try
+            {
+                connectionGate.Release();
+            }
+            catch (Exception cleanupFailure)
+            {
+                RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+            }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
             throw;
         }
     }
@@ -469,7 +567,25 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         ArgumentNullException.ThrowIfNull(action);
         if (sessionFactory is not null)
         {
-            var unitOfWork = await sessionFactory.BeginUnitOfWorkAsync(cancellationToken);
+            var unitOfWork = await sessionFactory.BeginUnitOfWorkAsync(
+                AcquireSchemaTransitionLeaseAsync,
+                cancellationToken);
+            try
+            {
+                await unitOfWork.Executor.ExecuteAsync(
+                    async (current, transaction, ct) =>
+                    {
+                        await ValidateSchemaTransitionWriterAsync(current, transaction, ct);
+                        return true;
+                    },
+                    cancellationToken);
+            }
+            catch (Exception primaryFailure)
+            {
+                await AttachCleanupFailureAsync(primaryFailure, unitOfWork.DisposeAsync);
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+                throw;
+            }
             return await CompletePhysicalMutationAsync(
                 unitOfWork,
                 ct => unitOfWork.Executor.ExecuteAsync(action, ct),
@@ -482,12 +598,17 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
 
         return await ExecuteAsync(async (current, ct) =>
         {
+            await using var transitionLease = await AcquireSchemaTransitionLeaseAsync(current, ct);
             var transaction = createMutationTransaction(
                 await dialect.BeginMutationTransactionAsync(current, ct)) ??
                 throw new InvalidOperationException("The physical mutation transaction factory returned null.");
             return await CompletePhysicalMutationAsync(
                 transaction,
-                token => action(current, transaction.Transaction, token),
+                async token =>
+                {
+                    await ValidateSchemaTransitionWriterAsync(current, transaction.Transaction, token);
+                    return await action(current, transaction.Transaction, token);
+                },
                 transaction.CommitAsync,
                 transaction.RollbackAsync,
                 beforeCommit,
@@ -495,6 +616,103 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 ct);
         }, cancellationToken);
     }
+
+    private ValueTask<IAsyncDisposable> AcquireSchemaTransitionLeaseAsync(
+        DbConnection current,
+        CancellationToken cancellationToken)
+    {
+        var provider = physicalSchemaProvider;
+        return provider is null
+            ? dialect.AcquireSchemaTransitionLeaseAsync(
+                current,
+                new PhysicalSchemaTargetIdentity(manifest.Identity, string.Empty),
+                cancellationToken)
+            : dialect.AcquireSchemaTransitionLeaseAsync(
+                current,
+                new PhysicalSchemaTargetIdentity(manifest.Identity, provider.Name),
+                cancellationToken);
+    }
+
+    private async Task ValidateSchemaTransitionWriterAsync(
+        DbConnection current,
+        DbTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        var provider = physicalSchemaProvider;
+        if (provider is null)
+            return;
+
+        var target = new PhysicalSchemaTargetIdentity(manifest.Identity, provider.Name);
+        await dialect.AcquireSchemaTransitionWriterLockAsync(
+            current,
+            transaction,
+            RelationalPhysicalSchemaLockResource.For(target),
+            cancellationToken);
+        await using var command = CreatePhysicalCommand(
+            current,
+            "SELECT applied_state_json FROM groundwork_physical_schema_state WHERE " +
+            dialect.PhysicalSchemaAppliedStatePredicate + ";",
+            transaction);
+        AddPhysicalParameter(command, "manifestId", manifest.Identity.Value);
+        AddPhysicalParameter(command, "providerName", provider.Name);
+        string? json;
+        try
+        {
+            json = await command.ExecuteScalarAsync(cancellationToken) as string;
+        }
+        catch (DbException exception) when (dialect.IsMissingPhysicalSchemaStateException(exception))
+        {
+            throw UpgradeRequired(provider, exception);
+        }
+        if (json is null)
+            throw UpgradeRequired(provider);
+
+        PhysicalSchemaAppliedState applied;
+        try
+        {
+            applied = PhysicalSchemaAppliedStateSerializer.Deserialize(json);
+        }
+        catch (Exception exception) when (
+            exception is JsonException or InvalidOperationException or FormatException or ArgumentException)
+        {
+            throw UpgradeRequired(provider, exception);
+        }
+
+        IReadOnlyDictionary<string, AppliedStorageRouteSnapshot> appliedRoutes;
+        try
+        {
+            appliedRoutes = applied.Snapshot.Routes.ToDictionary(
+                route => route.StorageUnit.Value,
+                StringComparer.Ordinal);
+        }
+        catch (ArgumentException exception)
+        {
+            throw UpgradeRequired(provider, exception);
+        }
+        if (applied.ManifestIdentity != manifest.Identity ||
+            applied.ManifestVersion != manifest.Version ||
+            applied.Provider != provider ||
+            appliedRoutes.Count != routes.Count ||
+            routes.Any(pair =>
+                !appliedRoutes.TryGetValue(pair.Key, out var durable) ||
+                !string.Equals(durable.DefinitionFingerprint, pair.Value.DefinitionFingerprint, StringComparison.Ordinal) ||
+                !string.Equals(durable.RouteFingerprint, pair.Value.Fingerprint, StringComparison.Ordinal) ||
+                !string.Equals(
+                    durable.CanonicalRouteJson,
+                    ExecutableStorageRouteSerializer.Serialize(pair.Value),
+                    StringComparison.Ordinal)))
+        {
+            throw UpgradeRequired(provider);
+        }
+    }
+
+    private PhysicalSchemaUpgradeRequiredException UpgradeRequired(ProviderIdentity provider) =>
+        new(manifest.Identity.Value, provider.Name);
+
+    private PhysicalSchemaUpgradeRequiredException UpgradeRequired(
+        ProviderIdentity provider,
+        Exception innerException) =>
+        new(manifest.Identity.Value, provider.Name, innerException);
 
     private static async Task<T> CompletePhysicalMutationAsync<T>(
         IAsyncDisposable transaction,
@@ -549,6 +767,20 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
             await resource.DisposeAsync();
         }
         catch (Exception cleanupFailure) when (primaryFailure is not null)
+        {
+            RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+        }
+    }
+
+    private static async ValueTask AttachCleanupFailureAsync(
+        Exception primaryFailure,
+        Func<ValueTask> cleanup)
+    {
+        try
+        {
+            await cleanup();
+        }
+        catch (Exception cleanupFailure)
         {
             RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
         }
@@ -748,6 +980,13 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 }
                 return request.ExpectedVersion is null ? DocumentStoreWriteResult.NotFound : DocumentStoreWriteResult.ConcurrencyConflict;
             }
+            if (WriteInterceptor is not null)
+                await WriteInterceptor(
+                    RelationalPhysicalWriteExecutionPoint.AfterPrimaryMutation,
+                    RelationalPhysicalWriteOperation.Save,
+                    transaction.Connection!,
+                    transaction,
+                    ct);
             await MaintainLinkedAsync(route, sql, request, scope, projectedValues, transaction, ct);
             await MaintainCollectionsAsync(route, request, scope, transaction, ct);
         }
@@ -1238,16 +1477,19 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         private readonly DocumentCommitScope scope;
         private readonly DbTransaction? transaction;
         private readonly RelationalUnitOfWork? ownedUnitOfWork;
+        private readonly IAsyncDisposable? transitionLease;
         private bool completed;
 
         public UnitOfWork(
             RelationalPhysicalDocumentStore store,
             DocumentCommitScope scope,
-            DbTransaction transaction)
+            DbTransaction transaction,
+            IAsyncDisposable transitionLease)
         {
             this.store = store;
             this.scope = scope;
             this.transaction = transaction;
+            this.transitionLease = transitionLease;
         }
 
         public UnitOfWork(
@@ -1275,9 +1517,17 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                     await AbortNonSuccessAsync(cancellationToken);
                 return result;
             }
-            catch
+            catch (Exception primaryFailure)
             {
-                await AbortAsync(CancellationToken.None);
+                try
+                {
+                    await AbortAsync(CancellationToken.None);
+                }
+                catch (Exception cleanupFailure)
+                {
+                    RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+                }
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
                 throw;
             }
         }
@@ -1296,9 +1546,17 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                     await AbortNonSuccessAsync(cancellationToken);
                 return result;
             }
-            catch
+            catch (Exception primaryFailure)
             {
-                await AbortAsync(CancellationToken.None);
+                try
+                {
+                    await AbortAsync(CancellationToken.None);
+                }
+                catch (Exception cleanupFailure)
+                {
+                    RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+                }
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
                 throw;
             }
         }
@@ -1321,8 +1579,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 finally { completed = true; }
                 return;
             }
-            try { await transaction!.CommitAsync(cancellationToken); }
-            finally { await CompleteDirectAsync(); }
+            await CompleteDirectAsync(() => transaction!.CommitAsync(cancellationToken));
         }
         public async Task RollbackAsync(CancellationToken cancellationToken = default)
         {
@@ -1338,15 +1595,40 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 await ownedUnitOfWork.DisposeAsync();
                 return;
             }
-            try { await transaction!.RollbackAsync(); }
-            finally { await CompleteDirectAsync(); }
+            await CompleteDirectAsync(() => transaction!.RollbackAsync());
         }
-        private async Task CompleteDirectAsync()
+        private async Task CompleteDirectAsync(Func<Task> terminalAction)
         {
             if (completed) return;
             completed = true;
-            await transaction!.DisposeAsync();
-            store.connectionGate.Release();
+            Exception? primaryFailure = null;
+            try
+            {
+                await terminalAction();
+            }
+            catch (Exception exception)
+            {
+                primaryFailure = exception;
+            }
+            primaryFailure = await CaptureCleanupFailureAsync(
+                primaryFailure,
+                () => transaction!.DisposeAsync());
+            primaryFailure = await CaptureCleanupFailureAsync(
+                primaryFailure,
+                () => transitionLease!.DisposeAsync());
+            try
+            {
+                store.connectionGate.Release();
+            }
+            catch (Exception cleanupFailure)
+            {
+                if (primaryFailure is null)
+                    primaryFailure = cleanupFailure;
+                else
+                    RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+            }
+            if (primaryFailure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
         }
         private async Task AbortAsync(CancellationToken cancellationToken)
         {
@@ -1357,8 +1639,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 finally { completed = true; }
                 return;
             }
-            try { await transaction!.RollbackAsync(cancellationToken); }
-            finally { await CompleteDirectAsync(); }
+            await CompleteDirectAsync(() => transaction!.RollbackAsync(cancellationToken));
         }
         private async Task AbortNonSuccessAsync(CancellationToken callerCancellationToken)
         {
@@ -1378,6 +1659,23 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         private void EnsureActive()
         {
             if (completed) throw new InvalidOperationException("The document transaction has already completed.");
+        }
+
+        private static async Task<Exception?> CaptureCleanupFailureAsync(
+            Exception? primaryFailure,
+            Func<ValueTask> cleanup)
+        {
+            try
+            {
+                await cleanup();
+            }
+            catch (Exception cleanupFailure)
+            {
+                if (primaryFailure is null)
+                    return cleanupFailure;
+                RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+            }
+            return primaryFailure;
         }
     }
 

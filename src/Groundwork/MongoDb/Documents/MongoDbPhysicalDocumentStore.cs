@@ -31,6 +31,8 @@ public sealed class MongoDbPhysicalDocumentStore :
     private readonly MongoDbPhysicalDocumentStoreRuntime runtime;
     private readonly IStorageScopeObserver scopeObserver;
     private readonly IReadOnlyDictionary<string, PhysicalQueryDocumentStore> queryStores;
+    private readonly SemaphoreSlim rolloutFencePreparation = new(1, 1);
+    private volatile bool rolloutFencePrepared;
     private IMongoDatabase database => runtime.Database;
     private MongoDbPhysicalStorageModel model => runtime.Model;
     private MongoDbPhysicalDocumentStoreOptions options => runtime.Options;
@@ -94,12 +96,13 @@ public sealed class MongoDbPhysicalDocumentStore :
         ? TransactionBoundary.CrossUnitAtomic
         : TransactionBoundary.PerOperation;
 
-    public Task<DocumentStoreWriteResult> SaveAsync(
+    public async Task<DocumentStoreWriteResult> SaveAsync(
         SaveDocumentRequest request,
         CancellationToken cancellationToken = default)
     {
         var (route, scope) = ResolveOperation(request.DocumentKind, StorageScopeOperation.Save);
-        return ExecuteAtomicAsync(
+        await EnsureRolloutFenceAsync(cancellationToken);
+        return await ExecuteAtomicAsync(
             [request.DocumentKind],
             session => SaveCoreAsync(request, route, scope, session, cancellationToken),
             () => ClassifyDuplicateIdentityAsync(route, request.Id, scope.StorageKey!, cancellationToken),
@@ -119,12 +122,13 @@ public sealed class MongoDbPhysicalDocumentStore :
         return await LoadCoreAsync(route, id, scope, session: null, cancellationToken);
     }
 
-    public Task<DocumentStoreWriteResult> DeleteAsync(
+    public async Task<DocumentStoreWriteResult> DeleteAsync(
         DeleteDocumentRequest request,
         CancellationToken cancellationToken = default)
     {
         var (route, scope) = ResolveOperation(request.DocumentKind, StorageScopeOperation.Delete);
-        return ExecuteAtomicAsync(
+        await EnsureRolloutFenceAsync(cancellationToken);
+        return await ExecuteAtomicAsync(
             [request.DocumentKind],
             session => DeleteCoreAsync(request, route, scope, session, cancellationToken),
             duplicateKeyResult: null,
@@ -142,6 +146,7 @@ public sealed class MongoDbPhysicalDocumentStore :
         foreach (var unit in units)
             ResolveScope(unit, StorageScopeOperation.BeginUnitOfWork);
         await transactionCapability.EnsureSupportedAsync(scope.Kinds, "physical storage", cancellationToken);
+        await EnsureRolloutFenceAsync(cancellationToken);
 
         var session = await startSessionAsync(cancellationToken);
         try
@@ -352,6 +357,24 @@ public sealed class MongoDbPhysicalDocumentStore :
             model.Provider,
             MongoDbPhysicalQueryHandler.Operations);
 
+    private async Task EnsureRolloutFenceAsync(CancellationToken cancellationToken)
+    {
+        if (rolloutFencePrepared)
+            return;
+        await rolloutFencePreparation.WaitAsync(cancellationToken);
+        try
+        {
+            if (rolloutFencePrepared)
+                return;
+            await MongoDbCollectionRolloutFence.EnsureCollectionAsync(database, cancellationToken);
+            rolloutFencePrepared = true;
+        }
+        finally
+        {
+            rolloutFencePreparation.Release();
+        }
+    }
+
     private async Task<DocumentStoreWriteResult> ExecuteAtomicAsync(
         IReadOnlyList<string> documentKinds,
         Func<IClientSessionHandle, Task<DocumentStoreWriteResult>> action,
@@ -373,6 +396,22 @@ public sealed class MongoDbPhysicalDocumentStore :
                 var result = await action(session);
                 await CommitWithRetryAsync(session, documentKinds, cancellationToken);
                 return result;
+            }
+            catch (MongoDbCollectionRolloutFenceRetryException)
+            {
+                await AbortTransactionIgnoringFailureAsync(session);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!CanRetry(
+                        attempt,
+                        retryStarted,
+                        options.MaximumTransactionAttempts,
+                        options.TransactionRetryTimeout))
+                {
+                    throw;
+                }
+                await DelayBeforeRetryAsync(attempt, cancellationToken);
+                if (timeProvider.GetElapsedTime(retryStarted) >= options.TransactionRetryTimeout)
+                    throw;
             }
             catch (MongoException exception) when (
                 !cancellationToken.IsCancellationRequested &&
@@ -499,7 +538,7 @@ public sealed class MongoDbPhysicalDocumentStore :
             _ => false
         };
 
-    private static bool IsDuplicateKey(MongoException exception) =>
+    internal static bool IsDuplicateKey(MongoException exception) =>
         exception switch
         {
             MongoCommandException command => command.Code == 11000,
@@ -534,6 +573,11 @@ public sealed class MongoDbPhysicalDocumentStore :
         IClientSessionHandle session,
         CancellationToken cancellationToken)
     {
+        await MongoDbCollectionRolloutFence.AssertWriterCompatibleAsync(
+            database,
+            session,
+            route,
+            cancellationToken);
         var current = await LoadDocumentAsync(route, request.Id, scope.StorageKey!, session, cancellationToken);
         if (current is not null)
         {
@@ -584,6 +628,7 @@ public sealed class MongoDbPhysicalDocumentStore :
             projectedValues,
             session,
             cancellationToken);
+        await hooks.CollectionMaintenanceStarting(session, cancellationToken);
         await MaintainCollectionsAsync(route, request, scope.StorageKey!, session, cancellationToken);
         return DocumentStoreWriteResult.Saved(ReadEnvelope(route, document));
     }
@@ -595,6 +640,11 @@ public sealed class MongoDbPhysicalDocumentStore :
         IClientSessionHandle session,
         CancellationToken cancellationToken)
     {
+        await MongoDbCollectionRolloutFence.AssertWriterCompatibleAsync(
+            database,
+            session,
+            route,
+            cancellationToken);
         var filter = MongoDbPhysicalDocumentIdentity.PrimaryExactFilter(route, request.Id, scope.StorageKey!);
         if (request.ExpectedVersion is not null)
             filter &= Builders<BsonDocument>.Filter.Eq(route.Envelope.Version.Identifier, request.ExpectedVersion.Value);
@@ -877,10 +927,12 @@ public sealed class MongoDbPhysicalDocumentStore :
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(action);
+        await EnsureRolloutFenceAsync(cancellationToken);
         await transactionCapability.EnsureSupportedAsync(
             [documentKind],
             "physical bounded mutation",
             cancellationToken);
+        var route = Route(documentKind);
         var retryStarted = timeProvider.GetTimestamp();
         for (var attempt = 1; ; attempt++)
         {
@@ -892,6 +944,11 @@ public sealed class MongoDbPhysicalDocumentStore :
             try
             {
                 await hooks.TransactionBodyStarting(session, attempt, cancellationToken);
+                await MongoDbCollectionRolloutFence.AssertWriterCompatibleAsync(
+                    database,
+                    session,
+                    route,
+                    cancellationToken);
                 var result = await action(session, cancellationToken);
                 if (beforeCommit is not null)
                     await beforeCommit(cancellationToken);
@@ -899,6 +956,22 @@ public sealed class MongoDbPhysicalDocumentStore :
                 if (afterCommitBeforeAcknowledgement is not null)
                     await afterCommitBeforeAcknowledgement(cancellationToken);
                 return result;
+            }
+            catch (MongoDbCollectionRolloutFenceRetryException)
+            {
+                await AbortTransactionIgnoringFailureAsync(session);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!CanRetry(
+                        attempt,
+                        retryStarted,
+                        options.MaximumTransactionAttempts,
+                        options.TransactionRetryTimeout))
+                {
+                    throw;
+                }
+                await DelayBeforeRetryAsync(attempt, cancellationToken);
+                if (timeProvider.GetElapsedTime(retryStarted) >= options.TransactionRetryTimeout)
+                    throw;
             }
             catch (MongoException exception) when (
                 !cancellationToken.IsCancellationRequested &&
@@ -952,6 +1025,11 @@ public sealed class MongoDbPhysicalDocumentStore :
                     await AbortAsync(CancellationToken.None);
                 return result;
             }
+            catch (MongoDbCollectionRolloutFenceRetryException)
+            {
+                await AbortAsync(CancellationToken.None);
+                return DocumentStoreWriteResult.ConcurrencyConflict;
+            }
             catch (MongoException exception) when (
                 !cancellationToken.IsCancellationRequested &&
                 (IsDuplicateKey(exception) || IsTransientTransactionConflict(exception)))
@@ -983,6 +1061,11 @@ public sealed class MongoDbPhysicalDocumentStore :
                 if (result.Status != DocumentStoreWriteStatus.Deleted)
                     await AbortAsync(CancellationToken.None);
                 return result;
+            }
+            catch (MongoDbCollectionRolloutFenceRetryException)
+            {
+                await AbortAsync(CancellationToken.None);
+                return DocumentStoreWriteResult.ConcurrencyConflict;
             }
             catch (MongoException exception) when (
                 !cancellationToken.IsCancellationRequested &&
@@ -1113,6 +1196,9 @@ internal sealed record MongoDbPhysicalDocumentStoreExecutionHooks(
 
     public Func<IClientSessionHandle, int, CancellationToken, ValueTask> QueryRetryDelayCompleted { get; init; } =
         static (_, _, _) => ValueTask.CompletedTask;
+
+    public Func<IClientSessionHandle, CancellationToken, ValueTask> CollectionMaintenanceStarting { get; init; } =
+        static (_, _) => ValueTask.CompletedTask;
 
     public static MongoDbPhysicalDocumentStoreExecutionHooks None { get; } = new(
         static (_, _, _) => ValueTask.CompletedTask,

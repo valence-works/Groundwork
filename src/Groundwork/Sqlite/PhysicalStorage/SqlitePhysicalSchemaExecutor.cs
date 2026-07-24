@@ -1,9 +1,6 @@
-using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Text;
@@ -21,35 +18,40 @@ namespace Groundwork.Sqlite.PhysicalStorage;
 /// </summary>
 public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector
 {
-    private static readonly ConcurrentDictionary<PhysicalSchemaTargetIdentity, SemaphoreSlim> ApplicationLocks = new();
     private readonly SqliteConnection connection;
+    private readonly Func<PhysicalSchemaOperation, CancellationToken, Task>? beforeOperationEvidence;
     private readonly SemaphoreSlim connectionGate = new(1, 1);
 
     public SqlitePhysicalSchemaExecutor(SqliteConnection connection) =>
         this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
+
+    internal SqlitePhysicalSchemaExecutor(
+        SqliteConnection connection,
+        Func<PhysicalSchemaOperation, CancellationToken, Task>? beforeOperationEvidence)
+    {
+        this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
+        this.beforeOperationEvidence = beforeOperationEvidence;
+    }
 
     public async ValueTask<IPhysicalSchemaApplicationLock> AcquireApplicationLockAsync(
         PhysicalSchemaTargetIdentity target,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(target);
-        var gate = ApplicationLocks.GetOrAdd(target, static _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
-        FileStream? fileLock = null;
+        IAsyncDisposable? transitionLock = null;
         try
         {
-            fileLock = await AcquireFileLockAsync(target, cancellationToken);
+            transitionLock = await SqlitePhysicalSchemaTransitionLock.AcquireAsync(
+                connection.ConnectionString,
+                target,
+                cancellationToken);
             await WithConnectionAsync(EnsureInfrastructureAsync, cancellationToken);
-            return new ApplicationLock(target, () =>
-            {
-                fileLock?.Dispose();
-                gate.Release();
-            });
+            return new ApplicationLock(target, transitionLock);
         }
         catch
         {
-            fileLock?.Dispose();
-            gate.Release();
+            if (transitionLock is not null)
+                await transitionLock.DisposeAsync();
             throw;
         }
     }
@@ -134,6 +136,8 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
 
             await using var transaction = await connection.BeginTransactionAsync(ct);
             await ApplyOperationCoreAsync(operation, transaction, ct);
+            if (beforeOperationEvidence is not null)
+                await beforeOperationEvidence(operation, ct);
             await InsertOperationRecordAsync(target, operation, DateTimeOffset.UtcNow, transaction, ct);
             await transaction.CommitAsync(ct);
             var durable = await ReadOperationAsync(target, operation.Identity, ct)
@@ -190,6 +194,8 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
                     }
 
                     await ApplyOperationCoreAsync(operation, transaction, ct, validateObjects: !deferObjectValidation);
+                    if (beforeOperationEvidence is not null)
+                        await beforeOperationEvidence(operation, ct);
                     await InsertOperationRecordAsync(target, operation, appliedAt, transaction, ct);
                     pending.Add(index);
                 }
@@ -1380,30 +1386,6 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private async Task<FileStream?> AcquireFileLockAsync(PhysicalSchemaTargetIdentity target, CancellationToken ct)
-    {
-        var builder = new SqliteConnectionStringBuilder(connection.ConnectionString);
-        if (SqliteRelationalSessions.IsInMemory(builder))
-            return null;
-        var dataSource = builder.DataSource;
-        if (string.IsNullOrWhiteSpace(dataSource))
-            return null;
-        var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(target.ToString())))[..16].ToLowerInvariant();
-        var lockPath = $"{Path.GetFullPath(dataSource)}.groundwork-{fingerprint}.schema.lock";
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
-            try
-            {
-                return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.Asynchronous);
-            }
-            catch (IOException)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(25), ct);
-            }
-        }
-    }
-
     private async Task<T> WithConnectionAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken ct)
     {
         await connectionGate.WaitAsync(ct);
@@ -1492,17 +1474,18 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         }
     }
 
-    private sealed class ApplicationLock(PhysicalSchemaTargetIdentity target, Action release) : IPhysicalSchemaApplicationLock
+    private sealed class ApplicationLock(
+        PhysicalSchemaTargetIdentity target,
+        IAsyncDisposable transitionLock) : IPhysicalSchemaApplicationLock
     {
         private int disposed;
         public PhysicalSchemaTargetIdentity Target { get; } = target;
         public CancellationToken OwnershipLost => CancellationToken.None;
         public bool IsOwned => Volatile.Read(ref disposed) == 0;
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref disposed, 1) == 0)
-                release();
-            return ValueTask.CompletedTask;
+                await transitionLock.DisposeAsync();
         }
     }
 

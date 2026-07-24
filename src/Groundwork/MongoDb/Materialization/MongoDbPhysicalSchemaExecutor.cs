@@ -33,7 +33,9 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
     private readonly Func<CancellationToken, ValueTask>? beforeAppliedStateWrite;
     private readonly Action<DateTimeOffset>? afterLeaseRenewal;
     private readonly Func<CancellationToken, ValueTask>? afterCollectionBackfillRead;
+    private readonly Func<CancellationToken, ValueTask>? afterCollectionBackfillScan;
     private readonly MongoDbPhysicalMutationSchemaDefinitionHandler mutationDefinitions;
+    private readonly PhysicalSchemaTarget? desiredTarget;
 
     public MongoDbPhysicalSchemaExecutor(
         IMongoDatabase database,
@@ -45,13 +47,22 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
 
     internal MongoDbPhysicalSchemaExecutor(
         IMongoDatabase database,
+        PhysicalSchemaTarget desiredTarget)
+        : this(database)
+    {
+        this.desiredTarget = desiredTarget ?? throw new ArgumentNullException(nameof(desiredTarget));
+    }
+
+    internal MongoDbPhysicalSchemaExecutor(
+        IMongoDatabase database,
         TimeProvider? timeProvider,
         TimeSpan? leaseDuration,
         Func<CancellationToken, ValueTask>? beforeBackfillWrite,
         Func<CancellationToken, ValueTask>? beforeOperationEvidenceWrite = null,
         Func<CancellationToken, ValueTask>? beforeAppliedStateWrite = null,
         Action<DateTimeOffset>? afterLeaseRenewal = null,
-        Func<CancellationToken, ValueTask>? afterCollectionBackfillRead = null)
+        Func<CancellationToken, ValueTask>? afterCollectionBackfillRead = null,
+        Func<CancellationToken, ValueTask>? afterCollectionBackfillScan = null)
     {
         ArgumentNullException.ThrowIfNull(database);
         this.database = database
@@ -70,6 +81,7 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         this.beforeAppliedStateWrite = beforeAppliedStateWrite;
         this.afterLeaseRenewal = afterLeaseRenewal;
         this.afterCollectionBackfillRead = afterCollectionBackfillRead;
+        this.afterCollectionBackfillScan = afterCollectionBackfillScan;
         mutationDefinitions = new MongoDbPhysicalMutationSchemaDefinitionHandler(
             this.database,
             beforeBackfillWrite);
@@ -135,10 +147,22 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
     {
         var lease = RequireLease(applicationLock, target);
         await lease.AssertOwnedAsync(session: null, cancellationToken);
-        return await ReadInspectedHistoryAsync(
+        var history = await ReadInspectedHistoryAsync(
             target,
             validateDurableEvidence: true,
             cancellationToken);
+        if (desiredTarget is not null &&
+            history.AppliedState?.TargetFingerprint == desiredTarget.Fingerprint)
+        {
+            foreach (var route in desiredTarget.Routes)
+            {
+                await MongoDbCollectionRolloutFence.ValidateActiveIfPresentAsync(
+                    database,
+                    route,
+                    cancellationToken);
+            }
+        }
+        return history;
     }
 
     public ValueTask<PhysicalSchemaInspectionResult> InspectHistoryAsync(
@@ -165,12 +189,22 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
                 await ValidateDurableEvidenceAsync(appliedState, cancellationToken);
                 await ValidateAsync(
                     ValidatePhysicalSchemaOperation.ForAppliedState(appliedState),
-                    cancellationToken);
+                    cancellationToken,
+                    validateRolloutFence: false);
             }
             catch (InvalidOperationException)
             {
                 isAppliedSchemaValid = false;
             }
+        }
+        try
+        {
+            foreach (var route in target.Routes)
+                await MongoDbCollectionRolloutFence.ValidateActiveIfPresentAsync(database, route, cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            isAppliedSchemaValid = false;
         }
         return new PhysicalSchemaInspectionResult(history, isAppliedSchemaValid);
     }
@@ -390,14 +424,17 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         {
             case CreatePrimaryStorageOperation primary:
                 await EnsureCollectionAsync(primary.Storage.Name.Identifier, cancellationToken);
+                await MongoDbCollectionRolloutFence.ActivateAsync(database, primary.Route, cancellationToken);
                 break;
             case CreatePhysicalEntityStorageOperation entity:
                 await EnsureCollectionAsync(entity.Storage.Name.Identifier, cancellationToken);
+                await MongoDbCollectionRolloutFence.ActivateAsync(database, entity.Route, cancellationToken);
                 break;
             case CreateLinkedStorageOperation linked:
                 await EnsureCollectionAsync(linked.Storage.Name.Identifier, cancellationToken);
                 break;
             case CreateCollectionElementStorageOperation collectionElement:
+                await MongoDbCollectionRolloutFence.ActivateAsync(database, collectionElement.Route, cancellationToken);
                 await EnsureCollectionElementStorageAsync(collectionElement.Storage, cancellationToken);
                 break;
             case AddProjectedColumnOperation:
@@ -432,6 +469,7 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         await EnsureCollectionAsync(AppliedStateCollection, cancellationToken);
         await EnsureCollectionAsync(OperationCollection, cancellationToken);
         await EnsureCollectionAsync(LockCollection, cancellationToken);
+        await EnsureCollectionAsync(MongoDbCollectionRolloutFence.CollectionName, cancellationToken);
         await EnsureCollectionAsync(MongoDbPhysicalStorageFields.BoundedMutationOperationsCollection, cancellationToken);
     }
 
@@ -841,6 +879,8 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
                 await UpsertLinkedProjectionAsync(route, document, canonicalJson, cancellationToken);
             }
         }
+        if (operation.CollectionStorage is not null && afterCollectionBackfillScan is not null)
+            await afterCollectionBackfillScan(cancellationToken);
     }
 
     private async Task BackfillCollectionAsync(
@@ -984,13 +1024,18 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         return updates;
     }
 
-    private async Task ValidateAsync(ValidatePhysicalSchemaOperation operation, CancellationToken cancellationToken)
+    private async Task ValidateAsync(
+        ValidatePhysicalSchemaOperation operation,
+        CancellationToken cancellationToken,
+        bool validateRolloutFence = true)
     {
         using var collectionCursor = await database.ListCollectionsAsync(cancellationToken: cancellationToken);
         var collections = (await collectionCursor.ToListAsync(cancellationToken))
             .ToDictionary(collection => collection.GetValue("name").AsString, StringComparer.Ordinal);
         foreach (var route in operation.Routes)
         {
+            if (validateRolloutFence)
+                await MongoDbCollectionRolloutFence.ValidateActivatedAsync(database, route, cancellationToken);
             var storageTargets = new[] { route.PrimaryStorage }
                 .Concat(route.LinkedIndexStorage is null ? [] : [route.LinkedIndexStorage])
                 .ToArray();

@@ -1780,6 +1780,316 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Activated_collection_rollout_rejects_an_old_route_update_after_scan_exhaustion()
+    {
+        var database = Database();
+        var initial = CollectionEvolutionModel(includeCollection: false);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(initial);
+        var oldStore = new MongoDbPhysicalDocumentStore(
+            database,
+            initial,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await oldStore.SaveAsync(new SaveDocumentRequest(
+            "workItem", "existing", "1", """{"category":"a","tags":["old"]}"""));
+
+        var changed = CollectionEvolutionModel(includeCollection: true);
+        var scanExhausted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var continuePublication = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var application = PhysicalSchemaApplication.ApplyAsync(
+            changed.Target,
+            new MongoDbPhysicalSchemaExecutor(
+                database,
+                timeProvider: null,
+                leaseDuration: null,
+                beforeBackfillWrite: null,
+                afterCollectionBackfillScan:
+                async cancellationToken =>
+                {
+                    scanExhausted.TrySetResult();
+                    await continuePublication.Task.WaitAsync(cancellationToken);
+                }));
+        await scanExhausted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var exception = await Assert.ThrowsAsync<MongoDbCollectionRouteUpgradeRequiredException>(() =>
+            oldStore.SaveAsync(new SaveDocumentRequest(
+                "workItem",
+                "existing",
+                "1",
+                """{"category":"a","tags":["stale"]}""",
+                ExpectedVersion: 1)));
+        Assert.StartsWith(
+            MongoDbCollectionRouteUpgradeRequiredException.DiagnosticCode,
+            exception.Message,
+            StringComparison.Ordinal);
+        await Assert.ThrowsAsync<MongoDbCollectionRouteUpgradeRequiredException>(() =>
+            oldStore.DeleteAsync(new DeleteDocumentRequest(
+                "workItem",
+                "existing",
+                ExpectedVersion: 1)));
+        continuePublication.TrySetResult();
+        await application;
+
+        var changedStore = new MongoDbPhysicalDocumentStore(
+            database,
+            changed,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        Assert.Equal("existing", Assert.Single((await changedStore.QueryAsync(CollectionQuery("old"))).Documents).Id);
+        Assert.Empty((await changedStore.QueryAsync(CollectionQuery("stale"))).Documents);
+    }
+
+    [Fact]
+    public async Task Activated_collection_rollout_rejects_an_old_route_insert_after_scan_exhaustion()
+    {
+        var database = Database();
+        var initial = CollectionEvolutionModel(includeCollection: false);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(initial);
+        var oldStore = new MongoDbPhysicalDocumentStore(
+            database,
+            initial,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        var changed = CollectionEvolutionModel(includeCollection: true);
+        var scanExhausted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var continuePublication = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var application = PhysicalSchemaApplication.ApplyAsync(
+            changed.Target,
+            new MongoDbPhysicalSchemaExecutor(
+                database,
+                timeProvider: null,
+                leaseDuration: null,
+                beforeBackfillWrite: null,
+                afterCollectionBackfillScan:
+                async cancellationToken =>
+                {
+                    scanExhausted.TrySetResult();
+                    await continuePublication.Task.WaitAsync(cancellationToken);
+                }));
+        await scanExhausted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await Assert.ThrowsAsync<MongoDbCollectionRouteUpgradeRequiredException>(() =>
+            oldStore.SaveAsync(new SaveDocumentRequest(
+                "workItem",
+                "late",
+                "1",
+                """{"category":"a","tags":["late"]}""")));
+        continuePublication.TrySetResult();
+        await application;
+
+        var changedStore = new MongoDbPhysicalDocumentStore(
+            database,
+            changed,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        Assert.Null(await changedStore.LoadAsync("workItem", "late"));
+        Assert.Empty((await changedStore.QueryAsync(CollectionQuery("late"))).Documents);
+    }
+
+    [Fact]
+    public async Task Activated_collection_rollout_rejects_an_old_route_bounded_mutation()
+    {
+        var database = Database();
+        var initial = CollectionEvolutionModel(includeCollection: false);
+        var staleMutationModel = CollectionEvolutionModelWithBoundedMutation();
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(initial);
+        var initialStore = new MongoDbPhysicalDocumentStore(
+            database,
+            initial,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await initialStore.SaveAsync(new SaveDocumentRequest(
+            "workItem", "existing", "1", """{"category":"a","tags":["old"]}"""));
+        var staleStore = new MongoDbPhysicalDocumentStore(
+            database,
+            staleMutationModel,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        var staleMutations = MongoDbPhysicalMutationRuntime.Create(
+            staleStore,
+            staleMutationModel.Manifest,
+            Assert.Single(staleMutationModel.Routes),
+            staleMutationModel.Provider);
+
+        var changed = CollectionEvolutionModel(includeCollection: true);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(changed);
+
+        var exception = await Assert.ThrowsAsync<MongoDbCollectionRouteUpgradeRequiredException>(() =>
+            staleMutations.ExecuteAsync(new DocumentMutation(
+                "workItem",
+                "delete-by-category",
+                "stale-delete",
+                [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "a"))])));
+
+        Assert.StartsWith(
+            MongoDbCollectionRouteUpgradeRequiredException.DiagnosticCode,
+            exception.Message,
+            StringComparison.Ordinal);
+        var changedStore = new MongoDbPhysicalDocumentStore(
+            database,
+            changed,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        Assert.NotNull(await changedStore.LoadAsync("workItem", "existing"));
+        Assert.Equal("existing", Assert.Single((await changedStore.QueryAsync(CollectionQuery("old"))).Documents).Id);
+    }
+
+    [Fact]
+    public async Task Failed_collection_rollout_retains_the_upgrade_fence_and_restart_converges()
+    {
+        var database = Database();
+        var initial = CollectionEvolutionModel(includeCollection: false);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(initial);
+        var oldStore = new MongoDbPhysicalDocumentStore(
+            database,
+            initial,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await oldStore.SaveAsync(new SaveDocumentRequest(
+            "workItem", "existing", "1", """{"category":"a","tags":["old"]}"""));
+        var changed = CollectionEvolutionModel(includeCollection: true);
+
+        await Assert.ThrowsAsync<InjectedCollectionRolloutFailure>(() =>
+            PhysicalSchemaApplication.ApplyAsync(
+                changed.Target,
+                new MongoDbPhysicalSchemaExecutor(
+                    database,
+                    timeProvider: null,
+                    leaseDuration: null,
+                    beforeBackfillWrite: null,
+                    afterCollectionBackfillScan:
+                    _ => ValueTask.FromException(new InjectedCollectionRolloutFailure()))));
+        await Assert.ThrowsAsync<MongoDbCollectionRouteUpgradeRequiredException>(() =>
+            oldStore.SaveAsync(new SaveDocumentRequest(
+                "workItem", "late-old", "1", """{"category":"a","tags":["stale"]}""")));
+        var oldReplay = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new MongoDbGroundworkMaterializer(database).MaterializeAsync(initial));
+        Assert.Contains("rollout fence", oldReplay.Message, StringComparison.OrdinalIgnoreCase);
+
+        var changedStore = new MongoDbPhysicalDocumentStore(
+            database,
+            changed,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        Assert.Equal(
+            DocumentStoreWriteStatus.Saved,
+            (await changedStore.SaveAsync(new SaveDocumentRequest(
+                "workItem", "during-restart", "1", """{"category":"a","tags":["new"]}"""))).Status);
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.Applied,
+            (await PhysicalSchemaApplication.ApplyAsync(
+                changed.Target,
+                new MongoDbPhysicalSchemaExecutor(database))).Outcome);
+
+        Assert.Equal("existing", Assert.Single((await changedStore.QueryAsync(CollectionQuery("old"))).Documents).Id);
+        Assert.Equal("during-restart", Assert.Single((await changedStore.QueryAsync(CollectionQuery("new"))).Documents).Id);
+        Assert.Null(await changedStore.LoadAsync("workItem", "late-old"));
+    }
+
+    [Fact]
+    public async Task Collection_owner_and_elements_roll_back_together_when_maintenance_fails()
+    {
+        var database = Database();
+        var model = CollectionEvolutionModel(includeCollection: true);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")),
+            scopeObserver: null,
+            options: null,
+            TimeProvider.System,
+            MongoDbPhysicalDocumentStoreExecutionHooks.None with
+            {
+                CollectionMaintenanceStarting = static (_, _) =>
+                    ValueTask.FromException(new InjectedCollectionRolloutFailure())
+            });
+
+        await Assert.ThrowsAsync<InjectedCollectionRolloutFailure>(() =>
+            store.SaveAsync(new SaveDocumentRequest(
+                "workItem", "failed", "1", """{"category":"a","tags":["orphan"]}""")));
+
+        Assert.Null(await store.LoadAsync("workItem", "failed"));
+        var storage = Assert.Single(Assert.Single(model.Routes).CollectionElementStorages);
+        Assert.Empty(await database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+            .Find(Builders<BsonDocument>.Filter.Empty)
+            .ToListAsync());
+        var route = Assert.Single(model.Routes);
+        var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .SingleAsync();
+        Assert.Equal(0, fence["activity"].ToInt64());
+    }
+
+    [Fact]
+    public async Task First_write_against_a_pre_fence_database_creates_and_touches_the_fence_transactionally()
+    {
+        var database = Database();
+        var model = CollectionEvolutionModel(includeCollection: false);
+        var materializer = new MongoDbGroundworkMaterializer(database);
+        await materializer.MaterializeAsync(model);
+        await database.DropCollectionAsync(MongoDbCollectionRolloutFence.CollectionName);
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.NoChanges,
+            (await materializer.MaterializeAsync(model)).Outcome);
+        var route = Assert.Single(model.Routes);
+        var failingStore = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")),
+            scopeObserver: null,
+            options: null,
+            TimeProvider.System,
+            MongoDbPhysicalDocumentStoreExecutionHooks.None with
+            {
+                CollectionMaintenanceStarting = static (_, _) =>
+                    ValueTask.FromException(new InjectedCollectionRolloutFailure())
+            });
+        await Assert.ThrowsAsync<InjectedCollectionRolloutFailure>(() =>
+            failingStore.SaveAsync(new SaveDocumentRequest(
+                "workItem", "failed", "1", """{"category":"failed"}""")));
+        Assert.Empty(await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .ToListAsync());
+        var store = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+
+        var firstWrites = await Task.WhenAll(
+            store.SaveAsync(new SaveDocumentRequest(
+                "workItem", "first", "1", """{"category":"a"}""")),
+            store.SaveAsync(new SaveDocumentRequest(
+                "workItem", "second", "1", """{"category":"b"}""")));
+        Assert.All(firstWrites, result => Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status));
+
+        var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .SingleAsync();
+        Assert.Equal(MongoDbCollectionRolloutFence.Signature(route), fence["required_signature"].AsString);
+        Assert.Equal(2, fence["activity"].ToInt64());
+        Assert.NotNull(await store.LoadAsync("workItem", "first"));
+        Assert.NotNull(await store.LoadAsync("workItem", "second"));
+    }
+
+    [Fact]
+    public async Task Applied_state_rejects_collection_rollout_fence_drift()
+    {
+        var database = Database();
+        var model = CollectionEvolutionModel(includeCollection: true);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var route = Assert.Single(model.Routes);
+        await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .UpdateOneAsync(
+                Builders<BsonDocument>.Filter.Eq(
+                    "_id",
+                    MongoDbCollectionRolloutFence.Identity(route)),
+                Builders<BsonDocument>.Update.Set("required_signature", "drift"));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new MongoDbGroundworkMaterializer(database).MaterializeAsync(model));
+
+        Assert.Contains("rollout fence", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Linked_backfill_surfaces_true_unique_collision_and_retains_old_applied_state()
     {
         var database = Database();
@@ -2867,6 +3177,35 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             []));
     }
 
+    private static MongoDbPhysicalStorageModel CollectionEvolutionModelWithBoundedMutation()
+    {
+        var template = CollectionEvolutionModel(includeCollection: false);
+        var unit = Assert.Single(template.Manifest.StorageUnits);
+        var storage = unit.PhysicalStorage!;
+        return MongoDbPhysicalStorageModel.Compile(template.Manifest with
+        {
+            StorageUnits =
+            [
+                unit with
+                {
+                    PhysicalStorage = new StorageUnitPhysicalStorage(
+                        storage.ProvisioningMode,
+                        storage.Policy,
+                        storage.LogicalIndexes,
+                        storage.BoundedQueries,
+                        storage.NameOverrides,
+                        boundedMutations:
+                        [
+                            new BoundedMutationDeclaration(
+                                "delete-by-category",
+                                "list-by-category",
+                                BoundedMutationAction.Delete())
+                        ])
+                }
+            ]
+        });
+    }
+
     private static MongoDbPhysicalStorageModel UnindexedKeywordContainsModel()
     {
         const string path = "status";
@@ -3230,6 +3569,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         cursorValue.AsBsonDocument.TryGetValue("firstBatch", out var batchValue) &&
         batchValue.IsBsonArray &&
         batchValue.AsBsonArray.Count == 0;
+
+    private sealed class InjectedCollectionRolloutFailure : Exception;
 
     private sealed class LeaseLossBlockingExecutor(IPhysicalSchemaExecutor inner) : IPhysicalSchemaExecutor
     {

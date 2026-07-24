@@ -42,6 +42,9 @@ internal static class RelationalPhysicalStorageTestModels
         bool includeLatestPerCategory = false,
         bool includeCollection = false,
         bool includeCollectionMembershipQuery = false,
+        PortablePhysicalType collectionType = PortablePhysicalType.String,
+        IndexValueKind collectionLogicalValueKind = IndexValueKind.String,
+        int? collectionLength = 128,
         string? collectionCollation = "ordinal")
     {
         mutationOptions ??= new RelationalMutationScenarioOptions();
@@ -57,8 +60,8 @@ internal static class RelationalPhysicalStorageTestModels
             columns.Add(new ProjectedColumnDefinition(
                 "permissions",
                 "permissions",
-                PortablePhysicalType.String,
-                Length: 128,
+                collectionType,
+                Length: collectionLength,
                 IsNullable: true,
                 Collation: collectionCollation,
                 Cardinality: ProjectionCardinality.CollectionElements,
@@ -143,7 +146,7 @@ internal static class RelationalPhysicalStorageTestModels
             var permissions = new LogicalIndexDeclaration(
                 "by-permissions",
                 [new IndexField("permissions")],
-                IndexValueKind.String,
+                collectionLogicalValueKind,
                 false,
                 MissingValueBehavior.Excluded);
             logicalIndexes.Add(permissions);

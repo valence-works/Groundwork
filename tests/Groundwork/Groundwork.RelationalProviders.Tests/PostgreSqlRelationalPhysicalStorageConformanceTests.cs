@@ -1,4 +1,5 @@
 using Groundwork.Core.Capabilities;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Queries;
@@ -82,6 +83,193 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         Assert.Equal(2, contains.TotalCount);
         Assert.Equal(["one", "three"], contains.Documents.Select(document => document.Id).Order());
         Assert.Equal("one", Assert.Single(containsAll.Documents).Id);
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":["c"]}""", 1))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
+            "configurationDocument", "three", 1))).Status);
+        Assert.Equal("one", Assert.Single((await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "c"))]))).Documents).Id);
+        Assert.Empty((await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]))).Documents);
+    }
+
+    [Fact]
+    public async Task Collection_contains_all_deduplicates_after_typed_conversion()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true,
+            collectionType: PortablePhysicalType.Int32,
+            collectionLogicalValueKind: IndexValueKind.Number,
+            collectionLength: null,
+            collectionCollation: null);
+        var connectionString = container.GetConnectionString();
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new PostgreSqlPhysicalSchemaExecutor(connectionString));
+        var store = new PostgreSqlPhysicalDocumentStore(
+            connectionString, model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":[1,2]}"""));
+        var runtime = PostgreSqlPhysicalQueryRuntime.Create(
+            store, model.Manifest, model.Target.Routes.Single(), model.Target.Provider);
+
+        var result = await runtime.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["1", "01"]))]));
+
+        Assert.Equal("one", Assert.Single(result.Documents).Id);
+    }
+
+    [Fact]
+    public async Task Additive_collection_storage_backfills_preexisting_documents()
+    {
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var initial = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames);
+        var additive = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        var connectionString = container.GetConnectionString();
+        await PhysicalSchemaApplication.ApplyAsync(initial.Target, new PostgreSqlPhysicalSchemaExecutor(connectionString));
+        await new PostgreSqlPhysicalDocumentStore(
+                connectionString, initial.Manifest, initial.Target.Routes, DocumentStoreAccess.Global)
+            .SaveAsync(new SaveDocumentRequest(
+                "configurationDocument", "preexisting", "1", """{"category":"x","permissions":["a","b"]}"""));
+
+        var applied = await PhysicalSchemaApplication.ApplyAsync(
+            additive.Target, new PostgreSqlPhysicalSchemaExecutor(connectionString));
+        var evolved = new PostgreSqlPhysicalDocumentStore(
+            connectionString, additive.Manifest, additive.Target.Routes, DocumentStoreAccess.Global);
+        var result = await PostgreSqlPhysicalQueryRuntime.Create(
+                evolved, additive.Manifest, additive.Target.Routes.Single(), additive.Target.Provider)
+            .QueryAsync(new DocumentQuery(
+                "configurationDocument",
+                "list-by-permissions",
+                [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.Equal("preexisting", Assert.Single(result.Documents).Id);
+    }
+
+    [Fact]
+    public async Task Collection_schema_transition_fences_old_route_writers()
+    {
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var initial = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            mutationOptions: new(IncludeCategoryTransition: true));
+        var additive = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            mutationOptions: new(IncludeCategoryTransition: true),
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        var connectionString = container.GetConnectionString();
+
+        await RelationalCollectionSchemaTransitionAssertions.SuccessfulTransitionFencesOldWritersAsync(
+            initial,
+            additive,
+            (manifest, routes) => new PostgreSqlPhysicalDocumentStore(
+                connectionString,
+                manifest,
+                routes,
+                DocumentStoreAccess.Global),
+            (store, manifest, route) => PostgreSqlPhysicalMutationRuntime.Create(
+                Assert.IsType<PostgreSqlPhysicalDocumentStore>(store),
+                manifest,
+                route,
+                PostgreSqlGroundworkCapabilities.Provider),
+            hook => new PostgreSqlPhysicalSchemaExecutor(connectionString, hook, null));
+    }
+
+    [Fact]
+    public async Task Failed_collection_schema_transition_preserves_old_writer_admission()
+    {
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var initial = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames);
+        var additive = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            includeCollection: true);
+        var connectionString = container.GetConnectionString();
+
+        await RelationalCollectionSchemaTransitionAssertions.FailedTransitionPreservesOldWriterAdmissionAsync(
+            initial,
+            additive,
+            (manifest, routes) => new PostgreSqlPhysicalDocumentStore(
+                connectionString,
+                manifest,
+                routes,
+                DocumentStoreAccess.Global),
+            hook => new PostgreSqlPhysicalSchemaExecutor(connectionString, hook, null));
+    }
+
+    [Fact]
+    public async Task Collection_save_failure_rolls_back_primary_and_element_rows()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            includeCollection: true);
+        var connectionString = container.GetConnectionString();
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new PostgreSqlPhysicalSchemaExecutor(connectionString));
+        var store = new PostgreSqlPhysicalDocumentStore(
+            connectionString, model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
+        store.WriteInterceptor = (point, operation, _, _, _) =>
+            point == RelationalPhysicalWriteExecutionPoint.AfterPrimaryMutation &&
+            operation == RelationalPhysicalWriteOperation.Save
+                ? ValueTask.FromException(new InjectedCollectionWriteException())
+                : ValueTask.CompletedTask;
+
+        await Assert.ThrowsAsync<InjectedCollectionWriteException>(() => store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "failed", "1", """{"category":"x","permissions":["a"]}""")));
+        store.WriteInterceptor = null;
+
+        Assert.Null(await store.LoadAsync("configurationDocument", "failed"));
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {Q(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
+        Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
     }
 
     [Theory]
@@ -158,8 +346,10 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         var storage = Assert.Single(Assert.Single(model.Target.Routes).CollectionElementStorages);
         var executor = new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString());
 
-        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied,
-            (await PhysicalSchemaApplication.ApplyAsync(model.Target, executor)).Outcome);
+        var applied = await PhysicalSchemaApplication.ApplyAsync(model.Target, executor);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.Contains(applied.AppliedState!.Snapshot.Routes.Single().ResolvedNames, name =>
+            name.Identifier == storage.MembershipKey.Name.Identifier);
         Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges,
             (await PhysicalSchemaApplication.ApplyAsync(
                 model.Target,
@@ -201,6 +391,36 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             command.Parameters.AddWithValue("table", table);
             return (string)(await command.ExecuteScalarAsync())!;
         }
+    }
+
+    [Fact]
+    public async Task Collection_membership_index_drift_is_rejected_from_live_schema()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: $"collection_{Guid.NewGuid():N}"[..19],
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            includeCollection: true);
+        var storage = Assert.Single(model.Target.Routes.Single().CollectionElementStorages);
+        var connectionString = container.GetConnectionString();
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new PostgreSqlPhysicalSchemaExecutor(connectionString));
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                $"DROP INDEX {Q(storage.MembershipKey.Name.Identifier)}; " +
+                $"CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {Q(storage.Storage.Name.Identifier)} (" +
+                $"{string.Join(", ", storage.MembershipKey.OwnerColumns.Select(column => Q(column.Column.Identifier))
+                    .Append(Q(storage.MembershipKey.Value.Column.Identifier)))});";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            PhysicalSchemaApplication.ApplyAsync(model.Target, new PostgreSqlPhysicalSchemaExecutor(connectionString)));
+        Assert.Contains(storage.MembershipKey.Name.Identifier, error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1655,5 +1875,9 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         WrongCollation,
         WrongDefault,
         WrongPrimaryKeyOrder
+    }
+
+    private sealed class InjectedCollectionWriteException : Exception
+    {
     }
 }

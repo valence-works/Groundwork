@@ -61,6 +61,7 @@ public static class PhysicalQueryPlanCompiler
         var predicateDeclarations = ResolvePredicates(logicalIndex, query, target, diagnostics);
         var residualPredicateDeclarations = ResolveResidualPredicates(query, logicalIndex, target, diagnostics);
         var hasMixedIdentityDemand = HasMixedIdentityDemand(predicateDeclarations);
+        ValidateCollectionOrdering(route, logicalIndex, query, target, diagnostics);
         if (query.LatestPerKeyPath is not null &&
             logicalIndex.Fields.All(field => field.Path != query.LatestPerKeyPath))
         {
@@ -161,7 +162,11 @@ public static class PhysicalQueryPlanCompiler
                 identityFields.Resolve(
                     predicate.Path,
                     logicalIndex.GetValueKind(predicate.Path)),
-                predicate.Operations.ToFrozenSet()))
+                predicate.Operations.ToFrozenSet(),
+                CollectionConstraint: ResolveCollectionConstraint(
+                    route,
+                    selectedSource.Value,
+                    predicate.Path)))
             .Concat(residualPredicateDeclarations.Select(predicate => new PhysicalQueryPredicate(
                 predicate.Path,
                 identityFields.Resolve(predicate.Path, predicate.ValueKind),
@@ -468,11 +473,55 @@ public static class PhysicalQueryPlanCompiler
         }
     }
 
+    private static void ValidateCollectionOrdering(
+        ExecutableStorageRoute route,
+        LogicalIndexDeclaration logicalIndex,
+        BoundedQueryDeclaration query,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        var collectionPaths = route.CollectionElementStorages
+            .Select(storage => storage.Projection.Definition.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        var orderedPaths = query.SortFields.Count != 0
+            ? query.SortFields.Select(field => field.Path)
+            : query.SortSupport == QuerySortSupport.None
+                ? []
+                : logicalIndex.Fields.Select(field => field.Path);
+        var collectionOrdering = orderedPaths
+            .Where(collectionPaths.Contains)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (collectionOrdering.Length == 0)
+            return;
+
+        diagnostics.Add(Error(
+            "GW-QUERY-014",
+            $"Bounded query '{query.Identity}' cannot order by collection-valued paths: " +
+            $"{string.Join(", ", collectionOrdering)}. Collection ordinals are reconstruct-only.",
+            target));
+    }
+
     private static bool HasMixedIdentityDemand(IEnumerable<BoundedQueryPredicateField> predicates) =>
         predicates.Any(predicate =>
             predicate.Path == PhysicalDocumentFieldPaths.Id &&
             PhysicalQueryIdentityDemand.Resolve(predicate.Operations) ==
             PhysicalQueryIdentityEvidenceDemand.Mixed);
+
+    private static PhysicalQueryCollectionConstraint? ResolveCollectionConstraint(
+        ExecutableStorageRoute route,
+        PhysicalQuerySourceKind source,
+        string path)
+    {
+        if (source != PhysicalQuerySourceKind.CollectionElements)
+            return null;
+        var projection = route.CollectionElementStorages.Single(storage =>
+            storage.Projection.Definition.Path == path).Projection.Definition;
+        return new PhysicalQueryCollectionConstraint(
+            projection.Type,
+            projection.MaxCollectionElements!.Value);
+    }
 
     private static void ValidateExecutableCompatibility(
         ExecutableStorageRoute route,
