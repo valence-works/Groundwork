@@ -47,7 +47,8 @@ public static class PostgreSqlDocumentStoreFactory
             manifest,
             target.Routes,
             access,
-            scopeObserver);
+            scopeObserver,
+            target.Provider);
     }
 
     public static Task<PostgreSqlDocumentStore> CreateAsync(

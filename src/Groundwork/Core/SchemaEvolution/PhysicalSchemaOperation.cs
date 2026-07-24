@@ -12,6 +12,7 @@ public enum PhysicalSchemaOperationKind
 {
     CreatePrimaryStorage,
     CreateLinkedStorage,
+    CreateCollectionElementStorage,
     CreatePhysicalEntityStorage,
     AddProjectedColumn,
     FinalizeProjectedColumn,
@@ -26,7 +27,8 @@ public enum CanonicalJsonBackfillSubjectKind
 {
     ProjectedColumn,
     PhysicalIndex,
-    LogicalIndex
+    LogicalIndex,
+    CollectionElements
 }
 
 /// <summary>
@@ -138,6 +140,26 @@ public sealed class CreateLinkedStorageOperation : PhysicalSchemaOperation
     public ExecutableStorageObjectRoute Storage => Route.LinkedIndexStorage!;
 }
 
+/// <summary>Creates one typed provider-owned element storage object for a collection projection.</summary>
+public sealed class CreateCollectionElementStorageOperation : PhysicalSchemaOperation
+{
+    internal CreateCollectionElementStorageOperation(
+        ExecutableStorageRoute route,
+        ExecutableCollectionElementStorageRoute storage)
+        : base(
+            PhysicalSchemaOperationKind.CreateCollectionElementStorage,
+            route.StorageUnit,
+            storage.Projection.Definition.LogicalName,
+            PhysicalSchemaOperationCanonicalizer.CollectionElementStorage(storage))
+    {
+        Route = route;
+        Storage = storage;
+    }
+
+    public ExecutableStorageRoute Route { get; }
+    public ExecutableCollectionElementStorageRoute Storage { get; }
+}
+
 public sealed class CreatePhysicalEntityStorageOperation : PhysicalSchemaOperation
 {
     internal CreatePhysicalEntityStorageOperation(ExecutableStorageRoute route)
@@ -237,6 +259,28 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
     {
     }
 
+    internal BackfillCanonicalJsonOperation(
+        ExecutableStorageRoute route,
+        ExecutableCollectionElementStorageRoute collectionStorage,
+        string dependencyFingerprint)
+        : this(
+            route.StorageUnit,
+            route,
+            ExecutableStorageObjectRole.CollectionElementStorage,
+            CanonicalJsonBackfillSubjectKind.CollectionElements,
+            collectionStorage.Projection.Definition.LogicalName,
+            [collectionStorage.Projection.Definition.Path],
+            [
+                dependencyFingerprint,
+                collectionStorage.Storage.Name.LogicalName,
+                collectionStorage.Storage.Name.Identifier,
+                PhysicalSchemaOperationCanonicalizer.CollectionElementStorage(collectionStorage)
+            ],
+            null,
+            collectionStorage)
+    {
+    }
+
     private BackfillCanonicalJsonOperation(
         StorageUnitIdentity storageUnit,
         ExecutableStorageRoute? route,
@@ -245,7 +289,8 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
         string subjectIdentity,
         IReadOnlyList<string> sourcePaths,
         IReadOnlyList<string?> semanticParts,
-        IndexDeclaration? logicalIndex)
+        IndexDeclaration? logicalIndex,
+        ExecutableCollectionElementStorageRoute? collectionStorage = null)
         : base(
             PhysicalSchemaOperationKind.BackfillCanonicalJson,
             storageUnit,
@@ -268,6 +313,7 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
         SubjectKind = subjectKind;
         SourcePaths = Array.AsReadOnly(sourcePaths.Order(StringComparer.Ordinal).ToArray());
         LogicalIndex = logicalIndex;
+        CollectionStorage = collectionStorage;
     }
 
     public ExecutableStorageRoute? Route { get; }
@@ -280,9 +326,10 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
 
     public IndexDeclaration? LogicalIndex { get; }
 
-    public ExecutableStorageObjectRoute? Storage => Route is null
-        ? null
-        : PhysicalSchemaOperationStorage.Resolve(Route, Target);
+    public ExecutableCollectionElementStorageRoute? CollectionStorage { get; }
+
+    public ExecutableStorageObjectRoute? Storage => CollectionStorage?.Storage ??
+        (Route is null ? null : PhysicalSchemaOperationStorage.Resolve(Route, Target));
 
     MaterializationOperationKind IProviderMaterializationOperation.Kind =>
         MaterializationOperationKind.BackfillCanonicalJson;
@@ -411,6 +458,8 @@ internal static class PhysicalSchemaOperationStorage
             ExecutableStorageObjectRole.PrimaryStorage => route.PrimaryStorage,
             ExecutableStorageObjectRole.LinkedIndexStorage => route.LinkedIndexStorage ??
                 throw new InvalidOperationException($"Route '{route.StorageUnit.Value}' has no linked index storage."),
+            ExecutableStorageObjectRole.CollectionElementStorage => throw new InvalidOperationException(
+                "Collection element storage is projection-specific; resolve it from CreateCollectionElementStorageOperation."),
             _ => throw new ArgumentOutOfRangeException(nameof(target), target, null)
         };
 }
@@ -531,6 +580,34 @@ public sealed class RecordPhysicalSchemaAppliedStateOperation : PhysicalSchemaOp
 
 internal static class PhysicalSchemaOperationCanonicalizer
 {
+    public static string CollectionElementStorage(ExecutableCollectionElementStorageRoute storage) => string.Join(
+        '\u001f',
+        [
+            Storage(storage.Storage),
+            Column(storage.DocumentKind.Column),
+            Column(storage.StorageScope.Column),
+            Column(storage.IdComparisonKey.Column),
+            Column(storage.IdLookupKey.Column),
+            Column(storage.Ordinal.Column),
+            ProjectedColumn(storage.Value),
+            storage.OwnerOrdinalKey.Name.ObjectKind.ToString(),
+            storage.OwnerOrdinalKey.Name.FeatureDefaultLogicalName,
+            storage.OwnerOrdinalKey.Name.LogicalName,
+            storage.OwnerOrdinalKey.Name.Identifier,
+            storage.OwnerOrdinalKey.Name.CollisionScope,
+            storage.OwnerOrdinalKey.Name.NamingOwner.Value,
+            storage.OwnerOrdinalKey.Target.ToString(),
+            .. storage.OwnerOrdinalKey.Columns.Select(column => Column(column.Column)),
+            storage.MembershipKey.Name.ObjectKind.ToString(),
+            storage.MembershipKey.Name.FeatureDefaultLogicalName,
+            storage.MembershipKey.Name.LogicalName,
+            storage.MembershipKey.Name.Identifier,
+            storage.MembershipKey.Name.CollisionScope,
+            storage.MembershipKey.Name.NamingOwner.Value,
+            storage.MembershipKey.Target.ToString(),
+            ProjectedColumn(storage.MembershipKey.Value),
+            .. storage.MembershipKey.OwnerColumns.Select(column => Column(column.Column))
+        ]);
     public static string PrimaryStorage(ExecutableStorageRoute route) => string.Join(
         '\u001f',
         new[]

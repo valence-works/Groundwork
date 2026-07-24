@@ -141,7 +141,8 @@ internal static class MongoDbPhysicalMutationStorage
         if (TryReadEnvelope(primary, route, mirror.Path, out var envelope))
             return new MongoDbPhysicalProjectionValue(true, envelope);
         var projection = route.ProjectedColumns.FirstOrDefault(candidate =>
-            candidate.Definition.Path == mirror.Path);
+            candidate.Definition.Path == mirror.Path &&
+            candidate.Definition.Cardinality == ProjectionCardinality.Scalar);
         if (projection is not null)
             return projectedValues[projection];
         return TryRead(content, mirror.Path, out var native)

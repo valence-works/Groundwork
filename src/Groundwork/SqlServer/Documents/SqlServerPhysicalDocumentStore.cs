@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Text;
+using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
@@ -29,6 +30,26 @@ public sealed class SqlServerPhysicalDocumentStore : RelationalPhysicalDocumentS
             new SqlServerPhysicalIdentityHash(),
             scopeObserver)
     {
+    }
+
+    internal SqlServerPhysicalDocumentStore(
+        string connectionString,
+        StorageManifest manifest,
+        IReadOnlyList<ExecutableStorageRoute> routes,
+        DocumentStoreAccess access,
+        IStorageScopeObserver? scopeObserver,
+        ProviderIdentity physicalSchemaProvider)
+        : base(
+            RelationalSessionFactory.Concurrent(() => new SqlConnection(connectionString)),
+            manifest,
+            routes,
+            new SqlServerPhysicalDocumentDialect(new SqlServerPhysicalIdentityHash()),
+            access,
+            scopeObserver,
+            physicalSchemaProvider)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentNullException.ThrowIfNull(physicalSchemaProvider);
     }
 
     internal SqlServerPhysicalDocumentStore(
@@ -87,6 +108,13 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
         identity = new SqlServerPhysicalIdentity(hash);
     }
 
+    public override ProviderIdentity PhysicalSchemaProvider => SqlServerGroundworkCapabilities.Provider;
+    public override string PhysicalSchemaAppliedStatePredicate => """
+        manifest_key = CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), @manifestId)))
+        AND provider_key = CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), @providerName)))
+        AND manifest_id = @manifestId
+        AND provider_name = @providerName
+        """;
     public override void ValidateRoute(ExecutableStorageRoute route) => identity.ValidateRoute(route);
     public override string ExactIdentityPredicate(IReadOnlyList<RelationalPhysicalIdentityPredicatePart> parts) =>
         identity.ExactPredicate(parts, QuoteIdentifier, includeOriginal: true);
@@ -103,6 +131,8 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
         exception is SqlException { Number: 2601 or 2627 };
     public override bool IsWriteConflictException(DbException exception) =>
         exception is SqlException { Number: 1205 };
+    public override bool IsMissingPhysicalSchemaStateException(DbException exception) =>
+        exception is SqlException { Number: 208 };
     public override string InsertPrimaryIfAbsent(
         string tableIdentifier,
         IReadOnlyList<string> columns,
@@ -286,6 +316,35 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
         {
             throw new InvalidOperationException(
                 $"SQL Server could not acquire bounded-mutation operation lock '{operationLock}'.");
+        }
+    }
+
+    public override async Task AcquireSchemaTransitionWriterLockAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string resource,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            DECLARE @result int;
+            EXEC @result = sys.sp_getapplock
+                @Resource = @resource,
+                @LockMode = 'Shared',
+                @LockOwner = 'Transaction',
+                @LockTimeout = -1;
+            SELECT @result;
+            """;
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@resource";
+        parameter.Value = resource;
+        command.Parameters.Add(parameter);
+        var result = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+        if (result < 0)
+        {
+            throw new InvalidOperationException(
+                $"SQL Server could not acquire physical-schema writer lock '{resource}'.");
         }
     }
 

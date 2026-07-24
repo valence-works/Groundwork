@@ -45,7 +45,9 @@ public enum PortableQueryOperation
     LessThan,
     LessThanOrEqual,
     In,
-    NotContains
+    NotContains,
+    CollectionContains,
+    CollectionContainsAll
 }
 
 [Obsolete(

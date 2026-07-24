@@ -80,16 +80,50 @@ public sealed class RelationalSessionFactory
     /// Begins an explicit unit of work that owns one connection and transaction until completion.
     /// </summary>
     public async Task<RelationalUnitOfWork> BeginUnitOfWorkAsync(CancellationToken cancellationToken = default)
+        => await BeginUnitOfWorkAsync(null, cancellationToken);
+
+    /// <summary>
+    /// Begins a unit of work after acquiring a provider-owned lease that must precede transaction
+    /// creation and remain held until the transaction and connection are released.
+    /// </summary>
+    public async Task<RelationalUnitOfWork> BeginUnitOfWorkAsync(
+        Func<DbConnection, CancellationToken, ValueTask<IAsyncDisposable>>? acquirePreTransactionLease,
+        CancellationToken cancellationToken = default)
     {
         var session = await OpenAsync(cancellationToken);
+        IAsyncDisposable? lease = null;
         try
         {
+            if (acquirePreTransactionLease is not null)
+                lease = await acquirePreTransactionLease(session.Connection, cancellationToken);
             var transaction = await beginTransaction(session.Connection, cancellationToken);
-            return new RelationalUnitOfWork(session.Connection, transaction, session);
+            return new RelationalUnitOfWork(
+                session.Connection,
+                transaction,
+                lease is null ? session : new OwnedSessionLease(lease, session));
         }
-        catch
+        catch (Exception primaryFailure)
         {
-            await session.DisposeAsync();
+            if (lease is not null)
+            {
+                try
+                {
+                    await lease.DisposeAsync();
+                }
+                catch (Exception cleanupFailure)
+                {
+                    RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+                }
+            }
+            try
+            {
+                await session.DisposeAsync();
+            }
+            catch (Exception cleanupFailure)
+            {
+                RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
+            }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
             throw;
         }
     }
@@ -176,6 +210,34 @@ public sealed class RelationalSessionFactory
                 {
                     RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
                 }
+            }
+
+            if (primaryFailure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        }
+    }
+
+    private sealed class OwnedSessionLease(IAsyncDisposable lease, IAsyncDisposable session) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            Exception? primaryFailure = null;
+            try
+            {
+                await lease.DisposeAsync();
+            }
+            catch (Exception exception)
+            {
+                primaryFailure = exception;
+            }
+
+            try
+            {
+                await session.DisposeAsync();
+            }
+            catch (Exception cleanupFailure) when (primaryFailure is not null)
+            {
+                RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
             }
 
             if (primaryFailure is not null)

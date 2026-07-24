@@ -68,6 +68,7 @@ public static class RelationalPhysicalQueryRuntime
     {
         var sources = new[]
         {
+            PhysicalQuerySourceKind.CollectionElements,
             PhysicalQuerySourceKind.LinkedIndex,
             PhysicalQuerySourceKind.PrimaryProjectedColumns,
             PhysicalQuerySourceKind.PrimaryEnvelope,

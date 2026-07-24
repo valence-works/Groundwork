@@ -34,7 +34,8 @@ public sealed class RelationalPhysicalProviderDialectTests
                 PhysicalQuerySourceKind.LinkedIndex,
                 PhysicalQuerySourceKind.PrimaryEnvelope,
                 PhysicalQuerySourceKind.PrimaryCanonicalJson,
-                PhysicalQuerySourceKind.PrimaryProjectedColumns
+                PhysicalQuerySourceKind.PrimaryProjectedColumns,
+                PhysicalQuerySourceKind.CollectionElements
             },
             capabilities.HandlerIdentities.Keys.Order());
         Assert.All(capabilities.HandlerIdentities, registration =>
@@ -96,6 +97,60 @@ public sealed class RelationalPhysicalProviderDialectTests
             "[id_lookup_key] binary(32) NOT NULL",
             dialect.EnvelopeColumn("id_lookup_key", RelationalEnvelopeColumnKind.IdentityLookup),
             StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("postgresql")]
+    [InlineData("sqlserver")]
+    public void Collection_element_ddl_preserves_the_compiled_owner_key_and_value_contract(string providerName)
+    {
+        var (provider, normalizer, dialect) = providerName switch
+        {
+            "postgresql" => (
+                PostgreSqlGroundworkCapabilities.Provider,
+                PostgreSqlGroundworkCapabilities.PhysicalNames,
+                (RelationalServerPhysicalSchemaDialect)new PostgreSqlPhysicalSchemaDialect()),
+            "sqlserver" => (
+                SqlServerGroundworkCapabilities.Provider,
+                SqlServerGroundworkCapabilities.PhysicalNames,
+                (RelationalServerPhysicalSchemaDialect)new SqlServerPhysicalSchemaDialect()),
+            _ => throw new ArgumentOutOfRangeException(nameof(providerName), providerName, null)
+        };
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            provider,
+            includePriority: false,
+            instance: $"collection_{providerName}",
+            normalizer: normalizer,
+            includeCollection: true);
+        var storage = Assert.Single(Assert.Single(model.Target.Routes).CollectionElementStorages);
+
+        var sql = dialect.CreateCollectionElementTableSql(storage);
+        var expectedValue = storage.Value.Definition with { IsNullable = false };
+        var primaryKey = string.Join(", ", storage.OwnerOrdinalKey.Columns.Select(column => dialect.Q(column.Column.Identifier)));
+
+        Assert.Contains(dialect.ProjectedColumnSql(storage.Value.Column.Identifier, expectedValue), sql, StringComparison.Ordinal);
+        Assert.Contains(
+            providerName == "sqlserver"
+                ? $"PRIMARY KEY NONCLUSTERED ({primaryKey})"
+                : $"PRIMARY KEY ({primaryKey})",
+            sql,
+            StringComparison.Ordinal);
+        Assert.Contains(dialect.EnvelopeColumn(storage.DocumentKind.Column.Identifier, RelationalEnvelopeColumnKind.DocumentKind), sql, StringComparison.Ordinal);
+        Assert.Contains(dialect.EnvelopeColumn(storage.StorageScope.Column.Identifier, RelationalEnvelopeColumnKind.StorageScope), sql, StringComparison.Ordinal);
+        Assert.Contains(dialect.EnvelopeColumn(storage.IdComparisonKey.Column.Identifier, RelationalEnvelopeColumnKind.IdentityComparison), sql, StringComparison.Ordinal);
+        Assert.Contains(dialect.EnvelopeColumn(storage.IdLookupKey.Column.Identifier, RelationalEnvelopeColumnKind.IdentityLookup), sql, StringComparison.Ordinal);
+        Assert.Contains(dialect.ProjectedColumnSql(storage.Ordinal.Column.Identifier,
+            new ProjectedColumnDefinition("ordinal", "ordinal", PortablePhysicalType.Int32, IsNullable: false)), sql,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(" DEFAULT ", sql, StringComparison.OrdinalIgnoreCase);
+
+        if (providerName == "sqlserver")
+        {
+            var keyClause = sql[sql.IndexOf("PRIMARY KEY", StringComparison.Ordinal)..];
+            Assert.DoesNotContain("max", keyClause, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("PRIMARY KEY NONCLUSTERED", keyClause, StringComparison.Ordinal);
+        }
     }
 
     [Theory]
@@ -461,6 +516,46 @@ public sealed class RelationalPhysicalProviderDialectTests
             dialect.ValidateRoute(route);
         else
             Assert.Throws<InvalidOperationException>(() => dialect.ValidateRoute(route));
+    }
+
+    [Theory]
+    [InlineData(256, true)]
+    [InlineData(257, false)]
+    public void Sql_server_enforces_the_1700_byte_collection_membership_key_boundary(
+        int length,
+        bool supported)
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: false,
+            includeCollection: true);
+        var original = Assert.Single(model.Target.Routes.Single().CollectionElementStorages);
+        var value = original.Value with
+        {
+            Definition = original.Value.Definition with { Length = length }
+        };
+        var storage = new ExecutableCollectionElementStorageRoute(
+            original.Storage,
+            original.Projection,
+            original.DocumentKind,
+            original.StorageScope,
+            original.IdComparisonKey,
+            original.IdLookupKey,
+            original.Ordinal,
+            value,
+            original.OwnerOrdinalKey,
+            new ExecutableCollectionElementMembershipKeyRoute(
+                original.MembershipKey.Name,
+                original.MembershipKey.Target,
+                value,
+                original.MembershipKey.OwnerColumns));
+        var dialect = new SqlServerPhysicalSchemaDialect();
+
+        if (supported)
+            dialect.ValidateCollectionElementStorage(storage);
+        else
+            Assert.Throws<InvalidOperationException>(() => dialect.ValidateCollectionElementStorage(storage));
     }
 
     [Theory]

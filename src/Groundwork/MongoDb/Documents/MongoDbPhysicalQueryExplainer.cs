@@ -28,6 +28,8 @@ internal sealed class MongoDbPhysicalQueryExplainer(
     {
         var resolvedScope = scope();
         DocumentQueryContinuationCodec.ValidateScope(plan, resolvedScope);
+        if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+            return await ExplainCollectionMembershipAsync(query, plan, resolvedScope, cancellationToken);
         var basePredicate = MongoDbPhysicalQueryHandler.BuildPredicate(
             query, plan, resolvedScope, storage, route);
         var pagePredicate = MongoDbPhysicalQueryHandler.BuildPagePredicate(
@@ -215,6 +217,61 @@ internal sealed class MongoDbPhysicalQueryExplainer(
         }
     }
 
+    private async Task<PhysicalDocumentQueryExplanation> ExplainCollectionMembershipAsync(
+        DocumentQuery query,
+        PhysicalQueryPlan plan,
+        DocumentScopeSelection resolvedScope,
+        CancellationToken cancellationToken)
+    {
+        await transactionCapability.EnsureSupportedAsync(
+            [route.StorageUnit.Value],
+            "physical collection membership explain",
+            cancellationToken);
+        var pipeline = MongoDbPhysicalQueryHandler.CollectionMembershipPipeline(
+            query,
+            plan,
+            route,
+            resolvedScope);
+        var kind = query.ResultOperation switch
+        {
+            BoundedQueryResultOperation.Documents => PhysicalDocumentQueryCommandKind.Page,
+            BoundedQueryResultOperation.Count => PhysicalDocumentQueryCommandKind.Count,
+            BoundedQueryResultOperation.First => PhysicalDocumentQueryCommandKind.First,
+            BoundedQueryResultOperation.Any => PhysicalDocumentQueryCommandKind.Any,
+            _ => throw new NotSupportedException(
+                $"MongoDB collection membership explain does not support result operation '{query.ResultOperation}'.")
+        };
+        var identity = query.ResultOperation switch
+        {
+            BoundedQueryResultOperation.Documents => PhysicalDocumentQueryCommandIdentities.Page,
+            BoundedQueryResultOperation.Count => PhysicalDocumentQueryCommandIdentities.Count,
+            BoundedQueryResultOperation.First => PhysicalDocumentQueryCommandIdentities.First,
+            BoundedQueryResultOperation.Any => PhysicalDocumentQueryCommandIdentities.Any,
+            _ => throw new NotSupportedException(
+                $"MongoDB collection membership explain does not support result operation '{query.ResultOperation}'.")
+        };
+        var command = AggregateCommand(plan.LookupObject.Identifier, pipeline);
+        var nativePlan = await ExplainCommandAsync(command, cancellationToken);
+        var shape = DescribeCommand(command, plan);
+        var explanation = new PhysicalDocumentQueryCommandExplanation(
+            kind,
+            identity,
+            "mongodb-json",
+            nativePlan.ToJson(),
+            plan.Predicates.Select(predicate => predicate.Field.Identifier)
+                .Append(plan.Discriminator.Identifier)
+                .Append(plan.Scope.Field.Identifier)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray(),
+            shape.MaximumRows,
+            shape.Order);
+        return new PhysicalDocumentQueryExplanation(
+            plan,
+            PhysicalDocumentQueryInvocationFingerprint.Compute(query, plan, resolvedScope),
+            [explanation]);
+    }
+
     private async Task<BsonDocument> ExplainCommandAsync(
         BsonDocument explainedCommand,
         CancellationToken cancellationToken) =>
@@ -305,7 +362,11 @@ internal sealed class MongoDbPhysicalQueryExplainer(
         var pipeline = command["pipeline"].AsBsonArray
             .Select(stage => stage.AsBsonDocument)
             .ToArray();
-        var appliedLimit = pipeline
+        var boundedStages = pipeline.LastOrDefault()?.TryGetValue("$facet", out var facet) == true &&
+                            facet.AsBsonDocument.TryGetValue("data", out var data)
+            ? data.AsBsonArray.Select(stage => stage.AsBsonDocument).ToArray()
+            : pipeline;
+        var appliedLimit = boundedStages
             .Where(stage => stage.Contains("$limit"))
             .Select(stage => (int?)stage["$limit"].ToInt32())
             .LastOrDefault();
@@ -318,7 +379,7 @@ internal sealed class MongoDbPhysicalQueryExplainer(
                                identity.AsInt32 == 1)
                               ? 1
                               : null);
-        var renderedOrder = pipeline
+        var renderedOrder = boundedStages
             .Where(stage => stage.Contains("$sort"))
             .Select(stage => stage["$sort"].AsBsonDocument)
             .LastOrDefault();

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Data.Common;
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
@@ -7,6 +8,7 @@ using Groundwork.Core.Queries;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
+using Groundwork.Documents.UnitOfWork;
 using Groundwork.Relational.Documents;
 using Groundwork.Sqlite.Documents;
 using Groundwork.Sqlite.PhysicalStorage;
@@ -589,6 +591,61 @@ public sealed class SqlitePhysicalSchemaExecutorTests
     }
 
     [Fact]
+    public async Task WriterLeaseExcludesACompetingSchemaProcess()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"groundwork-writer-process-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var database = Path.Combine(directory, "groundwork.db");
+            var connectionString = $"Data Source={database}";
+            var model = CreateModel(PhysicalStorageForm.PhysicalEntityTable, includePriority: true);
+            await using var connection = new SqliteConnection(connectionString);
+            await PhysicalSchemaApplication.ApplyAsync(
+                model.Target,
+                new SqlitePhysicalSchemaExecutor(connection));
+            var store = new SqlitePhysicalDocumentStore(
+                connectionString,
+                model.Manifest,
+                model.Target.Routes,
+                DocumentStoreAccess.Global);
+            await using var writer = await store.BeginAsync(
+                DocumentCommitScope.Of("configurationDocument"));
+
+            var root = RepositoryRootLocator.FindRepositoryRoot();
+            var start = new ProcessStartInfo("dotnet")
+            {
+                WorkingDirectory = root,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            start.ArgumentList.Add("test");
+            start.ArgumentList.Add("tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj");
+            start.ArgumentList.Add("-c");
+            start.ArgumentList.Add("Release");
+            start.ArgumentList.Add("--no-build");
+            start.ArgumentList.Add("--no-restore");
+            start.ArgumentList.Add("--filter");
+            start.ArgumentList.Add("FullyQualifiedName~CrossProcessSchemaLockContender");
+            start.Environment[CrossProcessDatabaseEnvironment] = database;
+            using var process = Process.Start(start) ??
+                throw new InvalidOperationException("Could not start the schema-lock contender process.");
+            var standardOutput = process.StandardOutput.ReadToEndAsync();
+            var standardError = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.True(
+                process.ExitCode == 0,
+                $"Schema-lock contender failed.{Environment.NewLine}{await standardOutput}{Environment.NewLine}{await standardError}");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CrossProcessSchemaLockContender()
     {
         var database = Environment.GetEnvironmentVariable(CrossProcessDatabaseEnvironment);
@@ -699,8 +756,9 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             PhysicalSchemaApplicationOutcome.NoChanges,
             (await PhysicalSchemaApplication.ApplyAsync(additive.Target, executor)).Outcome);
 
-        Assert.Equal(DocumentStoreWriteStatus.Saved, (await oldRouteStore.SaveAsync(
-            Save("after-publication", 43))).Status);
+        var rejection = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            oldRouteStore.SaveAsync(Save("after-publication", 43)));
+        Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, rejection.Code);
         await using (var applicationLock = await executor.AcquireApplicationLockAsync(
                          additive.Target.Identity,
                          CancellationToken.None))
@@ -1190,6 +1248,631 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         Assert.Equal(1, trueCount);
     }
 
+    [Fact]
+    public async Task Collection_membership_queries_use_element_rows_without_duplicate_documents()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var model = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            scoped: true,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+        var store = new SqlitePhysicalDocumentStore(
+            connection,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":["a","b","b"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "two", "1", """{"category":"x","permissions":["a"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "three", "1", """{"category":"x","permissions":["b","c"]}"""));
+        var queries = SqlitePhysicalQueryRuntime.Create(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider);
+
+        var contains = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
+        var containsAll = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["b", "a", "b"]))]));
+
+        Assert.Equal(2, contains.TotalCount);
+        Assert.Equal(["one", "three"], contains.Documents.Select(document => document.Id).Order());
+        Assert.Equal("one", Assert.Single(containsAll.Documents).Id);
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":["c"]}""", 1))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
+            "configurationDocument", "three", 1))).Status);
+        Assert.Equal("one", Assert.Single((await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "c"))]))).Documents).Id);
+        Assert.Empty((await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]))).Documents);
+    }
+
+    [Fact]
+    public async Task Collection_contains_all_deduplicates_after_typed_conversion()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var model = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true,
+            collectionType: PortablePhysicalType.Int32,
+            collectionLogicalValueKind: IndexValueKind.Number);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+        var store = new SqlitePhysicalDocumentStore(
+            connection,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Global);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":[1,2]}"""));
+        var runtime = SqlitePhysicalQueryRuntime.Create(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider);
+        var query = new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["1", "01"]))]);
+
+        var result = await runtime.QueryAsync(query);
+        var explanation = await Assert.IsAssignableFrom<IPhysicalDocumentQueryExplainer>(runtime).ExplainAsync(query);
+        var page = Assert.Single(explanation.Commands, command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        var membershipIndex = Assert.Single(model.Target.Routes.Single().CollectionElementStorages)
+            .MembershipKey.Name.Identifier;
+
+        Assert.Equal("one", Assert.Single(result.Documents).Id);
+        Assert.Equal(1, page.NativePlan.Split(membershipIndex, StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public async Task Additive_collection_storage_backfills_preexisting_documents()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var initial = CreateModel(PhysicalStorageForm.PhysicalEntityTable, includePriority: false);
+        var additive = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        var executor = new SqlitePhysicalSchemaExecutor(connection);
+        await PhysicalSchemaApplication.ApplyAsync(initial.Target, executor);
+        await new SqlitePhysicalDocumentStore(
+                connection, initial.Manifest, initial.Target.Routes, DocumentStoreAccess.Global)
+            .SaveAsync(new SaveDocumentRequest(
+                "configurationDocument", "preexisting", "1", """{"category":"x","permissions":["a","b"]}"""));
+
+        var applied = await PhysicalSchemaApplication.ApplyAsync(additive.Target, executor);
+        var evolved = new SqlitePhysicalDocumentStore(
+            connection, additive.Manifest, additive.Target.Routes, DocumentStoreAccess.Global);
+        var result = await SqlitePhysicalQueryRuntime.Create(
+                evolved, additive.Manifest, additive.Target.Routes.Single(), additive.Target.Provider)
+            .QueryAsync(new DocumentQuery(
+                "configurationDocument",
+                "list-by-permissions",
+                [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.Equal("preexisting", Assert.Single(result.Documents).Id);
+    }
+
+    [Fact]
+    public async Task Collection_schema_transition_fences_old_route_writers()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"groundwork-collection-fence-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "groundwork.db");
+        var connectionString = $"Data Source={databasePath}";
+        try
+        {
+            var initial = CreateModel(
+                PhysicalStorageForm.PhysicalEntityTable,
+                includePriority: false,
+                includeCategoryTransition: true);
+            var additive = CreateModel(
+                PhysicalStorageForm.PhysicalEntityTable,
+                includePriority: false,
+                includeCollection: true,
+                includeCollectionMembershipQuery: true,
+                includeCategoryTransition: true);
+            await using var schemaConnection = new SqliteConnection(connectionString);
+            await PhysicalSchemaApplication.ApplyAsync(
+                initial.Target,
+                new SqlitePhysicalSchemaExecutor(schemaConnection));
+            var oldStore = new SqlitePhysicalDocumentStore(
+                connectionString,
+                initial.Manifest,
+                initial.Target.Routes,
+                DocumentStoreAccess.Global);
+            await oldStore.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "preexisting",
+                "1",
+                """{"category":"x","permissions":["old"]}"""));
+
+            await using var inFlightUnitOfWork = await oldStore.BeginAsync(
+                DocumentCommitScope.Of("configurationDocument"));
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await inFlightUnitOfWork.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "before",
+                "1",
+                """{"category":"x","permissions":["before"]}"""))).Status);
+
+            var schemaEntered = NewSignal();
+            var releaseSchema = NewSignal();
+            var apply = PhysicalSchemaApplication.ApplyAsync(
+                additive.Target,
+                new SqlitePhysicalSchemaExecutor(
+                    schemaConnection,
+                    async (operation, cancellationToken) =>
+                    {
+                        if (operation is not BackfillCanonicalJsonOperation
+                            {
+                                SubjectKind: CanonicalJsonBackfillSubjectKind.CollectionElements
+                            })
+                            return;
+                        schemaEntered.TrySetResult();
+                        await releaseSchema.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+                    }));
+            await AssertStillWaitingAsync(schemaEntered.Task);
+
+            await inFlightUnitOfWork.CommitAsync();
+            await schemaEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            var duringWriter = oldStore.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "during",
+                "1",
+                """{"category":"x","permissions":["during"]}"""));
+            await AssertStillWaitingAsync(duringWriter);
+            releaseSchema.TrySetResult();
+
+            Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, (await apply).Outcome);
+            var rejection = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() => duringWriter);
+            Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, rejection.Code);
+            await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() => oldStore.SaveAsync(
+                new SaveDocumentRequest(
+                    "configurationDocument",
+                    "after",
+                    "1",
+                    """{"category":"x","permissions":["after"]}""")));
+            await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() => oldStore.DeleteAsync(
+                new DeleteDocumentRequest("configurationDocument", "preexisting", 1)));
+            var unitOfWorkRejection = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+                oldStore.BeginAsync(DocumentCommitScope.Of("configurationDocument")));
+            Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, unitOfWorkRejection.Code);
+            var oldMutations = SqlitePhysicalMutationRuntime.Create(
+                oldStore,
+                initial.Manifest,
+                initial.Target.Routes.Single(),
+                initial.Target.Provider);
+            var mutationRejection = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+                oldMutations.ExecuteAsync(new DocumentMutation(
+                    "configurationDocument",
+                    "revoke-pending",
+                    $"stale-{Guid.NewGuid():N}")));
+            Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, mutationRejection.Code);
+
+            var restarted = new SqlitePhysicalDocumentStore(
+                connectionString,
+                additive.Manifest,
+                additive.Target.Routes,
+                DocumentStoreAccess.Global);
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await restarted.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "after",
+                "1",
+                """{"category":"x","permissions":["after"]}"""))).Status);
+            Assert.Null(await restarted.LoadAsync("configurationDocument", "during"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Schema_admission_preserves_upgrade_failure_when_transition_lease_cleanup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        var initial = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        var changed = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: true,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        await PhysicalSchemaApplication.ApplyAsync(
+            changed.Target,
+            new SqlitePhysicalSchemaExecutor(connection));
+        var store = new RelationalPhysicalDocumentStore(
+            connection,
+            initial.Manifest,
+            initial.Target.Routes,
+            new CleanupFailingSqliteDialect(),
+            DocumentStoreAccess.Global);
+
+        var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            store.BeginAsync(DocumentCommitScope.Of("configurationDocument")));
+
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
+    }
+
+    [Fact]
+    public async Task Direct_save_preserves_upgrade_failure_when_transition_lease_cleanup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        var (store, _, _) = await CreateCleanupFailingStaleStoreAsync(connection);
+
+        var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            store.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "stale-save",
+                "1",
+                """{"category":"pending"}""")));
+
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
+    }
+
+    [Fact]
+    public async Task Direct_delete_preserves_upgrade_failure_when_transition_lease_cleanup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        var (store, _, _) = await CreateCleanupFailingStaleStoreAsync(connection);
+
+        var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            store.DeleteAsync(new DeleteDocumentRequest("configurationDocument", "stale-delete")));
+
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
+    }
+
+    [Fact]
+    public async Task Direct_bounded_mutation_preserves_upgrade_failure_when_transition_lease_cleanup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        var (store, manifest, target) = await CreateCleanupFailingStaleStoreAsync(connection);
+        var mutations = RelationalPhysicalMutationRuntime.Create(
+            new RelationalPhysicalMutationRuntimeContext(
+                store,
+                manifest,
+                target.Routes.Single(),
+                target.Provider,
+                SqliteGroundworkCapabilities.Provider.Name,
+                "sqlite"));
+
+        var exception = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            mutations.ExecuteAsync(new DocumentMutation(
+                "configurationDocument",
+                "revoke-pending",
+                $"stale-{Guid.NewGuid():N}")));
+
+        AssertUpgradeFailureWithTransitionLeaseCleanup(exception);
+    }
+
+    [Fact]
+    public async Task Failed_collection_schema_transition_preserves_old_writer_admission()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"groundwork-collection-failure-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var connectionString = $"Data Source={Path.Combine(directory, "groundwork.db")}";
+        try
+        {
+            var initial = CreateModel(PhysicalStorageForm.PhysicalEntityTable, includePriority: false);
+            var additive = CreateModel(
+                PhysicalStorageForm.PhysicalEntityTable,
+                includePriority: false,
+                includeCollection: true);
+            await using var schemaConnection = new SqliteConnection(connectionString);
+            await PhysicalSchemaApplication.ApplyAsync(
+                initial.Target,
+                new SqlitePhysicalSchemaExecutor(schemaConnection));
+            var oldStore = new SqlitePhysicalDocumentStore(
+                connectionString,
+                initial.Manifest,
+                initial.Target.Routes,
+                DocumentStoreAccess.Global);
+
+            await Assert.ThrowsAsync<InjectedTransitionException>(() =>
+                PhysicalSchemaApplication.ApplyAsync(
+                    additive.Target,
+                    new SqlitePhysicalSchemaExecutor(
+                        schemaConnection,
+                        (operation, _) =>
+                            operation is BackfillCanonicalJsonOperation
+                            {
+                                SubjectKind: CanonicalJsonBackfillSubjectKind.CollectionElements
+                            }
+                                ? Task.FromException(new InjectedTransitionException())
+                                : Task.CompletedTask)));
+
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await oldStore.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "after-failure",
+                "1",
+                """{"category":"x","permissions":["old"]}"""))).Status);
+            var newStore = new SqlitePhysicalDocumentStore(
+                connectionString,
+                additive.Manifest,
+                additive.Target.Routes,
+                DocumentStoreAccess.Global);
+            await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() => newStore.SaveAsync(
+                new SaveDocumentRequest(
+                    "configurationDocument",
+                    "new-before-retry",
+                    "1",
+                    """{"category":"x","permissions":["new"]}""")));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Mutation_without_applied_state_fails_with_stable_upgrade_diagnostic()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var model = CreateModel(PhysicalStorageForm.PhysicalEntityTable, includePriority: false);
+        var store = new SqlitePhysicalDocumentStore(
+            connection,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Global);
+
+        var rejection = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            store.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "missing-state",
+                "1",
+                """{"category":"x"}""")));
+
+        Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, rejection.Code);
+    }
+
+    [Fact]
+    public async Task Mutation_with_corrupt_applied_state_fails_with_stable_upgrade_diagnostic()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var model = CreateModel(PhysicalStorageForm.PhysicalEntityTable, includePriority: false);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                "UPDATE groundwork_physical_schema_state SET applied_state_json = '{' " +
+                "WHERE manifest_id = @manifestId AND provider_name = @providerName;";
+            command.Parameters.AddWithValue("@manifestId", model.Manifest.Identity.Value);
+            command.Parameters.AddWithValue("@providerName", model.Target.Provider.Name);
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+        var store = new SqlitePhysicalDocumentStore(
+            connection,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Global);
+
+        var rejection = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            store.SaveAsync(new SaveDocumentRequest(
+                "configurationDocument",
+                "corrupt-state",
+                "1",
+                """{"category":"x"}""")));
+
+        Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, rejection.Code);
+    }
+
+    [Fact]
+    public async Task Collection_save_failure_rolls_back_primary_and_element_rows()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var model = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCollection: true);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+        var store = new SqlitePhysicalDocumentStore(
+            connection, model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
+        store.WriteInterceptor = (point, operation, _, _, _) =>
+            point == RelationalPhysicalWriteExecutionPoint.AfterPrimaryMutation &&
+            operation == RelationalPhysicalWriteOperation.Save
+                ? ValueTask.FromException(new InjectedCollectionWriteException())
+                : ValueTask.CompletedTask;
+
+        await Assert.ThrowsAsync<InjectedCollectionWriteException>(() => store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "failed", "1", """{"category":"x","permissions":["a"]}""")));
+        store.WriteInterceptor = null;
+
+        Assert.Null(await store.LoadAsync("configurationDocument", "failed"));
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {Q(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
+        Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task Collection_element_storage_uses_typed_non_nullable_value_and_exact_owner_ordinal_key()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var target = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCollection: true).Target;
+        var storage = target.Routes.Single().CollectionElementStorages.Single();
+
+        var first = await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
+        var restart = await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
+        var columns = await CollectionTableColumnsAsync(connection, storage.Storage.Name.Identifier);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, first.Outcome);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, restart.Outcome);
+        foreach (var owner in CollectionOwnerColumns(storage))
+        {
+            var column = Assert.Single(columns.Where(column => column.Name == owner.Identifier));
+            Assert.True(column.IsNotNull, $"Collection owner field '{owner.Identifier}' must be non-null.");
+        }
+        var value = Assert.Single(columns.Where(column => column.Name == storage.Value.Column.Identifier));
+        Assert.Equal("TEXT", value.Type);
+        Assert.True(value.IsNotNull);
+        Assert.Equal(
+            storage.OwnerOrdinalKey.Columns.Select(column => column.Column.Identifier),
+            columns.Where(column => column.PrimaryKeyOrder > 0)
+                .OrderBy(column => column.PrimaryKeyOrder)
+                .Select(column => column.Name));
+        Assert.Contains(first.AppliedState!.Snapshot.Routes.Single().ResolvedNames, name =>
+            name.Identifier == storage.MembershipKey.Name.Identifier);
+        Assert.Equal(
+            new[] { storage.MembershipKey.Value.Column.Identifier }
+                .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier)),
+            await IndexColumnsAsync(connection, storage.MembershipKey.Name.Identifier));
+    }
+
+    [Theory]
+    [InlineData("missing-owner-column")]
+    [InlineData("nullable-value")]
+    [InlineData("wrong-value-type")]
+    [InlineData("wrong-value-default")]
+    [InlineData("wrong-value-collation")]
+    [InlineData("wrong-owner-ordinal-key-order")]
+    [InlineData("wrong-membership-index-order")]
+    public async Task Collection_element_storage_rejects_schema_drift(string drift)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var target = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCollection: true).Target;
+        var storage = target.Routes.Single().CollectionElementStorages.Single();
+
+        await ExecuteSqlAsync(connection, CollectionElementTableSql(storage, drift));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection)));
+
+        Assert.Contains(
+            drift == "wrong-membership-index-order"
+                ? storage.MembershipKey.Name.Identifier
+                : storage.Storage.Name.Identifier,
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    private static IReadOnlyList<ExecutableColumnRoute> CollectionOwnerColumns(
+        ExecutableCollectionElementStorageRoute storage) =>
+    [
+        storage.DocumentKind.Column,
+        storage.StorageScope.Column,
+        storage.IdComparisonKey.Column,
+        storage.IdLookupKey.Column,
+        storage.Ordinal.Column
+    ];
+
+    private static string CollectionElementTableSql(
+        ExecutableCollectionElementStorageRoute storage,
+        string drift)
+    {
+        var ownerColumns = CollectionOwnerColumns(storage);
+        var definitions = ownerColumns
+            .Where(column => drift != "missing-owner-column" || column.Identifier != storage.IdComparisonKey.Column.Identifier)
+            .Select(column =>
+                $"{Q(column.Identifier)} {(column.Identifier == storage.Ordinal.Column.Identifier ? "INTEGER" : "TEXT")} NOT NULL")
+            .ToList();
+        var value = drift switch
+        {
+            "nullable-value" => "TEXT COLLATE NOCASE NULL",
+            "wrong-value-type" => "INTEGER COLLATE NOCASE NOT NULL",
+            "wrong-value-default" => "TEXT COLLATE NOCASE NOT NULL DEFAULT 'unexpected'",
+            "wrong-value-collation" => "TEXT COLLATE BINARY NOT NULL",
+            _ => "TEXT COLLATE NOCASE NOT NULL"
+        };
+        definitions.Add($"{Q(storage.Value.Column.Identifier)} {value}");
+        var key = drift == "wrong-owner-ordinal-key-order"
+            ? storage.OwnerOrdinalKey.Columns.Reverse().Select(column => column.Column)
+            : storage.OwnerOrdinalKey.Columns.Select(column => column.Column);
+        definitions.Add($"PRIMARY KEY ({string.Join(", ", key.Select(column => Q(column.Identifier)))})");
+        var table = $"CREATE TABLE {Q(storage.Storage.Name.Identifier)} ({string.Join(", ", definitions)});";
+        if (drift != "wrong-membership-index-order")
+            return table;
+        var wrongColumns = storage.MembershipKey.OwnerColumns
+            .Select(column => column.Column.Identifier)
+            .Append(storage.MembershipKey.Value.Column.Identifier);
+        return table +
+            $" CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {Q(storage.Storage.Name.Identifier)} " +
+            $"({string.Join(", ", wrongColumns.Select(Q))});";
+    }
+
+    private static async Task ExecuteSqlAsync(SqliteConnection connection, string sql)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<IReadOnlyList<string>> IndexColumnsAsync(
+        SqliteConnection connection,
+        string index)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA index_xinfo({Q(index)});";
+        var columns = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (reader.GetInt64(5) != 0)
+                columns.Add(reader.GetString(2));
+        }
+        return columns;
+    }
+
+    private static async Task<IReadOnlyList<CollectionTableColumn>> CollectionTableColumnsAsync(
+        SqliteConnection connection,
+        string table)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({Q(table)});";
+        var columns = new List<CollectionTableColumn>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            columns.Add(new CollectionTableColumn(
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt64(3) != 0,
+                reader.GetInt64(5)));
+        }
+        return columns;
+    }
+
     private static string Q(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
@@ -1211,13 +1894,30 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal,
         QueryPagingSupport categoryPaging = QueryPagingSupport.Offset,
         QueryPagingSupport compoundPaging = QueryPagingSupport.None,
-        bool includeLatestPerCategory = false)
+        bool includeLatestPerCategory = false,
+        bool includeCollection = false,
+        bool includeCollectionMembershipQuery = false,
+        PortablePhysicalType collectionType = PortablePhysicalType.String,
+        IndexValueKind collectionLogicalValueKind = IndexValueKind.String,
+        bool includeCategoryTransition = false)
     {
         var template = SqliteTestManifests.MetadataManifest();
         var columns = new List<ProjectedColumnDefinition>
         {
             new("category", "category", PortablePhysicalType.String, Length: 200, IsNullable: categoryNullable)
         };
+        if (includeCollection)
+        {
+            columns.Add(new ProjectedColumnDefinition(
+                "permissions",
+                "permissions",
+                collectionType,
+                Length: collectionType == PortablePhysicalType.String ? 128 : null,
+                IsNullable: true,
+                Collation: collectionType == PortablePhysicalType.String ? "NOCASE" : null,
+                Cardinality: ProjectionCardinality.CollectionElements,
+                MaxCollectionElements: 8));
+        }
         var categoryIndexColumns = new List<PhysicalIndexColumnDefinition>();
         if (scoped)
             categoryIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
@@ -1294,6 +1994,28 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             });
         var logicalIndexes = new List<LogicalIndexDeclaration> { logicalIndex };
         var boundedQueries = new List<BoundedQueryDeclaration> { boundedQuery };
+        if (includeCollectionMembershipQuery)
+        {
+            var permissions = new LogicalIndexDeclaration(
+                "by-permissions",
+                [new IndexField("permissions")],
+                collectionLogicalValueKind,
+                false,
+                MissingValueBehavior.Excluded);
+            logicalIndexes.Add(permissions);
+            boundedQueries.Add(new BoundedQueryDeclaration(
+                "list-by-permissions",
+                permissions.Identity,
+                new HashSet<PortableQueryOperation>
+                {
+                    PortableQueryOperation.CollectionContains,
+                    PortableQueryOperation.CollectionContainsAll
+                },
+                QuerySortSupport.None,
+                QueryPagingSupport.Offset,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true));
+        }
         if (includePriority)
         {
             var compound = new LogicalIndexDeclaration(
@@ -1410,7 +2132,16 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                         StorageUnitProvisioningMode.Declared,
                         PhysicalStoragePolicy.Explicit(definition),
                         logicalIndexes,
-                        boundedQueries)
+                        boundedQueries,
+                        boundedMutations: includeCategoryTransition
+                            ?
+                            [
+                                new BoundedMutationDeclaration(
+                                    "revoke-pending",
+                                    "list-by-category",
+                                    BoundedMutationAction.Transition("category", ["pending"], "revoked"))
+                            ]
+                            : [])
                 }
             ],
             SharedDocumentStorages = form == PhysicalStorageForm.SharedDocuments
@@ -1529,5 +2260,95 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                 return reader.GetInt64(3);
         }
         throw new InvalidOperationException($"Column '{table}.{column}' is missing.");
+    }
+
+    private sealed record CollectionTableColumn(string Name, string Type, bool IsNotNull, long PrimaryKeyOrder);
+
+    private sealed class InjectedCollectionWriteException : Exception
+    {
+    }
+
+    private static TaskCompletionSource NewSignal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static async Task AssertStillWaitingAsync(Task task)
+    {
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            task.WaitAsync(TimeSpan.FromMilliseconds(150)));
+    }
+
+    private static async Task<(
+        RelationalPhysicalDocumentStore Store,
+        StorageManifest Manifest,
+        PhysicalSchemaTarget Target)> CreateCleanupFailingStaleStoreAsync(SqliteConnection connection)
+    {
+        var initial = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            includeCategoryTransition: true);
+        var changed = CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: true,
+            includeCategoryTransition: true);
+        await PhysicalSchemaApplication.ApplyAsync(
+            changed.Target,
+            new SqlitePhysicalSchemaExecutor(connection));
+        return (
+            new RelationalPhysicalDocumentStore(
+                connection,
+                initial.Manifest,
+                initial.Target.Routes,
+                new CleanupFailingSqliteDialect(),
+                DocumentStoreAccess.Global),
+            initial.Manifest,
+            initial.Target);
+    }
+
+    private static void AssertUpgradeFailureWithTransitionLeaseCleanup(
+        PhysicalSchemaUpgradeRequiredException exception)
+    {
+        Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, exception.Code);
+        var cleanupFailures = Assert.IsAssignableFrom<IReadOnlyList<Exception>>(
+            exception.Data["Groundwork.Relational.CleanupFailures"]);
+        Assert.Collection(
+            cleanupFailures,
+            cleanup => Assert.Equal("transition lease dispose failed", cleanup.Message));
+    }
+
+    private sealed class InjectedTransitionException : Exception
+    {
+    }
+
+    private sealed class CleanupFailingSqliteDialect : RelationalPhysicalDocumentDialect
+    {
+        private readonly SqlitePhysicalDocumentDialect inner = new();
+
+        public override ProviderIdentity PhysicalSchemaProvider => inner.PhysicalSchemaProvider;
+        public override int MaxParameters => inner.MaxParameters;
+        public override string QuoteIdentifier(string identifier) => inner.QuoteIdentifier(identifier);
+        public override bool IsUniqueConstraintException(DbException exception) =>
+            inner.IsUniqueConstraintException(exception);
+        public override bool IsMissingPhysicalSchemaStateException(DbException exception) =>
+            inner.IsMissingPhysicalSchemaStateException(exception);
+        public override string JsonValue(string canonicalJsonExpression, string stablePath) =>
+            inner.JsonValue(canonicalJsonExpression, stablePath);
+        public override string Contains(string fieldExpression, string parameterExpression) =>
+            inner.Contains(fieldExpression, parameterExpression);
+        public override string StartsWith(string fieldExpression, string parameterExpression) =>
+            inner.StartsWith(fieldExpression, parameterExpression);
+        public override string ApplyOffsetPage(string selectSql, string takeParameter, string skipParameter) =>
+            inner.ApplyOffsetPage(selectSql, takeParameter, skipParameter);
+        public override string ApplyFirst(string selectSql) => inner.ApplyFirst(selectSql);
+        public override ValueTask<IAsyncDisposable> AcquireSchemaTransitionLeaseAsync(
+            DbConnection connection,
+            PhysicalSchemaTargetIdentity target,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IAsyncDisposable>(new CleanupFailingLease());
+    }
+
+    private sealed class CleanupFailingLease : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() =>
+            ValueTask.FromException(new InvalidOperationException("transition lease dispose failed"));
     }
 }

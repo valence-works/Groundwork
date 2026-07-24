@@ -108,11 +108,12 @@ internal static class MongoDbPhysicalMutationCapabilities
 
         return new PhysicalQueryPlannerCapabilities(
             provider,
-            [PhysicalQuerySourceKind.LinkedIndex, PhysicalQuerySourceKind.NativeDocumentFields],
+            [PhysicalQuerySourceKind.CollectionElements, PhysicalQuerySourceKind.LinkedIndex, PhysicalQuerySourceKind.NativeDocumentFields],
             operations ?? Operations,
             new Dictionary<PhysicalQuerySourceKind, string>
             {
                 [PhysicalQuerySourceKind.LinkedIndex] = MongoDbPhysicalQueryHandler.LinkedIdentity,
+                [PhysicalQuerySourceKind.CollectionElements] = MongoDbPhysicalQueryHandler.CollectionIdentity,
                 [PhysicalQuerySourceKind.NativeDocumentFields] = MongoDbPhysicalQueryHandler.NativeIdentity
             },
             fields,
