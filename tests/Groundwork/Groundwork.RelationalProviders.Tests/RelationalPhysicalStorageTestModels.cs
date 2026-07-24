@@ -39,7 +39,13 @@ internal static class RelationalPhysicalStorageTestModels
         RelationalMutationScenarioOptions? mutationOptions = null,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal,
         QueryPagingSupport categoryPaging = QueryPagingSupport.Offset,
-        bool includeLatestPerCategory = false)
+        bool includeLatestPerCategory = false,
+        bool includeCollection = false,
+        bool includeCollectionMembershipQuery = false,
+        PortablePhysicalType collectionType = PortablePhysicalType.String,
+        IndexValueKind collectionLogicalValueKind = IndexValueKind.String,
+        int? collectionLength = 128,
+        string? collectionCollation = "ordinal")
     {
         mutationOptions ??= new RelationalMutationScenarioOptions();
         var typedTransitions = mutationOptions.TypedTransitions ?? new RelationalTypedTransitionTestOptions();
@@ -49,6 +55,18 @@ internal static class RelationalPhysicalStorageTestModels
         {
             new("category", "category", PortablePhysicalType.String, Length: 200, IsNullable: categoryNullable)
         };
+        if (includeCollection)
+        {
+            columns.Add(new ProjectedColumnDefinition(
+                "permissions",
+                "permissions",
+                collectionType,
+                Length: collectionLength,
+                IsNullable: true,
+                Collation: collectionCollation,
+                Cardinality: ProjectionCardinality.CollectionElements,
+                MaxCollectionElements: 8));
+        }
         var categoryIndexColumns = new List<PhysicalIndexColumnDefinition>();
         if (scoped)
             categoryIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
@@ -121,6 +139,30 @@ internal static class RelationalPhysicalStorageTestModels
             });
         var logicalIndexes = new List<LogicalIndexDeclaration> { logicalIndex };
         var boundedQueries = new List<BoundedQueryDeclaration> { boundedQuery };
+        if (includeCollectionMembershipQuery)
+        {
+            if (!includeCollection)
+                throw new ArgumentException("Collection membership queries require the collection projection.", nameof(includeCollectionMembershipQuery));
+            var permissions = new LogicalIndexDeclaration(
+                "by-permissions",
+                [new IndexField("permissions")],
+                collectionLogicalValueKind,
+                false,
+                MissingValueBehavior.Excluded);
+            logicalIndexes.Add(permissions);
+            boundedQueries.Add(new BoundedQueryDeclaration(
+                "list-by-permissions",
+                permissions.Identity,
+                new HashSet<PortableQueryOperation>
+                {
+                    PortableQueryOperation.CollectionContains,
+                    PortableQueryOperation.CollectionContainsAll
+                },
+                QuerySortSupport.None,
+                QueryPagingSupport.Offset,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true));
+        }
         if (includePriority)
         {
             var compound = new LogicalIndexDeclaration(

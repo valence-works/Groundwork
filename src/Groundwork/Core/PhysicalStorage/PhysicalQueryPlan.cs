@@ -19,7 +19,8 @@ public enum PhysicalQuerySourceKind
     PrimaryEnvelope,
     PrimaryCanonicalJson,
     PrimaryProjectedColumns,
-    NativeDocumentFields
+    NativeDocumentFields,
+    CollectionElements
 }
 
 /// <summary>The selected provider-neutral access strategy exposed through plan diagnostics.</summary>
@@ -29,7 +30,8 @@ public enum PhysicalQueryAccessKind
     PrimaryEnvelope,
     PrimaryCanonicalJson,
     PrimaryProjectedColumns,
-    NativeDocumentFields
+    NativeDocumentFields,
+    CollectionElementsThenPrimary
 }
 
 public enum PhysicalQueryFieldSource
@@ -38,7 +40,8 @@ public enum PhysicalQueryFieldSource
     LinkedRelationship,
     CanonicalJsonPath,
     ProjectedColumn,
-    NativeDocumentField
+    NativeDocumentField,
+    CollectionElementValue
 }
 
 /// <summary>
@@ -281,7 +284,8 @@ public sealed record PhysicalQueryPredicate(
     PhysicalQueryField Field,
     IReadOnlySet<PortableQueryOperation> Operations,
     bool IsResidual = false,
-    bool IsRequired = false)
+    bool IsRequired = false,
+    PhysicalQueryCollectionConstraint? CollectionConstraint = null)
 {
     public bool Equals(PhysicalQueryPredicate? other) =>
         other is not null &&
@@ -289,6 +293,7 @@ public sealed record PhysicalQueryPredicate(
         Field == other.Field &&
         IsResidual == other.IsResidual &&
         IsRequired == other.IsRequired &&
+        CollectionConstraint == other.CollectionConstraint &&
         Operations.SetEquals(other.Operations);
 
     public override int GetHashCode()
@@ -298,11 +303,20 @@ public sealed record PhysicalQueryPredicate(
         hash.Add(Field);
         hash.Add(IsResidual);
         hash.Add(IsRequired);
+        hash.Add(CollectionConstraint);
         foreach (var operation in Operations.Order())
             hash.Add(operation);
         return hash.ToHashCode();
     }
 }
+
+/// <summary>
+/// Compiled request-amplification fence for one collection membership predicate. The physical type
+/// defines exact request-set equivalence; the maximum is inherited from the bounded projection.
+/// </summary>
+public sealed record PhysicalQueryCollectionConstraint(
+    PortablePhysicalType PhysicalType,
+    int MaximumValues);
 
 public sealed record PhysicalQueryOrder(
     string Path,
@@ -540,6 +554,18 @@ public static class PhysicalQueryPlanSerializer
                 WriteField(writer, "field", predicate.Field);
                 writer.WriteBoolean("residual", predicate.IsResidual);
                 writer.WriteBoolean("required", predicate.IsRequired);
+                if (predicate.CollectionConstraint is null)
+                {
+                    writer.WriteNull("collectionConstraint");
+                }
+                else
+                {
+                    writer.WritePropertyName("collectionConstraint");
+                    writer.WriteStartObject();
+                    writer.WriteString("physicalType", predicate.CollectionConstraint.PhysicalType.ToString());
+                    writer.WriteNumber("maximumValues", predicate.CollectionConstraint.MaximumValues);
+                    writer.WriteEndObject();
+                }
                 writer.WritePropertyName("operations");
                 writer.WriteStartArray();
                 foreach (var operation in predicate.Operations.Order())

@@ -669,7 +669,12 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
               store.ExactPhysicalIdentityJoin(LinkedPrimaryJoin(route, detectIdentityCollision))
             : linked
                 ? $"FROM {store.PhysicalQuerySource(route.LinkedIndexStorage!.Name.Identifier, "l", plan.IndexName?.Identifier)}"
-                : $"FROM {store.PhysicalQuerySource(route.PrimaryStorage.Name.Identifier, "p", plan.IndexName?.Identifier)}";
+                : $"FROM {store.PhysicalQuerySource(
+                    route.PrimaryStorage.Name.Identifier,
+                    "p",
+                    plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary
+                        ? null
+                        : plan.IndexName?.Identifier)}";
         var parameters = new List<(string Name, object? Value)>();
         var predicateFieldIdentifiers = new HashSet<string>(StringComparer.Ordinal);
         var predicates = new List<string>();
@@ -803,6 +808,43 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         }
 
         var predicate = plan.Predicates.Single(item => item.Path == comparison.Path);
+        if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+        {
+            var collection = route.CollectionElementStorages.Single(storage =>
+                storage.Projection.Definition.Path == comparison.Path);
+            var distinctValues = comparison.Values
+                .Select(value => value ?? throw new InvalidOperationException(
+                    "Collection membership values cannot be null."))
+                .Select(value => store.ConvertPhysicalQueryValue(
+                    value,
+                    predicate.Field.ValueKind,
+                    collection.Value.Definition))
+                .Distinct(PhysicalQueryValueComparer.Instance)
+                .ToArray();
+            if (distinctValues.Length == 0)
+                return "0 = 1";
+            var membershipPredicates = new List<string>();
+            foreach (var value in distinctValues)
+            {
+                var name = $"v{parameterIndex++}";
+                parameters.Add((name, value));
+                predicateFieldIdentifiers.Add(collection.Value.Column.Identifier);
+                membershipPredicates.Add(
+                    $"EXISTS (SELECT 1 FROM {store.PhysicalQuerySource(collection.Storage.Name.Identifier, "c", collection.MembershipKey.Name.Identifier)} " +
+                    $"WHERE c.{store.Q(collection.Value.Column.Identifier)} = {store.P(name)} AND " +
+                    $"c.{store.Q(collection.DocumentKind.Column.Identifier)} = p.{store.Q(route.Discriminator.Column.Identifier)} AND " +
+                    $"c.{store.Q(collection.StorageScope.Column.Identifier)} = p.{store.Q(route.ScopeKey.Column.Identifier)} AND " +
+                    $"c.{store.Q(collection.IdLookupKey.Column.Identifier)} = p.{store.Q(route.Envelope.Identity.LookupKey.Identifier)} AND " +
+                    $"c.{store.Q(collection.IdComparisonKey.Column.Identifier)} = p.{store.Q(route.Envelope.Identity.ComparisonKey.Identifier)})");
+            }
+            return comparison.Operator switch
+            {
+                QueryComparisonOperator.CollectionContains => membershipPredicates.Single(),
+                QueryComparisonOperator.CollectionContainsAll => $"({string.Join(" AND ", membershipPredicates)})",
+                _ => throw new InvalidOperationException(
+                    $"Collection element plans do not support '{comparison.Operator}'.")
+            };
+        }
         var field = Field(predicate.Field);
         var projection = predicate.Field.Source == PhysicalQueryFieldSource.ProjectedColumn
             ? route.ProjectedColumns.Single(column =>
@@ -840,6 +882,21 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             parameters,
             predicateFieldIdentifiers,
             ref parameterIndex);
+    }
+
+    private sealed class PhysicalQueryValueComparer : IEqualityComparer<object>
+    {
+        public static PhysicalQueryValueComparer Instance { get; } = new();
+
+        public new bool Equals(object? left, object? right) =>
+            left is byte[] leftBytes && right is byte[] rightBytes
+                ? leftBytes.AsSpan().SequenceEqual(rightBytes)
+                : object.Equals(left, right);
+
+        public int GetHashCode(object value) =>
+            value is byte[] bytes
+                ? bytes.Aggregate(17, (hash, item) => unchecked((hash * 31) + item))
+                : value.GetHashCode();
     }
 
     private string IdentityComparison(
@@ -1016,7 +1073,12 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
     }
 
     private static string Alias(PhysicalQueryField field) =>
-        field.Target == ExecutableStorageObjectRole.LinkedIndexStorage ? "l" : "p";
+        field.Target switch
+        {
+            ExecutableStorageObjectRole.LinkedIndexStorage => "l",
+            ExecutableStorageObjectRole.CollectionElementStorage => "c",
+            _ => "p"
+        };
 
     private static bool IsDocumentIdentityField(PhysicalQueryField field) =>
         field.Path is PhysicalDocumentIdentityFieldPaths.Original or

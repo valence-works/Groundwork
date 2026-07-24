@@ -61,6 +61,16 @@ public static class PhysicalQueryPlanCompiler
         var predicateDeclarations = ResolvePredicates(logicalIndex, query, target, diagnostics);
         var residualPredicateDeclarations = ResolveResidualPredicates(query, logicalIndex, target, diagnostics);
         var hasMixedIdentityDemand = HasMixedIdentityDemand(predicateDeclarations);
+        if (!ValidateCollectionOperationCardinality(
+                route,
+                predicateDeclarations,
+                residualPredicateDeclarations,
+                target,
+                diagnostics))
+        {
+            return null;
+        }
+        ValidateCollectionOrdering(route, logicalIndex, query, target, diagnostics);
         if (query.LatestPerKeyPath is not null &&
             logicalIndex.Fields.All(field => field.Path != query.LatestPerKeyPath))
         {
@@ -109,16 +119,31 @@ public static class PhysicalQueryPlanCompiler
             query,
             residualPredicateDeclarations,
             capabilities);
+        if ((predicateDeclarations.Any(predicate => predicate.Operations.Any(IsCollectionOperation)) ||
+             residualPredicateDeclarations.Any(predicate => predicate.Operations.Any(IsCollectionOperation))) &&
+            selectedSource is not (null or PhysicalQuerySourceKind.CollectionElements))
+        {
+            diagnostics.Add(Error(
+                "GW-QUERY-016",
+                $"Collection membership query '{query.Identity}' resolved scalar source '{selectedSource}' instead of " +
+                $"a '{ProjectionCardinality.CollectionElements}' source.",
+                target));
+            return null;
+        }
         var hasBoundScalePath = route.CandidateQueryPaths.Any(path =>
             path.Kind == ExecutableQueryPathKind.PhysicalIndex &&
             path.Identity == logicalIndex.Identity &&
             path.IsScaleBearing &&
             path.QueryIdentities.Contains(query.Identity, StringComparer.Ordinal));
+        var hasCollectionMembershipPath = selectedSource == PhysicalQuerySourceKind.CollectionElements &&
+            logicalIndex.Fields.Count == 1 &&
+            route.CollectionElementStorages.Any(storage =>
+                storage.Projection.Definition.Path == logicalIndex.Fields[0].Path);
         if (query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing &&
-            (physicalIndex is null ||
+            ((!hasCollectionMembershipPath && physicalIndex is null) ||
              selectedSource is null ||
              !HasIndexedAccess(selectedSource.Value, certifiedPhysicalIndex) ||
-             !hasBoundScalePath))
+             (!hasCollectionMembershipPath && !hasBoundScalePath)))
         {
             diagnostics.Add(Error(
                 "GW-QUERY-005",
@@ -135,6 +160,16 @@ public static class PhysicalQueryPlanCompiler
                 target));
             return null;
         }
+        if (selectedSource == PhysicalQuerySourceKind.CollectionElements &&
+            (query.PagingSupport == QueryPagingSupport.Cursor || query.LatestPerKeyPath is not null))
+        {
+            diagnostics.Add(Error(
+                "GW-QUERY-008",
+                $"Collection membership query '{query.Identity}' cannot use cursor paging or latest-per-key selection " +
+                "until a provider certifies those combined element-to-owner shapes.",
+                target));
+            return null;
+        }
 
         var identityFields = ResolveDocumentIdentityFields(
             route,
@@ -147,7 +182,11 @@ public static class PhysicalQueryPlanCompiler
                 identityFields.Resolve(
                     predicate.Path,
                     logicalIndex.GetValueKind(predicate.Path)),
-                predicate.Operations.ToFrozenSet()))
+                predicate.Operations.ToFrozenSet(),
+                CollectionConstraint: ResolveCollectionConstraint(
+                    route,
+                    selectedSource.Value,
+                    predicate.Path)))
             .Concat(residualPredicateDeclarations.Select(predicate => new PhysicalQueryPredicate(
                 predicate.Path,
                 identityFields.Resolve(predicate.Path, predicate.ValueKind),
@@ -158,7 +197,8 @@ public static class PhysicalQueryPlanCompiler
         ValidateExecutableCompatibility(route, predicates, target, diagnostics);
 
         IReadOnlyList<string> requiredEqualityPrefixPaths = [];
-        if (HasIndexedAccess(selectedSource.Value, certifiedPhysicalIndex) &&
+        if (selectedSource != PhysicalQuerySourceKind.CollectionElements &&
+            HasIndexedAccess(selectedSource.Value, certifiedPhysicalIndex) &&
             !ValidatePhysicalCompatibility(
                 certifiedPhysicalIndex!,
                 identityFields,
@@ -175,12 +215,20 @@ public static class PhysicalQueryPlanCompiler
             return null;
 
         var access = ToAccessKind(selectedSource.Value);
+        var collectionStorage = access == PhysicalQueryAccessKind.CollectionElementsThenPrimary
+            ? route.CollectionElementStorages.Single(storage =>
+                storage.Projection.Definition.Path == logicalIndex.Fields[0].Path)
+            : null;
         var lookupObject = access == PhysicalQueryAccessKind.LinkedIndexThenPrimary
             ? route.LinkedIndexStorage!.Name
-            : route.PrimaryStorage.Name;
+            : collectionStorage?.Storage.Name ?? route.PrimaryStorage.Name;
         var lookupTarget = access == PhysicalQueryAccessKind.LinkedIndexThenPrimary
             ? ExecutableStorageObjectRole.LinkedIndexStorage
-            : ExecutableStorageObjectRole.PrimaryStorage;
+            : collectionStorage is null
+                ? ExecutableStorageObjectRole.PrimaryStorage
+                : ExecutableStorageObjectRole.CollectionElementStorage;
+        var envelopeTarget = collectionStorage is null ? lookupTarget : ExecutableStorageObjectRole.PrimaryStorage;
+        var envelopeObject = collectionStorage is null ? lookupObject : route.PrimaryStorage.Name;
         var scopeColumn = access == PhysicalQueryAccessKind.LinkedIndexThenPrimary
             ? route.LinkedRelationship!.StorageScope
             : route.ScopeKey.Column;
@@ -194,11 +242,12 @@ public static class PhysicalQueryPlanCompiler
                 access switch
                 {
                     PhysicalQueryAccessKind.LinkedIndexThenPrimary => PhysicalQueryFieldSource.LinkedRelationship,
+                    PhysicalQueryAccessKind.CollectionElementsThenPrimary => PhysicalQueryFieldSource.Envelope,
                     PhysicalQueryAccessKind.NativeDocumentFields => PhysicalQueryFieldSource.NativeDocumentField,
                     _ => PhysicalQueryFieldSource.Envelope
                 },
-                lookupTarget,
-                lookupObject,
+                envelopeTarget,
+                envelopeObject,
                 IndexValueKind.Keyword),
             route.ScopePolicy,
             IsMandatory: true,
@@ -215,11 +264,12 @@ public static class PhysicalQueryPlanCompiler
             access switch
             {
                 PhysicalQueryAccessKind.LinkedIndexThenPrimary => PhysicalQueryFieldSource.LinkedRelationship,
+                PhysicalQueryAccessKind.CollectionElementsThenPrimary => PhysicalQueryFieldSource.Envelope,
                 PhysicalQueryAccessKind.NativeDocumentFields => PhysicalQueryFieldSource.NativeDocumentField,
                 _ => PhysicalQueryFieldSource.Envelope
             },
-            lookupTarget,
-            lookupObject,
+            envelopeTarget,
+            envelopeObject,
             IndexValueKind.Keyword);
         var order = ResolveOrder(
             route,
@@ -240,7 +290,8 @@ public static class PhysicalQueryPlanCompiler
             access,
             lookupObject,
             route.PrimaryStorage.Name,
-            HasIndexedAccess(selectedSource.Value, certifiedPhysicalIndex) ? certifiedPhysicalIndex?.Name : null,
+            collectionStorage?.MembershipKey.Name ??
+            (HasIndexedAccess(selectedSource.Value, certifiedPhysicalIndex) ? certifiedPhysicalIndex?.Name : null),
             scope,
             discriminator,
             documentIdentity,
@@ -442,11 +493,119 @@ public static class PhysicalQueryPlanCompiler
         }
     }
 
+    private static void ValidateCollectionOrdering(
+        ExecutableStorageRoute route,
+        LogicalIndexDeclaration logicalIndex,
+        BoundedQueryDeclaration query,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        var collectionPaths = route.CollectionElementStorages
+            .Select(storage => storage.Projection.Definition.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        var orderedPaths = query.SortFields.Count != 0
+            ? query.SortFields.Select(field => field.Path)
+            : query.SortSupport == QuerySortSupport.None
+                ? []
+                : logicalIndex.Fields.Select(field => field.Path);
+        var collectionOrdering = orderedPaths
+            .Where(collectionPaths.Contains)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (collectionOrdering.Length == 0)
+            return;
+
+        diagnostics.Add(Error(
+            "GW-QUERY-014",
+            $"Bounded query '{query.Identity}' cannot order by collection-valued paths: " +
+            $"{string.Join(", ", collectionOrdering)}. Collection ordinals are reconstruct-only.",
+            target));
+    }
+
+    private static bool ValidateCollectionOperationCardinality(
+        ExecutableStorageRoute route,
+        IReadOnlyList<BoundedQueryPredicateField> predicates,
+        IReadOnlyList<BoundedQueryResidualPredicateField> residualPredicates,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        var isValid = true;
+        var collectionPaths = route.CollectionElementStorages
+            .Select(storage => storage.Projection.Definition.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var predicate in predicates.Select(predicate => (predicate.Path, predicate.Operations))
+                     .Concat(residualPredicates.Select(predicate => (predicate.Path, predicate.Operations))))
+        {
+            var collectionOperations = predicate.Operations
+                .Where(IsCollectionOperation)
+                .Order()
+                .ToArray();
+            var scalarOperations = predicate.Operations
+                .Where(operation => !IsCollectionOperation(operation))
+                .Order()
+                .ToArray();
+            var cardinality = collectionPaths.Contains(predicate.Path)
+                ? ProjectionCardinality.CollectionElements
+                : ProjectionCardinality.Scalar;
+            if (collectionOperations.Length != 0 && scalarOperations.Length != 0)
+            {
+                isValid = false;
+                diagnostics.Add(Error(
+                    "GW-QUERY-016",
+                    $"Predicate path '{predicate.Path}' mixes collection membership operations " +
+                    $"[{string.Join(", ", collectionOperations)}] with scalar operations " +
+                    $"[{string.Join(", ", scalarOperations)}] against resolved cardinality '{cardinality}'.",
+                    target));
+                continue;
+            }
+            if (collectionOperations.Length != 0 && cardinality != ProjectionCardinality.CollectionElements)
+            {
+                isValid = false;
+                diagnostics.Add(Error(
+                    "GW-QUERY-016",
+                    $"Collection membership operations [{string.Join(", ", collectionOperations)}] require " +
+                    $"a '{ProjectionCardinality.CollectionElements}' projection on predicate path '{predicate.Path}', " +
+                    $"but the resolved cardinality is '{cardinality}'.",
+                    target));
+                continue;
+            }
+            if (scalarOperations.Length != 0 && cardinality == ProjectionCardinality.CollectionElements)
+            {
+                isValid = false;
+                diagnostics.Add(Error(
+                    "GW-QUERY-016",
+                    $"Scalar operations [{string.Join(", ", scalarOperations)}] cannot execute against " +
+                    $"a '{ProjectionCardinality.CollectionElements}' projection on predicate path '{predicate.Path}'.",
+                    target));
+            }
+        }
+        return isValid;
+    }
+
+    private static bool IsCollectionOperation(PortableQueryOperation operation) => operation is
+        PortableQueryOperation.CollectionContains or
+        PortableQueryOperation.CollectionContainsAll;
+
     private static bool HasMixedIdentityDemand(IEnumerable<BoundedQueryPredicateField> predicates) =>
         predicates.Any(predicate =>
             predicate.Path == PhysicalDocumentFieldPaths.Id &&
             PhysicalQueryIdentityDemand.Resolve(predicate.Operations) ==
             PhysicalQueryIdentityEvidenceDemand.Mixed);
+
+    private static PhysicalQueryCollectionConstraint? ResolveCollectionConstraint(
+        ExecutableStorageRoute route,
+        PhysicalQuerySourceKind source,
+        string path)
+    {
+        if (source != PhysicalQuerySourceKind.CollectionElements)
+            return null;
+        var projection = route.CollectionElementStorages.Single(storage =>
+            storage.Projection.Definition.Path == path).Projection.Definition;
+        return new PhysicalQueryCollectionConstraint(
+            projection.Type,
+            projection.MaxCollectionElements!.Value);
+    }
 
     private static void ValidateExecutableCompatibility(
         ExecutableStorageRoute route,
@@ -456,11 +615,15 @@ public static class PhysicalQueryPlanCompiler
     {
         foreach (var predicate in predicates)
         {
-            var projection = predicate.Field.Source == PhysicalQueryFieldSource.ProjectedColumn
-                ? route.ProjectedColumns.Single(column =>
+            var projection = predicate.Field.Source switch
+            {
+                PhysicalQueryFieldSource.ProjectedColumn => route.ProjectedColumns.Single(column =>
                     column.Target == predicate.Field.Target &&
-                    column.Definition.Path == predicate.Path)
-                : null;
+                    column.Definition.Path == predicate.Path),
+                PhysicalQueryFieldSource.CollectionElementValue => route.CollectionElementStorages.Single(storage =>
+                    storage.Projection.Definition.Path == predicate.Path).Value,
+                _ => null
+            };
             if (projection is not null &&
                 !PortableQueryOperationCompatibility.Supports(
                     predicate.Field.ValueKind,
@@ -506,6 +669,18 @@ public static class PhysicalQueryPlanCompiler
             .Distinct()
             .ToArray();
         var available = new HashSet<PhysicalQuerySourceKind>();
+        if (requiredFields.Length == 1 &&
+            residualPredicates.Count == 0 &&
+            query.Operations.Count != 0 &&
+            query.Operations.All(operation => operation is
+                PortableQueryOperation.CollectionContains or
+                PortableQueryOperation.CollectionContainsAll) &&
+            route.CollectionElementStorages.Any(storage =>
+                storage.Projection.Definition.Path == requiredFields[0].Path) &&
+            capabilities.HandlerIdentities.ContainsKey(PhysicalQuerySourceKind.CollectionElements))
+        {
+            available.Add(PhysicalQuerySourceKind.CollectionElements);
+        }
         if (physicalIndex?.Target == ExecutableStorageObjectRole.LinkedIndexStorage &&
             residualPredicates.All(predicate => route.ProjectedColumns.Any(column =>
                 column.Target == ExecutableStorageObjectRole.LinkedIndexStorage &&
@@ -670,9 +845,17 @@ public static class PhysicalQueryPlanCompiler
         }
         if (order.All(item => item.Path != PhysicalDocumentFieldPaths.Id))
         {
-            var identityTieBreak = query.PagingSupport == QueryPagingSupport.Cursor
-                ? identityFields.Binding.Lookup
-                : identityFields.Binding.Comparison;
+            var identityTieBreak = source == PhysicalQuerySourceKind.CollectionElements
+                ? new PhysicalQueryField(
+                    PhysicalDocumentIdentityFieldPaths.Comparison,
+                    route.Envelope.Identity.ComparisonKey.Identifier,
+                    PhysicalQueryFieldSource.Envelope,
+                    ExecutableStorageObjectRole.PrimaryStorage,
+                    route.PrimaryStorage.Name,
+                    IndexValueKind.Keyword)
+                : query.PagingSupport == QueryPagingSupport.Cursor
+                    ? identityFields.Binding.Lookup
+                    : identityFields.Binding.Comparison;
             order.Add(new PhysicalQueryOrder(
                 PhysicalDocumentFieldPaths.Id,
                 identityTieBreak,
@@ -793,8 +976,13 @@ public static class PhysicalQueryPlanCompiler
         PhysicalQueryPlannerCapabilities capabilities)
     {
         var linked = source == PhysicalQuerySourceKind.LinkedIndex;
-        var target = linked ? ExecutableStorageObjectRole.LinkedIndexStorage : ExecutableStorageObjectRole.PrimaryStorage;
-        var objectName = linked ? route.LinkedIndexStorage!.Name : route.PrimaryStorage.Name;
+        var collection = source == PhysicalQuerySourceKind.CollectionElements
+            ? route.CollectionElementStorages.SingleOrDefault(storage => storage.Projection.Definition.Path == path)
+            : null;
+        var target = linked
+            ? ExecutableStorageObjectRole.LinkedIndexStorage
+            : collection is null ? ExecutableStorageObjectRole.PrimaryStorage : ExecutableStorageObjectRole.CollectionElementStorage;
+        var objectName = linked ? route.LinkedIndexStorage!.Name : collection?.Storage.Name ?? route.PrimaryStorage.Name;
         if (source == PhysicalQuerySourceKind.NativeDocumentFields)
         {
             return new PhysicalQueryField(
@@ -827,6 +1015,16 @@ public static class PhysicalQueryPlanCompiler
                 path,
                 projection.Column.Identifier,
                 PhysicalQueryFieldSource.ProjectedColumn,
+                target,
+                objectName,
+                logicalValueKind);
+        }
+        if (collection is not null)
+        {
+            return new PhysicalQueryField(
+                path,
+                collection.Value.Column.Identifier,
+                PhysicalQueryFieldSource.CollectionElementValue,
                 target,
                 objectName,
                 logicalValueKind);
@@ -915,6 +1113,7 @@ public static class PhysicalQueryPlanCompiler
     private static bool HasIndexedAccess(
         PhysicalQuerySourceKind source,
         ExecutablePhysicalIndexRoute? physicalIndex) =>
+        source == PhysicalQuerySourceKind.CollectionElements ||
         physicalIndex is not null && source switch
         {
             PhysicalQuerySourceKind.LinkedIndex =>
@@ -933,6 +1132,7 @@ public static class PhysicalQueryPlanCompiler
         PhysicalQuerySourceKind.PrimaryCanonicalJson => PhysicalQueryAccessKind.PrimaryCanonicalJson,
         PhysicalQuerySourceKind.PrimaryProjectedColumns => PhysicalQueryAccessKind.PrimaryProjectedColumns,
         PhysicalQuerySourceKind.NativeDocumentFields => PhysicalQueryAccessKind.NativeDocumentFields,
+        PhysicalQuerySourceKind.CollectionElements => PhysicalQueryAccessKind.CollectionElementsThenPrimary,
         _ => throw new ArgumentOutOfRangeException(nameof(source), source, null)
     };
 

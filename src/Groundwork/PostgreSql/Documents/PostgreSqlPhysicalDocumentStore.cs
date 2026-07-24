@@ -1,4 +1,5 @@
 using System.Data.Common;
+using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
@@ -31,6 +32,26 @@ public sealed class PostgreSqlPhysicalDocumentStore : RelationalPhysicalDocument
     }
 
     internal PostgreSqlPhysicalDocumentStore(
+        string connectionString,
+        StorageManifest manifest,
+        IReadOnlyList<ExecutableStorageRoute> routes,
+        DocumentStoreAccess access,
+        IStorageScopeObserver? scopeObserver,
+        ProviderIdentity physicalSchemaProvider)
+        : base(
+            RelationalSessionFactory.Concurrent(() => new NpgsqlConnection(connectionString)),
+            manifest,
+            routes,
+            new PostgreSqlPhysicalDocumentDialect(),
+            access,
+            scopeObserver,
+            physicalSchemaProvider)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentNullException.ThrowIfNull(physicalSchemaProvider);
+    }
+
+    internal PostgreSqlPhysicalDocumentStore(
         RelationalSessionFactory sessions,
         StorageManifest manifest,
         IReadOnlyList<ExecutableStorageRoute> routes,
@@ -43,10 +64,13 @@ public sealed class PostgreSqlPhysicalDocumentStore : RelationalPhysicalDocument
 
 internal sealed class PostgreSqlPhysicalDocumentDialect : RelationalPhysicalDocumentDialect
 {
+    public override ProviderIdentity PhysicalSchemaProvider => PostgreSqlGroundworkCapabilities.Provider;
     public override int MaxParameters => 65535;
     public override string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
     public override bool IsUniqueConstraintException(DbException exception) =>
         exception is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
+    public override bool IsMissingPhysicalSchemaStateException(DbException exception) =>
+        exception is PostgresException { SqlState: PostgresErrorCodes.UndefinedTable };
     public override bool CanInspectIdentityAfterUniqueConstraintException => false;
     public override string InsertPrimaryIfAbsent(
         string tableIdentifier,
@@ -139,6 +163,23 @@ internal sealed class PostgreSqlPhysicalDocumentDialect : RelationalPhysicalDocu
         var parameter = command.CreateParameter();
         parameter.ParameterName = "@operationLock";
         parameter.Value = operationLock;
+        command.Parameters.Add(parameter);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public override async Task AcquireSchemaTransitionWriterLockAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string resource,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(@resource, 0));";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@resource";
+        parameter.Value = resource;
         command.Parameters.Add(parameter);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }

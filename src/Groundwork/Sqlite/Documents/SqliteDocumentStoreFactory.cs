@@ -44,7 +44,8 @@ public static class SqliteDocumentStoreFactory
             manifest,
             target.Routes,
             access,
-            scopeObserver);
+            scopeObserver,
+            target.Provider);
     }
 
     /// <summary>
@@ -80,7 +81,8 @@ public static class SqliteDocumentStoreFactory
             manifest,
             target.Routes,
             access,
-            scopeObserver);
+            scopeObserver,
+            target.Provider);
     }
 
     private static async Task<PhysicalSchemaTarget> AdmitPhysicalAsync(

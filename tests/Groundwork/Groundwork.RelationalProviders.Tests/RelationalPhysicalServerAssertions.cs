@@ -570,8 +570,9 @@ internal static class RelationalPhysicalServerAssertions
             PhysicalSchemaApplicationOutcome.NoChanges,
             (await PhysicalSchemaApplication.ApplyAsync(additive.Target, createExecutor())).Outcome);
 
-        Assert.Equal(DocumentStoreWriteStatus.Saved, (await oldRouteStore.SaveAsync(
-            Save("after-publication", 43))).Status);
+        var rejection = await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() =>
+            oldRouteStore.SaveAsync(Save("after-publication", 43)));
+        Assert.Equal(PhysicalSchemaUpgradeRequiredException.DiagnosticCode, rejection.Code);
         var publishedExecutor = createExecutor();
         await using (var applicationLock = await publishedExecutor.AcquireApplicationLockAsync(
                          additive.Target.Identity,

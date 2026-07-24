@@ -4,6 +4,7 @@ using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Queries;
+using Groundwork.Core.Validation;
 
 namespace Groundwork.Documents.Store;
 
@@ -89,8 +90,12 @@ public sealed class PhysicalQueryHandlerCertification : IEquatable<PhysicalQuery
         }
 
         return PlanFields(plan).All(field =>
-            field.Target == Target &&
-            field.ObjectName == LookupObject &&
+            (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary
+                ? field.Target is ExecutableStorageObjectRole.PrimaryStorage or ExecutableStorageObjectRole.CollectionElementStorage &&
+                  field.ObjectName == (field.Target == ExecutableStorageObjectRole.PrimaryStorage
+                      ? PrimaryObject
+                      : LookupObject)
+                : field.Target == Target && field.ObjectName == LookupObject) &&
             FieldIdentifiers.TryGetValue(field.Path, out var identifier) &&
             identifier == field.Identifier);
     }
@@ -354,6 +359,8 @@ public sealed class PhysicalQueryDocumentStore : IBoundedDocumentStore, IPhysica
 
     private static void ValidateRuntimeShape(DocumentQuery query, PhysicalQueryPlan plan)
     {
+        var collectionRequests = new Dictionary<string, (PhysicalQueryCollectionConstraint Constraint, List<string?> Values)>(
+            StringComparer.Ordinal);
         foreach (var clause in query.Clauses)
         {
             if (clause.Comparisons.Count > 1 && !plan.SupportsDisjunction)
@@ -362,9 +369,39 @@ public sealed class PhysicalQueryDocumentStore : IBoundedDocumentStore, IPhysica
             foreach (var comparison in clause.Comparisons)
             {
                 var operation = DocumentQueryOperations.ToPortable(comparison.Operator);
-                if (plan.Predicates.All(predicate =>
-                        predicate.Path != comparison.Path || !predicate.Operations.Contains(operation)))
+                var predicate = plan.Predicates.SingleOrDefault(predicate =>
+                    predicate.Path == comparison.Path && predicate.Operations.Contains(operation));
+                if (predicate is null)
                     throw new InvalidOperationException($"Operation '{operation}' is not bound to query '{query.QueryIdentity}'.");
+                if (operation is not (PortableQueryOperation.CollectionContains or
+                    PortableQueryOperation.CollectionContainsAll))
+                {
+                    continue;
+                }
+
+                var constraint = predicate.CollectionConstraint ??
+                    throw new InvalidOperationException(
+                        $"Collection predicate '{comparison.Path}' has no compiled request bound.");
+                if (!collectionRequests.TryGetValue(comparison.Path, out var request))
+                {
+                    request = (constraint, []);
+                    collectionRequests.Add(comparison.Path, request);
+                }
+                request.Values.AddRange(comparison.Values);
+            }
+        }
+
+        foreach (var (path, request) in collectionRequests)
+        {
+            var requested = PhysicalCollectionQueryValueSet.CountDistinct(request.Values, request.Constraint);
+            if (requested > request.Constraint.MaximumValues)
+            {
+                throw new PhysicalQueryRequestValidationException(
+                    GroundworkDiagnostic.Error(
+                        "GW-QUERY-015",
+                        $"Collection predicate '{path}' requests {requested} distinct typed values, " +
+                        $"exceeding the compiled maximum of {request.Constraint.MaximumValues}.",
+                        $"documentQueries.{query.QueryIdentity}.{path}"));
             }
         }
 
@@ -426,6 +463,8 @@ internal static class DocumentQueryOperations
         QueryComparisonOperator.In => PortableQueryOperation.In,
         QueryComparisonOperator.Contains => PortableQueryOperation.Contains,
         QueryComparisonOperator.NotContains => PortableQueryOperation.NotContains,
+        QueryComparisonOperator.CollectionContains => PortableQueryOperation.CollectionContains,
+        QueryComparisonOperator.CollectionContainsAll => PortableQueryOperation.CollectionContainsAll,
         QueryComparisonOperator.NotEqual => PortableQueryOperation.NotEqual,
         QueryComparisonOperator.StartsWith => PortableQueryOperation.StartsWith,
         QueryComparisonOperator.GreaterThan => PortableQueryOperation.GreaterThan,

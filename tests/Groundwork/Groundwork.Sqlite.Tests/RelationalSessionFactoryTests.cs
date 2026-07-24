@@ -312,6 +312,27 @@ public sealed class RelationalSessionFactoryTests
     }
 
     [Fact]
+    public async Task FailedTransactionBeginStillDisposesFailingPretransactionLeaseAndSession()
+    {
+        var connection = new CompletionTrackingConnection();
+        var sessions = RelationalSessionFactory.Serialized(
+            () => connection,
+            (_, _) => Task.FromException<DbTransaction>(
+                new InvalidOperationException("begin failed")));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            sessions.BeginUnitOfWorkAsync(
+                (_, _) => ValueTask.FromResult<IAsyncDisposable>(new FailingLease()),
+                CancellationToken.None));
+
+        Assert.Equal("begin failed", exception.Message);
+        var cleanupFailures = Assert.IsAssignableFrom<IReadOnlyList<Exception>>(
+            exception.Data["Groundwork.Relational.CleanupFailures"]);
+        Assert.Collection(cleanupFailures, cleanup => Assert.Equal("lease dispose failed", cleanup.Message));
+        Assert.Equal(1, connection.DisposeCount);
+    }
+
+    [Fact]
     public async Task FailedCommitPreservesPrimaryFailureAndAttachesAllCleanupFailures()
     {
         var connection = new CompletionTrackingConnection
@@ -578,5 +599,11 @@ public sealed class RelationalSessionFactoryTests
             DisposeCount++;
             return DisposeFailure is null ? ValueTask.CompletedTask : ValueTask.FromException(DisposeFailure);
         }
+    }
+
+    private sealed class FailingLease : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() =>
+            ValueTask.FromException(new InvalidOperationException("lease dispose failed"));
     }
 }
