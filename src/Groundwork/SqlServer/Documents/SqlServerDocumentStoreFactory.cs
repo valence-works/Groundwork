@@ -47,7 +47,8 @@ public static class SqlServerDocumentStoreFactory
             manifest,
             target.Routes,
             access,
-            scopeObserver);
+            scopeObserver,
+            target.Provider);
     }
 
     public static Task<SqlServerDocumentStore> CreateAsync(

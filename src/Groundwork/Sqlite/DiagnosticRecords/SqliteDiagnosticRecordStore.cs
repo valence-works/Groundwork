@@ -59,6 +59,11 @@ public sealed class SqliteDiagnosticRecordStore : IDiagnosticRecordStore
         CancellationToken cancellationToken = default) =>
         instrumented.QueryAsync(query, cancellationToken);
 
+    public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default) =>
+        instrumented.QueryGroupsAsync(query, cancellationToken);
+
     public ValueTask<DiagnosticStreamStatistics> InspectAsync(
         DiagnosticStreamInspectionRequest request,
         CancellationToken cancellationToken = default) =>
@@ -84,6 +89,10 @@ internal sealed class SqliteDiagnosticRecordDialect : RelationalDiagnosticRecord
 
     public override string Contains(string expression, string parameterName) =>
         $"instr({expression}, {Parameter(parameterName)}) > 0";
+
+    public override string Int64Value(string expression) => $"CAST({expression} AS INTEGER)";
+
+    public override string Int64Canonical(string expression) => $"CAST({expression} AS TEXT)";
 
     public override string BuildOperationCleanup(
         string table,

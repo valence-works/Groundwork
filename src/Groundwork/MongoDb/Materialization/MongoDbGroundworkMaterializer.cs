@@ -45,9 +45,10 @@ public sealed class MongoDbGroundworkMaterializer(IMongoDatabase database, Actio
             model.Routes.Select(route => route.StorageUnit.Value).ToArray(),
             "physical schema application",
             cancellationToken);
+        var executor = new MongoDbPhysicalSchemaExecutor(database, model.Target);
         var result = await PhysicalSchemaApplication.ApplyAsync(
             model.Target,
-            new MongoDbPhysicalSchemaExecutor(database),
+            executor,
             cancellationToken: cancellationToken);
         return result;
     }

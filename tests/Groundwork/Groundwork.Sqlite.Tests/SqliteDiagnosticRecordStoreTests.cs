@@ -5,6 +5,7 @@ using Groundwork.Core.Manifests;
 using Groundwork.Provider.Relational;
 using Groundwork.Sqlite.DiagnosticRecords;
 using Microsoft.Data.Sqlite;
+using System.Globalization;
 using Xunit;
 
 namespace Groundwork.Sqlite.Tests;
@@ -20,6 +21,60 @@ public sealed class SqliteDiagnosticRecordStoreTests : RelationalDiagnosticRecor
 {
     protected override IRelationalDiagnosticRecordStoreConformanceFixture CreateRelationalFixture() =>
         new SqliteDiagnosticRecordStoreFixture();
+
+    [Fact]
+    public async Task Grouped_sum_overflow_raises_sqlite_integer_overflow()
+    {
+        var exception = await Assert.ThrowsAsync<SqliteException>(QueryGroupedInt64SumOverflowAsync);
+
+        Assert.Equal(1, exception.SqliteErrorCode);
+        Assert.Equal(1, exception.SqliteExtendedErrorCode);
+        Assert.Contains("integer overflow", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Structured_native_rows_remain_compatible_with_seek_recognizer()
+    {
+        Assert.True(SqliteDiagnosticRecordStoreFixture.UsesSeekPlan(
+            [
+                "id=3;parent=2;detail=SEARCH f USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor<?)"
+            ],
+            "sqlite_autoindex_groundwork_diagnostic_fields_1",
+            ["tenant_id", "scope_id", "stream_id", "cursor"]));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_disconnected_evidence()
+    {
+        var plan = new DiagnosticRecordNativePlan(
+            "sqlite",
+            DiagnosticRecordPlanOperation.GroupedQuery,
+            DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
+            [
+                "id=1;parent=0;detail=MATERIALIZE reducer_0_ranked",
+                "id=2;parent=1;detail=SCAN CONSTANT ROW",
+                "id=3;parent=0;detail=SEARCH r USING COVERING INDEX sqlite_autoindex_groundwork_diagnostic_records_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
+                "id=4;parent=0;detail=SEARCH f USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)"
+            ]);
+
+        Assert.False(SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_scoped_reducer_without_aggregate_evidence()
+    {
+        var plan = new DiagnosticRecordNativePlan(
+            "sqlite",
+            DiagnosticRecordPlanOperation.GroupedQuery,
+            DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
+            [
+                "id=1;parent=0;detail=MATERIALIZE reducer_0",
+                "id=2;parent=1;detail=SEARCH r USING COVERING INDEX sqlite_autoindex_groundwork_diagnostic_records_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
+                "id=3;parent=1;detail=SEARCH f USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)"
+            ]);
+
+        Assert.False(SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
 }
 
 [Collection(SqliteDiagnosticRecordTestCollection.Name)]
@@ -120,6 +175,57 @@ public sealed class SqliteDiagnosticRecordMaterializerTests
             Assert.Equal(DiagnosticRecordPlanOperation.TrimSelection, trim.Operation);
             Assert.Equal("sqlite-explain-query-plan", trim.Format);
             Assert.NotEmpty(trim.RawPlans);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Plan_inspector_returns_native_grouped_reduction_plan()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"groundwork-group-plan-{Guid.NewGuid():N}.db");
+        var connectionString = ConnectionString(path);
+        var definition = SqliteDiagnosticRecordStoreFixture.Definition with
+        {
+            GroupReductionProfiles =
+            [
+                new(
+                    "service-groups",
+                    "service",
+                    [
+                        new(
+                            "start",
+                            DiagnosticGroupReducerKind.MinTimestamp,
+                            DiagnosticRecordFieldNames.OccurredAt)
+                    ],
+                    [],
+                    new HashSet<string> { "start" },
+                    10,
+                    1)
+            ]
+        };
+        await SqliteDiagnosticRecordMaterializer.MaterializeAsync(connectionString, definition);
+
+        try
+        {
+            var plan = await SqliteDiagnosticRecordStoreFactory
+                .CreatePlanInspector(connectionString)
+                .InspectGroupedQueryAsync(
+                    Deployment(definition),
+                    new(
+                        new("tenant-a", "shell-a"),
+                        definition.Stream,
+                        "service-groups",
+                        10,
+                        new("start")));
+
+            Assert.Equal(DiagnosticRecordPlanOperation.GroupedQuery, plan.Operation);
+            Assert.Equal(DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan, plan.Format);
+            Assert.True(
+                SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan),
+                string.Join(Environment.NewLine, plan.RawPlans));
         }
         finally
         {
@@ -994,6 +1100,23 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
     public void AdvanceTime(TimeSpan duration) => timeProvider.Advance(duration);
     public void SetWallClock(DateTimeOffset utcNow) => timeProvider.Set(utcNow);
 
+    public async ValueTask<DiagnosticRecordNativePlan> ExplainGroupedQueryAsync(
+        DiagnosticRecordStreamDefinition definition,
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        await SqliteDiagnosticRecordMaterializer.MaterializeAsync(
+            connectionString,
+            definition,
+            cancellationToken: cancellationToken);
+        return await SqliteDiagnosticRecordStoreFactory
+            .CreatePlanInspector(connectionString)
+            .InspectGroupedQueryAsync(
+                DiagnosticRecordConformanceDeployment.Create(definition),
+                query,
+                cancellationToken);
+    }
+
     public ValueTask<IReadOnlyList<string>> ExplainQueryAsync(
         DiagnosticRecordStreamDefinition definition,
         DiagnosticRecordQuery query,
@@ -1010,6 +1133,12 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
         IReadOnlyList<string> plan,
         string accessPath,
         IReadOnlyList<string> constrainedColumns) =>
+        UsesSeekPlan(plan, accessPath, constrainedColumns);
+
+    internal static bool UsesSeekPlan(
+        IReadOnlyList<string> plan,
+        string accessPath,
+        IReadOnlyList<string> constrainedColumns) =>
         plan.Any(line =>
             line.Contains("SEARCH", StringComparison.Ordinal) &&
             line.Contains(accessPath, StringComparison.Ordinal) &&
@@ -1017,6 +1146,46 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
                 line.Contains($"{column}=?", StringComparison.Ordinal) ||
                 line.Contains($"{column}<?", StringComparison.Ordinal) ||
                 line.Contains($"{column}>?", StringComparison.Ordinal)));
+
+    public bool HasNativeScopedGroupedReduction(DiagnosticRecordNativePlan plan) =>
+        HasNativeScopedGroupedReductionPlan(plan);
+
+    internal static bool HasNativeScopedGroupedReductionPlan(DiagnosticRecordNativePlan plan)
+    {
+        if (plan.Provider != "sqlite" ||
+            plan.Operation != DiagnosticRecordPlanOperation.GroupedQuery ||
+            plan.Format != DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan)
+        {
+            return false;
+        }
+
+        if (!TryParsePlanRows(plan.RawPlans, out var rows))
+            return false;
+        var rowsById = rows.ToDictionary(row => row.Id);
+
+        foreach (var reduction in rows.Where(row =>
+                     row.Detail.StartsWith("MATERIALIZE reducer_", StringComparison.Ordinal)))
+        {
+            var subtree = rows
+                .Where(row => IsDescendantOrSelf(row, reduction.Id, rowsById))
+                .Select(row => row.Detail)
+                .ToArray();
+            var hasScopedRecordAccess = subtree.Any(line =>
+                line.Contains("SEARCH r ", StringComparison.Ordinal) &&
+                line.Contains("groundwork_diagnostic_records", StringComparison.Ordinal) &&
+                HasScopeConstraints(line));
+            var hasScopedFieldAccess = subtree.Any(line =>
+                line.Contains("SEARCH ", StringComparison.Ordinal) &&
+                line.Contains("groundwork_diagnostic_fields", StringComparison.Ordinal) &&
+                HasScopeConstraints(line));
+            var hasAggregate = subtree.Any(line =>
+                line.Equals("USE TEMP B-TREE FOR GROUP BY", StringComparison.Ordinal));
+            if (hasScopedRecordAccess && hasScopedFieldAccess && hasAggregate)
+                return true;
+        }
+
+        return false;
+    }
 
     public ValueTask<IReadOnlyList<string>> ReadComparisonKeysAsync(
         DiagnosticStorageScope scope,
@@ -1042,6 +1211,80 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
 
         return interceptor?.Invoke(cancellationToken) ?? ValueTask.CompletedTask;
     }
+
+    private static bool HasScopeConstraints(string planLine) =>
+        planLine.Contains("tenant_id=?", StringComparison.Ordinal) &&
+        planLine.Contains("scope_id=?", StringComparison.Ordinal) &&
+        planLine.Contains("stream_id=?", StringComparison.Ordinal);
+
+    private static bool TryParsePlanRows(
+        IReadOnlyList<string> rawPlans,
+        out IReadOnlyList<SqliteExplainRow> rows)
+    {
+        var parsed = new List<SqliteExplainRow>(rawPlans.Count);
+        foreach (var rawPlan in rawPlans)
+        {
+            const string idPrefix = "id=";
+            const string parentPrefix = ";parent=";
+            const string detailPrefix = ";detail=";
+            var parentSeparator = rawPlan.IndexOf(parentPrefix, StringComparison.Ordinal);
+            var detailSeparator = rawPlan.IndexOf(detailPrefix, StringComparison.Ordinal);
+            if (!rawPlan.StartsWith(idPrefix, StringComparison.Ordinal) ||
+                parentSeparator < idPrefix.Length ||
+                detailSeparator < parentSeparator + parentPrefix.Length ||
+                !long.TryParse(
+                    rawPlan.AsSpan(idPrefix.Length, parentSeparator - idPrefix.Length),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var id) ||
+                !long.TryParse(
+                    rawPlan.AsSpan(
+                        parentSeparator + parentPrefix.Length,
+                        detailSeparator - parentSeparator - parentPrefix.Length),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var parent))
+            {
+                rows = [];
+                return false;
+            }
+
+            parsed.Add(new(
+                id,
+                parent,
+                rawPlan[(detailSeparator + detailPrefix.Length)..]));
+        }
+
+        if (parsed.Select(row => row.Id).Distinct().Count() != parsed.Count)
+        {
+            rows = [];
+            return false;
+        }
+
+        rows = parsed;
+        return true;
+    }
+
+    private static bool IsDescendantOrSelf(
+        SqliteExplainRow row,
+        long ancestorId,
+        IReadOnlyDictionary<long, SqliteExplainRow> rows)
+    {
+        var current = row;
+        var visited = new HashSet<long>();
+        while (visited.Add(current.Id))
+        {
+            if (current.Id == ancestorId)
+                return true;
+            if (!rows.TryGetValue(current.Parent, out var parent))
+                return false;
+            current = parent;
+        }
+
+        return false;
+    }
+
+    private sealed record SqliteExplainRow(long Id, long Parent, string Detail);
 
     private sealed class ManualSqliteTimeProvider(DateTimeOffset now) : TimeProvider
     {

@@ -73,7 +73,9 @@ internal sealed class RelationalPhysicalMutationSql
         string P(string name) => dialect.Parameter(name);
 
         var primaryProjections = route.ProjectedColumns
-            .Where(column => column.Target == ExecutableStorageObjectRole.PrimaryStorage)
+            .Where(column =>
+                column.Target == ExecutableStorageObjectRole.PrimaryStorage &&
+                column.Definition.Cardinality == ProjectionCardinality.Scalar)
             .ToArray();
 
         // INSERT INTO primary (...) VALUES/SELECT (...)
@@ -139,7 +141,9 @@ internal sealed class RelationalPhysicalMutationSql
         {
             var relationship = route.LinkedRelationship!;
             linkedProjections = route.ProjectedColumns
-                .Where(column => column.Target == ExecutableStorageObjectRole.LinkedIndexStorage)
+                .Where(column =>
+                    column.Target == ExecutableStorageObjectRole.LinkedIndexStorage &&
+                    column.Definition.Cardinality == ProjectionCardinality.Scalar)
                 .ToArray();
             var linkedColumns = new[]
             {

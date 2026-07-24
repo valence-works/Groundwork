@@ -1762,11 +1762,11 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void OneClosedDeclarationPlansEveryBoundedOperatorAndTerminal()
+    public void OneClosedDeclarationPlansEveryScalarBoundedOperatorAndTerminal()
     {
         var predicate = new BoundedQueryPredicateField(
             "stimulusType",
-            Enum.GetValues<PortableQueryOperation>().ToHashSet());
+            ScalarQueryOperations());
         var query = Query(
             BoundedQueryExecutionClass.Ordinary,
             predicateFields: [predicate],
@@ -1782,7 +1782,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             Capabilities(PhysicalQuerySourceKind.PrimaryCanonicalJson)));
 
         Assert.Equal(
-            Enum.GetValues<PortableQueryOperation>().Order(),
+            ScalarQueryOperations().Order(),
             Assert.Single(plan.Predicates).Operations.Order());
         Assert.Equal(
             Enum.GetValues<BoundedQueryResultOperation>().Order(),
@@ -2159,6 +2159,381 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.False(result.IsValid);
         Assert.Empty(result.Plans);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-MUTATION-006");
+    }
+
+    [Fact]
+    public void CollectionMembershipPlanBindsTheValueLedMembershipIndex()
+    {
+        var fixture = CreateCollectionFixture();
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements)));
+        var collection = Assert.Single(fixture.Route.CollectionElementStorages);
+
+        Assert.Equal(PhysicalQueryAccessKind.CollectionElementsThenPrimary, plan.AccessKind);
+        Assert.Equal(collection.Storage.Name, plan.LookupObject);
+        Assert.Equal(collection.MembershipKey.Name, plan.IndexName);
+        var predicate = Assert.Single(plan.Predicates);
+        Assert.Equal(collection.Value.Column.Identifier, predicate.Field.Identifier);
+        Assert.Equal(
+            new PhysicalQueryCollectionConstraint(PortablePhysicalType.String, 16),
+            predicate.CollectionConstraint);
+    }
+
+    [Theory]
+    [InlineData(false, PortableQueryOperation.CollectionContains)]
+    [InlineData(false, PortableQueryOperation.CollectionContainsAll)]
+    [InlineData(true, PortableQueryOperation.CollectionContains)]
+    [InlineData(true, PortableQueryOperation.CollectionContainsAll)]
+    public void CollectionMembershipOperationsRejectScalarLogicalIndexesAndProjections(
+        bool projected,
+        PortableQueryOperation operation)
+    {
+        var fixture = CreateTypedFixture(projected, IndexValueKind.String, operation);
+        var source = projected
+            ? PhysicalQuerySourceKind.PrimaryProjectedColumns
+            : PhysicalQuerySourceKind.PrimaryCanonicalJson;
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(source));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-016" &&
+            diagnostic.Message.Contains(operation.ToString(), StringComparison.Ordinal) &&
+            diagnostic.Message.Contains(ProjectionCardinality.Scalar.ToString(), StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CollectionProjectionRejectsScalarAndMixedOperationDemand(bool mixed)
+    {
+        var operations = mixed
+            ? new HashSet<PortableQueryOperation>
+            {
+                PortableQueryOperation.CollectionContains,
+                PortableQueryOperation.Equal
+            }
+            : new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
+        var fixture = CreateCollectionFixture(
+            operations: operations,
+            executionClass: BoundedQueryExecutionClass.Ordinary);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-016" &&
+            diagnostic.Message.Contains(ProjectionCardinality.CollectionElements.ToString(), StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(PortableQueryOperation.CollectionContains)]
+    [InlineData(PortableQueryOperation.CollectionContainsAll)]
+    public void CollectionMembershipOperationsRemainValidForCollectionProjections(
+        PortableQueryOperation operation)
+    {
+        var fixture = CreateCollectionFixture(
+            operations: new HashSet<PortableQueryOperation> { operation });
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements)));
+
+        Assert.Contains(operation, Assert.Single(plan.Predicates).Operations);
+    }
+
+    [Fact]
+    public void CollectionMembershipOperationsRejectAResolvedScalarSource()
+    {
+        var fixture = CreateCollectionFixture(executionClass: BoundedQueryExecutionClass.Ordinary);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(
+                PhysicalQuerySourceKind.PrimaryCanonicalJson,
+                PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-016" &&
+            diagnostic.Message.Contains(
+                PhysicalQuerySourceKind.PrimaryCanonicalJson.ToString(),
+                StringComparison.Ordinal) &&
+            diagnostic.Message.Contains(
+                ProjectionCardinality.CollectionElements.ToString(),
+                StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CollectionValuedOrderingIsRejectedAtCompileTime(bool explicitSort)
+    {
+        var fixture = CreateCollectionFixture(
+            sortSupport: explicitSort ? QuerySortSupport.Both : QuerySortSupport.Ascending,
+            sortFields: explicitSort
+                ? [new BoundedQuerySortField("values", PhysicalSortDirection.Ascending)]
+                : null);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-014" &&
+            diagnostic.Message.Contains("reconstruct-only", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(QueryPagingSupport.Cursor, false)]
+    [InlineData(QueryPagingSupport.Offset, true)]
+    public void CollectionMembershipPlanRejectsUncertifiedPagingAndLatestPerKeyShapes(
+        QueryPagingSupport paging,
+        bool latestPerKey)
+    {
+        var fixture = CreateCollectionFixture(pagingSupport: paging, latestPerKey: latestPerKey);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-008" &&
+            diagnostic.Message.Contains("collection", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void CollectionMembershipPlanRejectsLogicalAndPhysicalValueKindDrift()
+    {
+        var fixture = CreateCollectionFixture(
+            logicalValueKind: IndexValueKind.String,
+            physicalType: PortablePhysicalType.Int32);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-009" &&
+            diagnostic.Message.Contains("Int32", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CollectionSelectedMutationsAreRejectedBeforeOwnerAndElementRowsCanDiverge(bool transition)
+    {
+        var action = transition
+            ? BoundedMutationAction.Transition("values", ["a"], "b")
+            : BoundedMutationAction.Delete();
+        var fixture = CreateCollectionFixture(action: action);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-MUTATION-007" &&
+            diagnostic.Message.Contains("owner-and-element", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CollectionBearingRouteRejectsScalarSelectedBoundedDeletionBeforeElementRowsCanLeak()
+    {
+        var categoryIndex = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.String,
+            false,
+            MissingValueBehavior.Excluded);
+        var categoryQuery = new BoundedQueryDeclaration(
+            "list-by-category",
+            categoryIndex.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                "collection_mutation_entities",
+                [
+                    new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String),
+                    new ProjectedColumnDefinition(
+                        "tags",
+                        "tags",
+                        PortablePhysicalType.String,
+                        Length: 128,
+                        IsNullable: true,
+                        Cardinality: ProjectionCardinality.CollectionElements,
+                        MaxCollectionElements: 8)
+                ],
+                indexes:
+                [
+                    new PhysicalIndexDefinition(
+                        categoryIndex.Identity,
+                        [
+                            new PhysicalIndexColumnDefinition("storage_scope", 0),
+                            new PhysicalIndexColumnDefinition("category", 1)
+                        ])
+                ])),
+            [categoryIndex],
+            [categoryQuery],
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "delete-by-category",
+                    categoryQuery.Identity,
+                    BoundedMutationAction.Delete())
+            ]);
+        var fixture = Resolve(storage, null);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.NotEmpty(fixture.Route.CollectionElementStorages);
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-MUTATION-007" &&
+            diagnostic.Message.Contains("All collection-bearing", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CollectionRequestBoundUsesTypedSetSemanticsAndRejectsAmplificationBeforeDispatch()
+    {
+        var fixture = CreateCollectionFixture(
+            logicalValueKind: IndexValueKind.Number,
+            physicalType: PortablePhysicalType.Int32,
+            maximumCollectionElements: 2);
+        var capabilities = Capabilities(PhysicalQuerySourceKind.CollectionElements);
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            capabilities));
+        var acceptedHandler = new RecordingHandler(
+            plan.HandlerIdentity,
+            PhysicalQuerySourceKind.CollectionElements,
+            certifications: [CertificationFor(plan)]);
+        var acceptedStore = new PhysicalQueryDocumentStore(
+            fixture.Route,
+            fixture.Storage,
+            capabilities,
+            [acceptedHandler]);
+        var atLimit = new DocumentQuery(
+            "workflowTriggerBinding",
+            "list-by-values",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "values",
+                ["1", "1.0", "1e0", "2"]))]);
+
+        await acceptedStore.QueryAsync(atLimit);
+
+        Assert.Equal(plan, acceptedHandler.LastPlan);
+        var rejectedHandler = new RecordingHandler(
+            plan.HandlerIdentity,
+            PhysicalQuerySourceKind.CollectionElements,
+            certifications: [CertificationFor(plan)]);
+        var rejectedStore = new PhysicalQueryDocumentStore(
+            fixture.Route,
+            fixture.Storage,
+            capabilities,
+            [rejectedHandler]);
+        var overLimit = new DocumentQuery(
+            "workflowTriggerBinding",
+            "list-by-values",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "values",
+                ["1", "1.0", "2", "3"]))]);
+
+        var exception = await Assert.ThrowsAsync<PhysicalQueryRequestValidationException>(() =>
+            rejectedStore.QueryAsync(overLimit));
+
+        Assert.Equal("GW-QUERY-015", exception.Diagnostic.Code);
+        Assert.Contains("compiled maximum of 2", exception.Message, StringComparison.Ordinal);
+        Assert.Null(rejectedHandler.LastPlan);
+        Assert.Throws<ArgumentException>(() =>
+            DocumentQueryComparison.CollectionContainsAll("values", []));
+    }
+
+    [Fact]
+    public async Task CollectionRequestBoundAggregatesTypedValuesAcrossClausesBeforeDispatch()
+    {
+        var fixture = CreateCollectionFixture(
+            logicalValueKind: IndexValueKind.Number,
+            physicalType: PortablePhysicalType.Int32,
+            maximumCollectionElements: 2);
+        var capabilities = Capabilities(PhysicalQuerySourceKind.CollectionElements);
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            capabilities));
+        var handler = new RecordingHandler(
+            plan.HandlerIdentity,
+            PhysicalQuerySourceKind.CollectionElements,
+            certifications: [CertificationFor(plan)]);
+        var store = new PhysicalQueryDocumentStore(
+            fixture.Route,
+            fixture.Storage,
+            capabilities,
+            [handler]);
+        var overLimit = new DocumentQuery(
+            "workflowTriggerBinding",
+            "list-by-values",
+            Enumerable.Range(0, 3)
+                .Select(offset => DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                    "values",
+                    [$"{(offset * 2) + 1}", $"{(offset * 2) + 2}"])))
+                .ToArray());
+
+        var exception = await Assert.ThrowsAsync<PhysicalQueryRequestValidationException>(() =>
+            store.QueryAsync(overLimit));
+
+        Assert.Equal("GW-QUERY-015", exception.Diagnostic.Code);
+        Assert.Contains("requests 6 distinct typed values", exception.Message, StringComparison.Ordinal);
+        Assert.Null(handler.LastPlan);
+
+        var atLimit = new DocumentQuery(
+            "workflowTriggerBinding",
+            "list-by-values",
+            [
+                DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("values", "1")),
+                DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("values", "1.0")),
+                DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll("values", ["1e0", "2"]))
+            ]);
+
+        await store.QueryAsync(atLimit);
+
+        Assert.Equal(plan, handler.LastPlan);
     }
 
     [Fact]
@@ -3033,6 +3408,75 @@ public sealed class PhysicalQueryPlanCompilerTests
         return Resolve(storage, null);
     }
 
+    private static PlanningFixture CreateCollectionFixture(
+        QueryPagingSupport pagingSupport = QueryPagingSupport.Offset,
+        bool latestPerKey = false,
+        IndexValueKind logicalValueKind = IndexValueKind.String,
+        PortablePhysicalType physicalType = PortablePhysicalType.String,
+        BoundedMutationAction? action = null,
+        int maximumCollectionElements = 16,
+        QuerySortSupport sortSupport = QuerySortSupport.None,
+        IReadOnlyList<BoundedQuerySortField>? sortFields = null,
+        IReadOnlySet<PortableQueryOperation>? operations = null,
+        BoundedQueryExecutionClass executionClass = BoundedQueryExecutionClass.ScaleBearing)
+    {
+        var logicalIndex = new LogicalIndexDeclaration(
+            "by-values",
+            [new IndexField("values")],
+            logicalValueKind,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-by-values",
+            logicalIndex.Identity,
+            operations ?? new HashSet<PortableQueryOperation>
+            {
+                PortableQueryOperation.CollectionContains,
+                PortableQueryOperation.CollectionContainsAll
+            },
+            latestPerKey ? QuerySortSupport.Both : sortSupport,
+            pagingSupport,
+            executionClass,
+            sortFields: latestPerKey
+                ? [new BoundedQuerySortField("values", PhysicalSortDirection.Ascending)]
+                : sortFields,
+            latestPerKeyPath: latestPerKey ? "values" : null);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "collection_entities",
+            [
+                new ProjectedColumnDefinition(
+                    "values",
+                    "values",
+                    physicalType,
+                    Length: physicalType == PortablePhysicalType.String ? 128 : null,
+                    IsNullable: true,
+                    Cardinality: ProjectionCardinality.CollectionElements,
+                    MaxCollectionElements: maximumCollectionElements)
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [logicalIndex],
+            [query]);
+        var fixture = Resolve(storage, null);
+        if (action is null)
+            return fixture;
+        var mutationStorage = new StorageUnitPhysicalStorage(
+            storage.ProvisioningMode,
+            storage.Policy,
+            storage.LogicalIndexes,
+            storage.BoundedQueries,
+            storage.NameOverrides,
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "mutate-by-values",
+                    query.Identity,
+                    action)
+            ]);
+        return new PlanningFixture(fixture.Route, mutationStorage);
+    }
+
     private static PlanningFixture CreateTypedFixture(
         bool projected,
         IndexValueKind valueKind,
@@ -3223,7 +3667,7 @@ public sealed class PhysicalQueryPlanCompilerTests
         new(
             "list-by-stimulus-type",
             "by-stimulus-type",
-            Enum.GetValues<PortableQueryOperation>().ToHashSet(),
+            ScalarQueryOperations(),
             sortFields is null ? QuerySortSupport.Both : QuerySortSupport.Descending,
             pagingSupport,
             executionClass,
@@ -3233,6 +3677,13 @@ public sealed class PhysicalQueryPlanCompilerTests
             predicateFields,
             resultOperations,
             latestPerKeyPath);
+
+    private static IReadOnlySet<PortableQueryOperation> ScalarQueryOperations() =>
+        Enum.GetValues<PortableQueryOperation>()
+            .Where(operation => operation is not (
+                PortableQueryOperation.CollectionContains or
+                PortableQueryOperation.CollectionContainsAll))
+            .ToHashSet();
 
     private static PhysicalQueryPlannerCapabilities CapabilitiesFor(PhysicalQueryAccessKind accessKind) =>
         Capabilities(accessKind switch

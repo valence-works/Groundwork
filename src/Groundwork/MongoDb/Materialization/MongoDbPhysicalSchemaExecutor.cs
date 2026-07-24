@@ -14,6 +14,7 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
     private const string AppliedStateCollection = "groundwork_physical_schema_state";
     private const string OperationCollection = "groundwork_physical_schema_operations";
     private const string LockCollection = "groundwork_physical_schema_locks";
+    private const string CollectionBackfillFence = "_groundwork_collection_backfill_fence";
     private const int NamespaceExists = 48;
 
     /// <summary>
@@ -31,7 +32,10 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
     private readonly Func<CancellationToken, ValueTask>? beforeOperationEvidenceWrite;
     private readonly Func<CancellationToken, ValueTask>? beforeAppliedStateWrite;
     private readonly Action<DateTimeOffset>? afterLeaseRenewal;
+    private readonly Func<CancellationToken, ValueTask>? afterCollectionBackfillRead;
+    private readonly Func<CancellationToken, ValueTask>? afterCollectionBackfillScan;
     private readonly MongoDbPhysicalMutationSchemaDefinitionHandler mutationDefinitions;
+    private readonly PhysicalSchemaTarget? desiredTarget;
 
     public MongoDbPhysicalSchemaExecutor(
         IMongoDatabase database,
@@ -43,12 +47,22 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
 
     internal MongoDbPhysicalSchemaExecutor(
         IMongoDatabase database,
+        PhysicalSchemaTarget desiredTarget)
+        : this(database)
+    {
+        this.desiredTarget = desiredTarget ?? throw new ArgumentNullException(nameof(desiredTarget));
+    }
+
+    internal MongoDbPhysicalSchemaExecutor(
+        IMongoDatabase database,
         TimeProvider? timeProvider,
         TimeSpan? leaseDuration,
         Func<CancellationToken, ValueTask>? beforeBackfillWrite,
         Func<CancellationToken, ValueTask>? beforeOperationEvidenceWrite = null,
         Func<CancellationToken, ValueTask>? beforeAppliedStateWrite = null,
-        Action<DateTimeOffset>? afterLeaseRenewal = null)
+        Action<DateTimeOffset>? afterLeaseRenewal = null,
+        Func<CancellationToken, ValueTask>? afterCollectionBackfillRead = null,
+        Func<CancellationToken, ValueTask>? afterCollectionBackfillScan = null)
     {
         ArgumentNullException.ThrowIfNull(database);
         this.database = database
@@ -66,6 +80,8 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         this.beforeOperationEvidenceWrite = beforeOperationEvidenceWrite;
         this.beforeAppliedStateWrite = beforeAppliedStateWrite;
         this.afterLeaseRenewal = afterLeaseRenewal;
+        this.afterCollectionBackfillRead = afterCollectionBackfillRead;
+        this.afterCollectionBackfillScan = afterCollectionBackfillScan;
         mutationDefinitions = new MongoDbPhysicalMutationSchemaDefinitionHandler(
             this.database,
             beforeBackfillWrite);
@@ -131,10 +147,22 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
     {
         var lease = RequireLease(applicationLock, target);
         await lease.AssertOwnedAsync(session: null, cancellationToken);
-        return await ReadInspectedHistoryAsync(
+        var history = await ReadInspectedHistoryAsync(
             target,
             validateDurableEvidence: true,
             cancellationToken);
+        if (desiredTarget is not null &&
+            history.AppliedState?.TargetFingerprint == desiredTarget.Fingerprint)
+        {
+            foreach (var route in desiredTarget.Routes)
+            {
+                await MongoDbCollectionRolloutFence.ValidateActiveIfPresentAsync(
+                    database,
+                    route,
+                    cancellationToken);
+            }
+        }
+        return history;
     }
 
     public ValueTask<PhysicalSchemaInspectionResult> InspectHistoryAsync(
@@ -161,12 +189,22 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
                 await ValidateDurableEvidenceAsync(appliedState, cancellationToken);
                 await ValidateAsync(
                     ValidatePhysicalSchemaOperation.ForAppliedState(appliedState),
-                    cancellationToken);
+                    cancellationToken,
+                    validateRolloutFence: false);
             }
             catch (InvalidOperationException)
             {
                 isAppliedSchemaValid = false;
             }
+        }
+        try
+        {
+            foreach (var route in target.Routes)
+                await MongoDbCollectionRolloutFence.ValidateActiveIfPresentAsync(database, route, cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            isAppliedSchemaValid = false;
         }
         return new PhysicalSchemaInspectionResult(history, isAppliedSchemaValid);
     }
@@ -386,12 +424,18 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         {
             case CreatePrimaryStorageOperation primary:
                 await EnsureCollectionAsync(primary.Storage.Name.Identifier, cancellationToken);
+                await MongoDbCollectionRolloutFence.ActivateAsync(database, primary.Route, cancellationToken);
                 break;
             case CreatePhysicalEntityStorageOperation entity:
                 await EnsureCollectionAsync(entity.Storage.Name.Identifier, cancellationToken);
+                await MongoDbCollectionRolloutFence.ActivateAsync(database, entity.Route, cancellationToken);
                 break;
             case CreateLinkedStorageOperation linked:
                 await EnsureCollectionAsync(linked.Storage.Name.Identifier, cancellationToken);
+                break;
+            case CreateCollectionElementStorageOperation collectionElement:
+                await MongoDbCollectionRolloutFence.ActivateAsync(database, collectionElement.Route, cancellationToken);
+                await EnsureCollectionElementStorageAsync(collectionElement.Storage, cancellationToken);
                 break;
             case AddProjectedColumnOperation:
                 // MongoDB fields are materialized by the canonical-JSON backfill and every write.
@@ -425,6 +469,7 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         await EnsureCollectionAsync(AppliedStateCollection, cancellationToken);
         await EnsureCollectionAsync(OperationCollection, cancellationToken);
         await EnsureCollectionAsync(LockCollection, cancellationToken);
+        await EnsureCollectionAsync(MongoDbCollectionRolloutFence.CollectionName, cancellationToken);
         await EnsureCollectionAsync(MongoDbPhysicalStorageFields.BoundedMutationOperationsCollection, cancellationToken);
     }
 
@@ -446,6 +491,102 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             cancellationToken);
         var existing = (await cursor.ToListAsync(cancellationToken)).Single();
         ValidateWritableCollection(name, existing, "resolved physical route");
+    }
+
+    /// <summary>
+    /// Creates the provider-owned representation of one bounded canonical JSON collection. MongoDB
+    /// has no native table or primary-key concept, so the strict collection validator and named
+    /// unique compound index together are the physical contract. Collection and index creation are
+    /// separate MongoDB operations; the physical-schema application lease and exact replay
+    /// admission fence the sequence. An existing incompatible collection is never modified into
+    /// compliance.
+    /// </summary>
+    private async Task EnsureCollectionElementStorageAsync(
+        ExecutableCollectionElementStorageRoute storage,
+        CancellationToken cancellationToken)
+    {
+        var validator = CollectionElementValidator(storage);
+        try
+        {
+            await database.RunCommandAsync<BsonDocument>(
+                new BsonDocument
+                {
+                    ["create"] = storage.Storage.Name.Identifier,
+                    ["collation"] = new BsonDocument("locale", "simple"),
+                    ["validator"] = validator,
+                    ["validationLevel"] = "strict",
+                    ["validationAction"] = "error"
+                },
+                cancellationToken: cancellationToken);
+        }
+        catch (MongoCommandException exception) when (exception.Code == NamespaceExists)
+        {
+            // Replay or a concurrent installer created the namespace. Validate its exact shape
+            // below rather than loosening its validator with collMod.
+        }
+
+        var metadata = await CollectionMetadataAsync(storage.Storage.Name.Identifier, cancellationToken);
+        ValidateCollectionElementStorage(storage, metadata);
+        await EnsureCollectionElementOwnerOrdinalIndexAsync(storage, cancellationToken);
+        await EnsureCollectionElementMembershipIndexAsync(storage, cancellationToken);
+    }
+
+    private async Task EnsureCollectionElementMembershipIndexAsync(
+        ExecutableCollectionElementStorageRoute storage,
+        CancellationToken cancellationToken)
+    {
+        var model = new CreateIndexModel<BsonDocument>(
+            CollectionElementMembershipIndexKeys(storage),
+            new CreateIndexOptions<BsonDocument>
+            {
+                Name = storage.MembershipKey.Name.Identifier,
+                Unique = false,
+                Collation = Collation.Simple,
+                Sparse = false,
+                Hidden = false
+            });
+        try
+        {
+            await database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+                .Indexes.CreateOneAsync(model, cancellationToken: cancellationToken);
+        }
+        catch (MongoCommandException exception) when (exception.Code is 85 or 86)
+        {
+            throw new InvalidOperationException(
+                $"MongoDB collection-element membership key '{storage.MembershipKey.Name.Identifier}' conflicts with the resolved physical route.",
+                exception);
+        }
+        await ValidateCollectionElementMembershipIndexAsync(storage, cancellationToken);
+    }
+
+    private async Task EnsureCollectionElementOwnerOrdinalIndexAsync(
+        ExecutableCollectionElementStorageRoute storage,
+        CancellationToken cancellationToken)
+    {
+        var keys = CollectionElementOwnerOrdinalIndexKeys(storage);
+        var model = new CreateIndexModel<BsonDocument>(
+            keys,
+            new CreateIndexOptions<BsonDocument>
+            {
+                Name = storage.OwnerOrdinalKey.Name.Identifier,
+                Unique = true,
+                Collation = Collation.Simple,
+                Sparse = false,
+                Hidden = false
+            });
+        try
+        {
+            await database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+                .Indexes.CreateOneAsync(model, cancellationToken: cancellationToken);
+        }
+        catch (MongoCommandException exception) when (exception.Code is 85 or 86)
+        {
+            throw new InvalidOperationException(
+                $"MongoDB collection-element owner key '{storage.OwnerOrdinalKey.Name.Identifier}' on collection " +
+                $"'{storage.Storage.Name.Identifier}' conflicts with the resolved physical route.",
+                exception);
+        }
+        await ValidateCollectionElementOwnerOrdinalIndexAsync(storage, cancellationToken);
     }
 
     private async Task EnsureIndexAsync(CreatePhysicalIndexOperation operation, CancellationToken cancellationToken)
@@ -515,7 +656,9 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             .ToDictionary(collection => collection.GetValue("name").AsString, StringComparer.Ordinal);
         var storageNames = state.Snapshot.Routes
             .SelectMany(route => route.ResolvedNames)
-            .Where(name => name.Kind is nameof(PhysicalObjectKind.PrimaryStorage) or nameof(PhysicalObjectKind.LinkedIndexStorage))
+            .Where(name => name.Kind is nameof(PhysicalObjectKind.PrimaryStorage) or
+                nameof(PhysicalObjectKind.LinkedIndexStorage) or
+                nameof(PhysicalObjectKind.CollectionElementStorage))
             .Select(name => name.Identifier)
             .Distinct(StringComparer.Ordinal);
         foreach (var storageName in storageNames)
@@ -527,6 +670,22 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             }
 
             ValidateWritableCollection(storageName, collection, "durable applied route state");
+        }
+
+        foreach (var snapshot in state.Snapshot.Routes)
+        {
+            var route = ExecutableStorageRouteSerializer.Deserialize(snapshot.CanonicalRouteJson);
+            foreach (var storage in route.CollectionElementStorages)
+            {
+                if (!collections.TryGetValue(storage.Storage.Name.Identifier, out var collection))
+                {
+                    throw new InvalidOperationException(
+                        $"MongoDB collection-element storage '{storage.Storage.Name.Identifier}' required by durable applied route state is missing.");
+                }
+                ValidateCollectionElementStorage(storage, collection);
+                await ValidateCollectionElementOwnerOrdinalIndexAsync(storage, cancellationToken);
+                await ValidateCollectionElementMembershipIndexAsync(storage, cancellationToken);
+            }
         }
 
         foreach (var operation in state.AppliedOperations.Where(operation =>
@@ -655,6 +814,28 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         return keys;
     }
 
+    internal static BsonDocument CollectionElementOwnerOrdinalIndexKeys(
+        ExecutableCollectionElementStorageRoute storage)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        var keys = new BsonDocument();
+        foreach (var field in storage.OwnerOrdinalKey.Columns)
+            keys[field.Column.Identifier] = 1;
+        return keys;
+    }
+
+    internal static BsonDocument CollectionElementMembershipIndexKeys(
+        ExecutableCollectionElementStorageRoute storage)
+    {
+        var keys = new BsonDocument
+        {
+            [storage.MembershipKey.Value.Column.Identifier] = 1
+        };
+        foreach (var field in storage.MembershipKey.OwnerColumns)
+            keys[field.Column.Identifier] = 1;
+        return keys;
+    }
+
     private async Task BackfillAsync(BackfillCanonicalJsonOperation operation, CancellationToken cancellationToken)
     {
         var route = operation.Route ?? throw new InvalidOperationException("MongoDB physical backfill requires an executable route.");
@@ -669,6 +850,11 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
                     document.GetValue(route.Envelope.CanonicalJson.Identifier));
                 if (beforeBackfillWrite is not null)
                     await beforeBackfillWrite(cancellationToken);
+                if (operation.CollectionStorage is { } collection)
+                {
+                    await BackfillCollectionAsync(route, collection, document, cancellationToken);
+                    continue;
+                }
                 if (operation.Target == ExecutableStorageObjectRole.PrimaryStorage)
                 {
                     var updates = ProjectionUpdates(route, operation.SourcePaths, operation.Target, canonicalJson);
@@ -691,6 +877,109 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
                 }
 
                 await UpsertLinkedProjectionAsync(route, document, canonicalJson, cancellationToken);
+            }
+        }
+        if (operation.CollectionStorage is not null && afterCollectionBackfillScan is not null)
+            await afterCollectionBackfillScan(cancellationToken);
+    }
+
+    private async Task BackfillCollectionAsync(
+        ExecutableStorageRoute route,
+        ExecutableCollectionElementStorageRoute collection,
+        BsonDocument candidate,
+        CancellationToken cancellationToken)
+    {
+        var primary = database.GetCollection<BsonDocument>(route.PrimaryStorage.Name.Identifier);
+        var candidateFilter = Builders<BsonDocument>.Filter.Eq(
+            MongoDbPhysicalStorageFields.Id,
+            candidate[MongoDbPhysicalStorageFields.Id]);
+        for (var attempt = 1; ; attempt++)
+        {
+            using var session = await database.Client.StartSessionAsync(cancellationToken: cancellationToken);
+            session.StartTransaction(new TransactionOptions(
+                ReadConcern.Snapshot,
+                writeConcern: WriteConcern.WMajority));
+            try
+            {
+                // Re-read after the test/interleaving hook and derive rows from the incarnation
+                // protected by this snapshot. An update/delete racing the replace makes commit
+                // conflict; retry then reconciles from the newer primary or removes stale rows.
+                var current = await primary.Find(session, candidateFilter)
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (current is null)
+                {
+                    await session.CommitTransactionAsync(cancellationToken);
+                    return;
+                }
+                if (afterCollectionBackfillRead is not null)
+                    await afterCollectionBackfillRead(cancellationToken);
+
+                var fence = Builders<BsonDocument>.Filter.Eq(
+                                MongoDbPhysicalStorageFields.Id,
+                                current[MongoDbPhysicalStorageFields.Id]) &
+                            Builders<BsonDocument>.Filter.Eq(
+                                MongoDbPhysicalStorageFields.Incarnation,
+                                current[MongoDbPhysicalStorageFields.Incarnation]) &
+                            Builders<BsonDocument>.Filter.Eq(
+                                route.Envelope.Version.Identifier,
+                                current[route.Envelope.Version.Identifier]);
+                var fenced = await primary.UpdateOneAsync(
+                    session,
+                    fence,
+                    Builders<BsonDocument>.Update.Inc(CollectionBackfillFence, 1L),
+                    cancellationToken: cancellationToken);
+                if (fenced.MatchedCount != 1)
+                {
+                    await MongoDbPhysicalDocumentStore.AbortTransactionIgnoringFailureAsync(session);
+                    continue;
+                }
+
+                var canonicalJson = MongoDbCanonicalJson.Serialize(
+                    current.GetValue(route.Envelope.CanonicalJson.Identifier));
+                var identity = route.Envelope.Identity.Project(
+                    current[route.Envelope.Identity.OriginalId.Identifier].AsString);
+                var owner = Builders<BsonDocument>.Filter.Eq(
+                                collection.DocumentKind.Column.Identifier,
+                                route.Discriminator.Value) &
+                            Builders<BsonDocument>.Filter.Eq(
+                                collection.StorageScope.Column.Identifier,
+                                current[route.Envelope.StorageScope.Identifier]) &
+                            Builders<BsonDocument>.Filter.Eq(
+                                collection.IdLookupKey.Column.Identifier,
+                                identity.LookupKey) &
+                            Builders<BsonDocument>.Filter.Eq(
+                                collection.IdComparisonKey.Column.Identifier,
+                                identity.ComparisonKey);
+                var elements = database.GetCollection<BsonDocument>(collection.Storage.Name.Identifier);
+                await elements.DeleteManyAsync(session, owner, cancellationToken: cancellationToken);
+                var rows = MongoDbPhysicalProjectionValues.ResolveCollection(canonicalJson, collection.Projection)
+                    .Select(element => new BsonDocument
+                    {
+                        [collection.DocumentKind.Column.Identifier] = route.Discriminator.Value,
+                        [collection.StorageScope.Column.Identifier] =
+                            current[route.Envelope.StorageScope.Identifier],
+                        [collection.IdComparisonKey.Column.Identifier] = identity.ComparisonKey,
+                        [collection.IdLookupKey.Column.Identifier] = identity.LookupKey,
+                        [collection.Ordinal.Column.Identifier] = element.Ordinal,
+                        [collection.Value.Column.Identifier] = element.Value
+                    })
+                    .ToArray();
+                if (rows.Length != 0)
+                    await elements.InsertManyAsync(session, rows, cancellationToken: cancellationToken);
+                await session.CommitTransactionAsync(cancellationToken);
+                return;
+            }
+            catch (MongoException exception) when (
+                attempt < 5 &&
+                MongoDbPhysicalDocumentStore.IsTransientTransactionConflict(exception) &&
+                !cancellationToken.IsCancellationRequested)
+            {
+                await MongoDbPhysicalDocumentStore.AbortTransactionIgnoringFailureAsync(session);
+            }
+            catch
+            {
+                await MongoDbPhysicalDocumentStore.AbortTransactionIgnoringFailureAsync(session);
+                throw;
             }
         }
     }
@@ -735,13 +1024,18 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         return updates;
     }
 
-    private async Task ValidateAsync(ValidatePhysicalSchemaOperation operation, CancellationToken cancellationToken)
+    private async Task ValidateAsync(
+        ValidatePhysicalSchemaOperation operation,
+        CancellationToken cancellationToken,
+        bool validateRolloutFence = true)
     {
         using var collectionCursor = await database.ListCollectionsAsync(cancellationToken: cancellationToken);
         var collections = (await collectionCursor.ToListAsync(cancellationToken))
             .ToDictionary(collection => collection.GetValue("name").AsString, StringComparer.Ordinal);
         foreach (var route in operation.Routes)
         {
+            if (validateRolloutFence)
+                await MongoDbCollectionRolloutFence.ValidateActivatedAsync(database, route, cancellationToken);
             var storageTargets = new[] { route.PrimaryStorage }
                 .Concat(route.LinkedIndexStorage is null ? [] : [route.LinkedIndexStorage])
                 .ToArray();
@@ -751,6 +1045,18 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             }
             foreach (var target in storageTargets)
                 ValidateWritableCollection(target.Name.Identifier, collections[target.Name.Identifier], "resolved physical route");
+
+            foreach (var storage in route.CollectionElementStorages)
+            {
+                if (!collections.TryGetValue(storage.Storage.Name.Identifier, out var collection))
+                {
+                    throw new InvalidOperationException(
+                        $"MongoDB collection-element storage '{storage.Storage.Name.Identifier}' is missing.");
+                }
+                ValidateCollectionElementStorage(storage, collection);
+                await ValidateCollectionElementOwnerOrdinalIndexAsync(storage, cancellationToken);
+                await ValidateCollectionElementMembershipIndexAsync(storage, cancellationToken);
+            }
 
             foreach (var index in route.Indexes)
             {
@@ -774,6 +1080,197 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         }
 
         await mutationDefinitions.ValidateAsync(operation.ProviderDefinitions, cancellationToken);
+    }
+
+    private async Task ValidateCollectionElementOwnerOrdinalIndexAsync(
+        ExecutableCollectionElementStorageRoute storage,
+        CancellationToken cancellationToken)
+    {
+        var actual = (await (await database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+                .Indexes.ListAsync(cancellationToken))
+            .ToListAsync(cancellationToken))
+            .SingleOrDefault(index => index.GetValue("name", "").AsString == storage.OwnerOrdinalKey.Name.Identifier);
+        if (actual is null || !IndexMatches(
+                actual,
+                CollectionElementOwnerOrdinalIndexKeys(storage),
+                unique: true,
+                partialFilter: null))
+        {
+            throw new InvalidOperationException(
+                $"MongoDB collection-element owner key '{storage.OwnerOrdinalKey.Name.Identifier}' on collection " +
+                $"'{storage.Storage.Name.Identifier}' conflicts with the resolved physical route.");
+        }
+    }
+
+    private async Task ValidateCollectionElementMembershipIndexAsync(
+        ExecutableCollectionElementStorageRoute storage,
+        CancellationToken cancellationToken)
+    {
+        var actual = (await (await database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+                .Indexes.ListAsync(cancellationToken))
+            .ToListAsync(cancellationToken))
+            .SingleOrDefault(index => index.GetValue("name", "").AsString == storage.MembershipKey.Name.Identifier);
+        if (actual is null || !IndexMatches(
+                actual,
+                CollectionElementMembershipIndexKeys(storage),
+                unique: false,
+                partialFilter: null))
+        {
+            throw new InvalidOperationException(
+                $"MongoDB collection-element membership key '{storage.MembershipKey.Name.Identifier}' conflicts with the resolved physical route.");
+        }
+    }
+
+    internal static BsonDocument CollectionElementValidator(ExecutableCollectionElementStorageRoute storage)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        RequireCollectionElementCollation(storage.Value.Definition);
+        var properties = new BsonDocument
+        {
+            [storage.DocumentKind.Column.Identifier] = BsonTypeRule("string"),
+            [storage.StorageScope.Column.Identifier] = BsonTypeRule("string"),
+            [storage.IdComparisonKey.Column.Identifier] = BsonTypeRule("string"),
+            [storage.IdLookupKey.Column.Identifier] = BsonTypeRule("string"),
+            [storage.Ordinal.Column.Identifier] = BsonTypeRule("int"),
+            [storage.Value.Column.Identifier] = BsonTypeRule(CollectionElementValueBsonType(storage.Value.Definition.Type))
+        };
+        return new BsonDocument("$jsonSchema", new BsonDocument
+        {
+            ["bsonType"] = "object",
+            ["required"] = new BsonArray(properties.Names),
+            ["properties"] = properties
+        });
+    }
+
+    private static BsonDocument BsonTypeRule(string bsonType) => new("bsonType", bsonType);
+
+    private static string CollectionElementValueBsonType(PortablePhysicalType type) => type switch
+    {
+        PortablePhysicalType.String or PortablePhysicalType.Guid => "string",
+        PortablePhysicalType.Int32 => "int",
+        PortablePhysicalType.Int64 or PortablePhysicalType.DateTime => "long",
+        PortablePhysicalType.Decimal => "decimal",
+        PortablePhysicalType.Boolean => "bool",
+        PortablePhysicalType.Binary => "binData",
+        _ => throw new InvalidOperationException(
+            $"MongoDB collection-element storage does not support value type '{type}'.")
+    };
+
+    private static void RequireCollectionElementCollation(ProjectedColumnDefinition definition)
+    {
+        // Collection elements have one provider-owned collection. MongoDB supports collation at
+        // that collection/index boundary, not per field, and this provider's identity/key routes
+        // require the native simple binary collation.
+        if (definition.Collation is not null &&
+            !IsSimpleBinaryCollationAlias(definition.Collation))
+        {
+            throw new InvalidOperationException(
+                $"MongoDB collection-element projection '{definition.LogicalName}' cannot represent " +
+                $"per-field collation '{definition.Collation}'; only simple collection collation is supported.");
+        }
+    }
+
+    private static bool IsSimpleBinaryCollationAlias(string collation) =>
+        string.Equals(collation, "simple", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(collation, "ordinal", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(collation, "binary", StringComparison.OrdinalIgnoreCase);
+
+    private static void ValidateCollectionElementStorage(
+        ExecutableCollectionElementStorageRoute storage,
+        BsonDocument metadata)
+    {
+        ValidateWritableCollection(storage.Storage.Name.Identifier, metadata, "resolved collection-element storage");
+        var options = metadata.GetValue("options", new BsonDocument()).AsBsonDocument;
+        if (!UsesSimpleCollectionCollation(options) ||
+            !options.TryGetValue("validator", out var validator) ||
+            !validator.IsBsonDocument ||
+            !CollectionElementValidatorMatches(storage, validator.AsBsonDocument) ||
+            options.GetValue("validationLevel", "").AsString != "strict" ||
+            options.GetValue("validationAction", "").AsString != "error")
+        {
+            throw new InvalidOperationException(
+                $"MongoDB collection-element storage '{storage.Storage.Name.Identifier}' conflicts with the resolved physical route.");
+        }
+    }
+
+    private static bool UsesSimpleCollectionCollation(BsonDocument options)
+    {
+        // MongoDB omits an explicit simple collation from listCollections because it is the
+        // collection default. When present, its locale must still be simple.
+        return !options.TryGetValue("collation", out var collation) ||
+               collation.IsBsonDocument &&
+               IsSimpleCollation(collation.AsBsonDocument);
+    }
+
+    private static bool CollectionElementValidatorMatches(
+        ExecutableCollectionElementStorageRoute storage,
+        BsonDocument validator)
+    {
+        var expected = CollectionElementValidator(storage)["$jsonSchema"].AsBsonDocument;
+        if (!validator.TryGetValue("$jsonSchema", out var actualSchemaValue) ||
+            !actualSchemaValue.IsBsonDocument ||
+            !HasExactlyFields(validator, ["$jsonSchema"]))
+        {
+            return false;
+        }
+
+        var actual = actualSchemaValue.AsBsonDocument;
+        if (!HasExactlyFields(actual, ["bsonType", "required", "properties"]) ||
+            !actual.GetValue("bsonType", "").IsString ||
+            actual["bsonType"].AsString != "object" ||
+            !actual.TryGetValue("required", out var required) ||
+            !required.IsBsonArray ||
+            !StringArrayMatches(required.AsBsonArray, expected["required"].AsBsonArray) ||
+            !actual.TryGetValue("properties", out var properties) ||
+            !properties.IsBsonDocument)
+        {
+            return false;
+        }
+
+        var expectedProperties = expected["properties"].AsBsonDocument;
+        var actualProperties = properties.AsBsonDocument;
+        if (!HasExactlyFields(actualProperties, expectedProperties.Names))
+            return false;
+
+        foreach (var field in expectedProperties)
+        {
+            if (!actualProperties.TryGetValue(field.Name, out var actualRule) ||
+                !actualRule.IsBsonDocument ||
+                !field.Value.IsBsonDocument ||
+                !HasExactlyFields(actualRule.AsBsonDocument, ["bsonType"]) ||
+                !actualRule.AsBsonDocument.GetValue("bsonType", "").IsString ||
+                actualRule.AsBsonDocument["bsonType"] != field.Value.AsBsonDocument["bsonType"])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool HasExactlyFields(BsonDocument document, IEnumerable<string> expected)
+    {
+        var names = expected.ToHashSet(StringComparer.Ordinal);
+        return document.ElementCount == names.Count &&
+               document.Names.All(names.Contains) &&
+               document.Names.Distinct(StringComparer.Ordinal).Count() == names.Count;
+    }
+
+    private static bool StringArrayMatches(BsonArray actual, BsonArray expected)
+    {
+        if (actual.Count != expected.Count || actual.Any(value => !value.IsString))
+            return false;
+        var expectedValues = expected.Select(value => value.AsString).ToHashSet(StringComparer.Ordinal);
+        return actual.Select(value => value.AsString).ToHashSet(StringComparer.Ordinal).SetEquals(expectedValues);
+    }
+
+    private async Task<BsonDocument> CollectionMetadataAsync(string name, CancellationToken cancellationToken)
+    {
+        using var cursor = await database.ListCollectionsAsync(
+            new ListCollectionsOptions { Filter = Builders<BsonDocument>.Filter.Eq("name", name) },
+            cancellationToken);
+        return (await cursor.ToListAsync(cancellationToken)).SingleOrDefault()
+            ?? throw new InvalidOperationException($"MongoDB collection '{name}' is missing.");
     }
 
     private static void ValidateWritableCollection(

@@ -80,7 +80,11 @@ public sealed class DocumentStoreQueryTests
                     DocumentQueryClause.Of(DocumentQueryComparison.StartsWith("stimulusType", "route")),
                     DocumentQueryClause.Of(DocumentQueryComparison.GreaterThan("stimulusType", "a")),
                     DocumentQueryClause.Of(DocumentQueryComparison.LessThan("stimulusType", "z")),
-                    DocumentQueryClause.Of(DocumentQueryComparison.LessThanOrEqual("stimulusType", "zz"))
+                    DocumentQueryClause.Of(DocumentQueryComparison.LessThanOrEqual("stimulusType", "zz")),
+                    DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("redirectUris", "https://one.example")),
+                    DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                        "redirectUris",
+                        ["https://one.example", "https://two.example"]))
                 ],
                 [new DocumentQueryOrder("stimulusType")],
                 take: 25)
@@ -96,6 +100,21 @@ public sealed class DocumentStoreQueryTests
         Assert.Equal(
             Enum.GetValues<QueryComparisonOperator>().Order(),
             query.Clauses.SelectMany(clause => clause.Comparisons).Select(comparison => comparison.Operator).Order());
+    }
+
+    [Fact]
+    public void Collection_contains_all_requires_a_non_empty_deduplicated_exact_set()
+    {
+        var comparison = DocumentQueryComparison.CollectionContainsAll("redirectUris", ["b", "a", "b"]);
+
+        Assert.Equal(["b", "a"], comparison.Values);
+        Assert.Throws<ArgumentException>(() =>
+            DocumentQueryComparison.CollectionContainsAll("redirectUris", []));
+        Assert.Throws<ArgumentException>(() =>
+            new DocumentQueryComparison(
+                "redirectUris",
+                QueryComparisonOperator.CollectionContainsAll,
+                ["a", null]));
     }
 
     [Fact]

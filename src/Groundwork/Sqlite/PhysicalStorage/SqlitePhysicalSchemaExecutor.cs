@@ -1,9 +1,6 @@
-using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Text;
@@ -21,35 +18,40 @@ namespace Groundwork.Sqlite.PhysicalStorage;
 /// </summary>
 public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector
 {
-    private static readonly ConcurrentDictionary<PhysicalSchemaTargetIdentity, SemaphoreSlim> ApplicationLocks = new();
     private readonly SqliteConnection connection;
+    private readonly Func<PhysicalSchemaOperation, CancellationToken, Task>? beforeOperationEvidence;
     private readonly SemaphoreSlim connectionGate = new(1, 1);
 
     public SqlitePhysicalSchemaExecutor(SqliteConnection connection) =>
         this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
+
+    internal SqlitePhysicalSchemaExecutor(
+        SqliteConnection connection,
+        Func<PhysicalSchemaOperation, CancellationToken, Task>? beforeOperationEvidence)
+    {
+        this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
+        this.beforeOperationEvidence = beforeOperationEvidence;
+    }
 
     public async ValueTask<IPhysicalSchemaApplicationLock> AcquireApplicationLockAsync(
         PhysicalSchemaTargetIdentity target,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(target);
-        var gate = ApplicationLocks.GetOrAdd(target, static _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
-        FileStream? fileLock = null;
+        IAsyncDisposable? transitionLock = null;
         try
         {
-            fileLock = await AcquireFileLockAsync(target, cancellationToken);
+            transitionLock = await SqlitePhysicalSchemaTransitionLock.AcquireAsync(
+                connection.ConnectionString,
+                target,
+                cancellationToken);
             await WithConnectionAsync(EnsureInfrastructureAsync, cancellationToken);
-            return new ApplicationLock(target, () =>
-            {
-                fileLock?.Dispose();
-                gate.Release();
-            });
+            return new ApplicationLock(target, transitionLock);
         }
         catch
         {
-            fileLock?.Dispose();
-            gate.Release();
+            if (transitionLock is not null)
+                await transitionLock.DisposeAsync();
             throw;
         }
     }
@@ -134,6 +136,8 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
 
             await using var transaction = await connection.BeginTransactionAsync(ct);
             await ApplyOperationCoreAsync(operation, transaction, ct);
+            if (beforeOperationEvidence is not null)
+                await beforeOperationEvidence(operation, ct);
             await InsertOperationRecordAsync(target, operation, DateTimeOffset.UtcNow, transaction, ct);
             await transaction.CommitAsync(ct);
             var durable = await ReadOperationAsync(target, operation.Identity, ct)
@@ -190,6 +194,8 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
                     }
 
                     await ApplyOperationCoreAsync(operation, transaction, ct, validateObjects: !deferObjectValidation);
+                    if (beforeOperationEvidence is not null)
+                        await beforeOperationEvidence(operation, ct);
                     await InsertOperationRecordAsync(target, operation, appliedAt, transaction, ct);
                     pending.Add(index);
                 }
@@ -302,6 +308,9 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
             case CreateLinkedStorageOperation create:
                 await CreateLinkedAsync(create.Route, transaction, cancellationToken, validateObjects);
                 break;
+            case CreateCollectionElementStorageOperation create:
+                await CreateCollectionElementAsync(create.Storage, transaction, cancellationToken, validateObjects);
+                break;
             case AddProjectedColumnOperation add:
                 RelationalPhysicalStorageColumns.Validate(add.Route);
                 await AddColumnAsync(add.Storage.Name.Identifier, add.Column.Column.Identifier, add.Column.Definition, transaction, cancellationToken, validateObjects);
@@ -386,6 +395,103 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
             ct);
         if (validateObjects)
             await ValidateLinkedStorageAsync(route, transaction, ct);
+    }
+
+    private async Task CreateCollectionElementAsync(
+        ExecutableCollectionElementStorageRoute storage,
+        DbTransaction transaction,
+        CancellationToken ct,
+        bool validateObjects)
+    {
+        var key = storage.OwnerOrdinalKey.Columns.Select(field => field.Column).ToArray();
+        var columns = new[]
+        {
+            $"{Q(storage.DocumentKind.Column.Identifier)} TEXT NOT NULL",
+            $"{Q(storage.StorageScope.Column.Identifier)} TEXT NOT NULL",
+            $"{Q(storage.IdComparisonKey.Column.Identifier)} TEXT NOT NULL",
+            $"{Q(storage.IdLookupKey.Column.Identifier)} TEXT NOT NULL",
+            $"{Q(storage.Ordinal.Column.Identifier)} INTEGER NOT NULL",
+            ProjectedColumnSql(storage.Value.Column.Identifier, storage.Value.Definition with { IsNullable = false }),
+            $"PRIMARY KEY ({string.Join(", ", key.Select(column => Q(column.Identifier)))})"
+        };
+        await ExecuteAsync($"CREATE TABLE IF NOT EXISTS {Q(storage.Storage.Name.Identifier)} ({string.Join(", ", columns)});", transaction, ct);
+        var membershipColumns = new[] { storage.MembershipKey.Value.Column.Identifier }
+            .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier));
+        await ExecuteAsync(
+            $"CREATE INDEX IF NOT EXISTS {Q(storage.MembershipKey.Name.Identifier)} ON " +
+            $"{Q(storage.Storage.Name.Identifier)} ({string.Join(", ", membershipColumns.Select(Q))});",
+            transaction,
+            ct);
+        if (validateObjects)
+            await ValidateCollectionElementAsync(storage, transaction, ct);
+    }
+
+    private async Task ValidateCollectionElementAsync(ExecutableCollectionElementStorageRoute storage, DbTransaction transaction, CancellationToken ct)
+    {
+        var key = storage.OwnerOrdinalKey.Columns.Select(field => field.Column).ToArray();
+        var order = key.Select((column, index) => (column.Identifier, index + 1)).ToDictionary(item => item.Identifier, item => item.Item2, StringComparer.Ordinal);
+        var expected = new[]
+        {
+            RequiredText(storage.DocumentKind.Column.Identifier, order), RequiredText(storage.StorageScope.Column.Identifier, order),
+            RequiredText(storage.IdComparisonKey.Column.Identifier, order), RequiredText(storage.IdLookupKey.Column.Identifier, order),
+            new ExpectedColumn(storage.Ordinal.Column.Identifier, "INTEGER", true, null, order.GetValueOrDefault(storage.Ordinal.Column.Identifier)),
+            new ExpectedColumn(
+                storage.Value.Column.Identifier,
+                SqlType(storage.Value.Definition.Type),
+                true,
+                SqlDefaultLiteral(storage.Value.Definition with { IsNullable = false }),
+                0)
+        };
+        await ValidateTableColumnsAsync(
+            storage.Storage.Name.Identifier,
+            expected,
+            key,
+            transaction,
+            ct,
+            new Dictionary<string, string?>(StringComparer.Ordinal)
+            {
+                [storage.Value.Column.Identifier] = SqliteCollation(storage.Value.Definition.Collation)
+            });
+        await ValidateCollectionMembershipIndexAsync(storage, transaction, ct);
+    }
+
+    private async Task ValidateCollectionMembershipIndexAsync(
+        ExecutableCollectionElementStorageRoute storage,
+        DbTransaction transaction,
+        CancellationToken ct)
+    {
+        var expectedColumns = new[] { storage.MembershipKey.Value.Column.Identifier }
+            .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier))
+            .ToArray();
+        var actualColumns = await ReadExactIndexColumnsAsync(
+            storage.Storage.Name.Identifier,
+            storage.MembershipKey.Name.Identifier,
+            expectedUnique: false,
+            transaction,
+            ct);
+        if (!actualColumns.Select(column => column.Name).SequenceEqual(expectedColumns, StringComparer.Ordinal) ||
+            actualColumns.Any(column => column.Direction != PhysicalSortDirection.Ascending))
+        {
+            throw new InvalidOperationException(
+                $"Collection membership index '{storage.MembershipKey.Name.Identifier}' does not match the compiled value-led route.");
+        }
+        for (var index = 0; index < expectedColumns.Length; index++)
+        {
+            var expectedCollation = await ReadColumnCollationAsync(
+                storage.Storage.Name.Identifier,
+                expectedColumns[index],
+                transaction,
+                ct) ?? "BINARY";
+            if (!string.Equals(
+                    actualColumns[index].Collation ?? "BINARY",
+                    expectedCollation,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Collection membership index '{storage.MembershipKey.Name.Identifier}' column {index} " +
+                    "does not match the compiled value-led route.");
+            }
+        }
     }
 
     private async Task AddColumnAsync(
@@ -515,6 +621,45 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
     private async Task BackfillAsync(BackfillCanonicalJsonOperation operation, DbTransaction transaction, CancellationToken ct)
     {
         var route = operation.Route ?? throw new InvalidOperationException("SQLite physical backfill requires an executable route.");
+        if (operation.CollectionStorage is { } collection)
+        {
+            await ForEachCanonicalDocumentBatchAsync(route, transaction, ct, async document =>
+            {
+                var identity = route.Envelope.Identity.Project(document.Id);
+                await ExecuteAsync(
+                    $"DELETE FROM {Q(collection.Storage.Name.Identifier)} WHERE " +
+                    $"{Q(collection.DocumentKind.Column.Identifier)} = @kind AND " +
+                    $"{Q(collection.StorageScope.Column.Identifier)} = @scope AND " +
+                    $"{Q(collection.IdLookupKey.Column.Identifier)} = @lookup AND " +
+                    $"{Q(collection.IdComparisonKey.Column.Identifier)} = @comparison;",
+                    transaction,
+                    ct,
+                    ("kind", route.Discriminator.Value),
+                    ("scope", document.Scope),
+                    ("lookup", identity.LookupKey),
+                    ("comparison", identity.ComparisonKey));
+                foreach (var element in RelationalPhysicalProjectionValues.ReadCollection(
+                             document.CanonicalJson,
+                             collection.Projection))
+                {
+                    await ExecuteAsync(
+                        $"INSERT INTO {Q(collection.Storage.Name.Identifier)} " +
+                        $"({Q(collection.DocumentKind.Column.Identifier)}, {Q(collection.StorageScope.Column.Identifier)}, " +
+                        $"{Q(collection.IdComparisonKey.Column.Identifier)}, {Q(collection.IdLookupKey.Column.Identifier)}, " +
+                        $"{Q(collection.Ordinal.Column.Identifier)}, {Q(collection.Value.Column.Identifier)}) " +
+                        "VALUES (@kind, @scope, @comparison, @lookup, @ordinal, @value);",
+                        transaction,
+                        ct,
+                        ("kind", route.Discriminator.Value),
+                        ("scope", document.Scope),
+                        ("comparison", identity.ComparisonKey),
+                        ("lookup", identity.LookupKey),
+                        ("ordinal", element.Ordinal),
+                        ("value", element.Value));
+                }
+            });
+            return;
+        }
         if (operation.Target == ExecutableStorageObjectRole.PrimaryStorage)
         {
             var selected = SelectBackfillColumns(route, operation, ExecutableStorageObjectRole.PrimaryStorage);
@@ -717,8 +862,19 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
                 throw new InvalidOperationException($"Physical linked storage '{route.LinkedIndexStorage.Name.Identifier}' is missing.");
             if (route.LinkedIndexStorage is not null)
                 await ValidateLinkedStorageAsync(route, transaction, ct);
+            foreach (var storage in route.CollectionElementStorages)
+            {
+                if (!await TableExistsAsync(storage.Storage.Name.Identifier, transaction, ct))
+                {
+                    throw new InvalidOperationException(
+                        $"Collection-element storage '{storage.Storage.Name.Identifier}' is missing.");
+                }
+                await ValidateCollectionElementAsync(storage, transaction, ct);
+            }
             foreach (var column in route.ProjectedColumns)
             {
+                if (column.Definition.Cardinality == ProjectionCardinality.CollectionElements)
+                    continue;
                 var table = column.Target == ExecutableStorageObjectRole.PrimaryStorage
                     ? route.PrimaryStorage.Name.Identifier
                     : route.LinkedIndexStorage!.Name.Identifier;
@@ -787,7 +943,8 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         IReadOnlyList<ExpectedColumn> expected,
         IReadOnlyList<ExecutableColumnRoute> expectedPrimaryKey,
         DbTransaction transaction,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyDictionary<string, string?>? expectedCollations = null)
     {
         var actual = await ReadColumnsAsync(table, transaction, ct);
         foreach (var column in expected)
@@ -795,7 +952,12 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
             if (!actual.TryGetValue(column.Name, out var found))
                 throw new InvalidOperationException($"Physical column '{table}.{column.Name}' is missing.");
             EnsureColumnCompatible(table, column, found);
-            await ValidateColumnCollationAsync(table, column.Name, expectedCollation: null, transaction, ct);
+            await ValidateColumnCollationAsync(
+                table,
+                column.Name,
+                expectedCollations is null ? null : expectedCollations.GetValueOrDefault(column.Name),
+                transaction,
+                ct);
         }
 
         var actualPrimaryKey = actual.Values.Where(column => column.PrimaryKeyOrder > 0)
@@ -836,46 +998,12 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         DbTransaction transaction,
         CancellationToken ct)
     {
-        bool? isUnique = null;
-        var isPartial = false;
-        await using (var command = connection.CreateCommand())
-        {
-            command.Transaction = (SqliteTransaction)transaction;
-            command.CommandText = $"PRAGMA index_list({Q(table)});";
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                if (!string.Equals(reader.GetString(1), expected.Name.Identifier, StringComparison.Ordinal))
-                    continue;
-                isUnique = reader.GetInt64(2) != 0;
-                isPartial = reader.GetInt64(4) != 0;
-                break;
-            }
-        }
-        if (isUnique is null)
-            throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' is missing from '{table}'.");
-        if (isUnique != expected.IsUnique || isPartial)
-        {
-            throw new InvalidOperationException(
-                $"Physical index '{expected.Name.Identifier}' has incompatible uniqueness or partial-index semantics.");
-        }
-
-        var actualColumns = new List<ActualIndexColumn>();
-        await using (var command = connection.CreateCommand())
-        {
-            command.Transaction = (SqliteTransaction)transaction;
-            command.CommandText = $"PRAGMA index_xinfo({Q(expected.Name.Identifier)});";
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                if (reader.GetInt64(5) == 0)
-                    continue;
-                actualColumns.Add(new ActualIndexColumn(
-                    reader.GetString(2),
-                    reader.GetInt64(3) != 0 ? PhysicalSortDirection.Descending : PhysicalSortDirection.Ascending,
-                    reader.IsDBNull(4) ? null : reader.GetString(4)));
-            }
-        }
+        var actualColumns = await ReadExactIndexColumnsAsync(
+            table,
+            expected.Name.Identifier,
+            expected.IsUnique,
+            transaction,
+            ct);
         if (actualColumns.Count != expected.Columns.Count)
             throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' has an incompatible column count.");
         for (var index = 0; index < expected.Columns.Count; index++)
@@ -891,6 +1019,56 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
                     $"Physical index '{expected.Name.Identifier}' column {index} does not match the compiled route.");
             }
         }
+    }
+
+    private async Task<IReadOnlyList<ActualIndexColumn>> ReadExactIndexColumnsAsync(
+        string table,
+        string indexName,
+        bool expectedUnique,
+        DbTransaction transaction,
+        CancellationToken ct)
+    {
+        bool? isUnique = null;
+        var isPartial = false;
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = $"PRAGMA index_list({Q(table)});";
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                if (!string.Equals(reader.GetString(1), indexName, StringComparison.Ordinal))
+                    continue;
+                isUnique = reader.GetInt64(2) != 0;
+                isPartial = reader.GetInt64(4) != 0;
+                break;
+            }
+        }
+        if (isUnique is null)
+            throw new InvalidOperationException($"Physical index '{indexName}' is missing from '{table}'.");
+        if (isUnique != expectedUnique || isPartial)
+        {
+            throw new InvalidOperationException(
+                $"Physical index '{indexName}' has incompatible uniqueness or partial-index semantics.");
+        }
+
+        var actualColumns = new List<ActualIndexColumn>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = $"PRAGMA index_xinfo({Q(indexName)});";
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                if (reader.GetInt64(5) == 0)
+                    continue;
+                actualColumns.Add(new ActualIndexColumn(
+                    reader.GetString(2),
+                    reader.GetInt64(3) != 0 ? PhysicalSortDirection.Descending : PhysicalSortDirection.Ascending,
+                    reader.IsDBNull(4) ? null : reader.GetString(4)));
+            }
+        }
+        return actualColumns;
     }
 
     private async Task<IReadOnlyDictionary<string, ActualColumn>> ReadColumnsAsync(
@@ -1194,28 +1372,18 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private async Task<FileStream?> AcquireFileLockAsync(PhysicalSchemaTargetIdentity target, CancellationToken ct)
+    private async Task ExecuteAsync(
+        string sql,
+        DbTransaction? transaction,
+        CancellationToken ct,
+        params (string Name, object Value)[] parameters)
     {
-        var builder = new SqliteConnectionStringBuilder(connection.ConnectionString);
-        if (SqliteRelationalSessions.IsInMemory(builder))
-            return null;
-        var dataSource = builder.DataSource;
-        if (string.IsNullOrWhiteSpace(dataSource))
-            return null;
-        var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(target.ToString())))[..16].ToLowerInvariant();
-        var lockPath = $"{Path.GetFullPath(dataSource)}.groundwork-{fingerprint}.schema.lock";
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
-            try
-            {
-                return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.Asynchronous);
-            }
-            catch (IOException)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(25), ct);
-            }
-        }
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction?)transaction;
+        command.CommandText = sql;
+        foreach (var parameter in parameters)
+            command.Parameters.AddWithValue($"@{parameter.Name}", parameter.Value);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private async Task<T> WithConnectionAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken ct)
@@ -1306,17 +1474,18 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         }
     }
 
-    private sealed class ApplicationLock(PhysicalSchemaTargetIdentity target, Action release) : IPhysicalSchemaApplicationLock
+    private sealed class ApplicationLock(
+        PhysicalSchemaTargetIdentity target,
+        IAsyncDisposable transitionLock) : IPhysicalSchemaApplicationLock
     {
         private int disposed;
         public PhysicalSchemaTargetIdentity Target { get; } = target;
         public CancellationToken OwnershipLost => CancellationToken.None;
         public bool IsOwned => Volatile.Read(ref disposed) == 0;
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref disposed, 1) == 0)
-                release();
-            return ValueTask.CompletedTask;
+                await transitionLock.DisposeAsync();
         }
     }
 

@@ -35,7 +35,9 @@ public static class PortableQueryOperationCompatibility
     {
         PortableQueryOperation.Equal or
         PortableQueryOperation.NotEqual or
-        PortableQueryOperation.In => true,
+        PortableQueryOperation.In or
+        PortableQueryOperation.CollectionContains or
+        PortableQueryOperation.CollectionContainsAll => true,
         PortableQueryOperation.Contains or
         PortableQueryOperation.NotContains or
         PortableQueryOperation.StartsWith => valueKind is IndexValueKind.String or IndexValueKind.Keyword,
@@ -63,7 +65,9 @@ public static class PortableQueryOperationCompatibility
         PortablePhysicalType.Binary => operation is
             PortableQueryOperation.Equal or
             PortableQueryOperation.NotEqual or
-            PortableQueryOperation.In,
+            PortableQueryOperation.In or
+            PortableQueryOperation.CollectionContains or
+            PortableQueryOperation.CollectionContainsAll,
         _ => false
     };
 }

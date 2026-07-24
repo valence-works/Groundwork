@@ -16,6 +16,24 @@ public abstract class RelationalDiagnosticRecordDialect
 
     public abstract string Contains(string expression, string parameterName);
 
+    /// <summary>
+    /// Renders a null Int32 placeholder for heterogeneous result envelopes. Providers whose UNION
+    /// type inference does not retain an unknown null override this with an explicit native cast.
+    /// </summary>
+    public virtual string Int32Null => "NULL";
+
+    /// <summary>Converts stored canonical Int64 text to the provider's exact integer domain.</summary>
+    public virtual string Int64Value(string expression) => $"CAST({expression} AS BIGINT)";
+
+    /// <summary>
+    /// Sums Int64 inputs in a domain wide enough to expose overflow to the client instead of
+    /// truncating or wrapping it.
+    /// </summary>
+    public virtual string SumInt64(string expression) => $"SUM({Int64Value(expression)})";
+
+    /// <summary>Converts a provider-native exact integer result back to canonical decimal text.</summary>
+    public virtual string Int64Canonical(string expression) => $"CAST({expression} AS VARCHAR(40))";
+
     public abstract string BuildOperationCleanup(
         string table,
         string highWaterParameterName,

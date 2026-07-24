@@ -1,7 +1,9 @@
 using System.Data.Common;
+using Groundwork.Core.Capabilities;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.SchemaEvolution;
 using Groundwork.Documents.Scoping;
 using Groundwork.Provider.Relational;
 using Groundwork.Relational.Documents;
@@ -21,6 +23,25 @@ public sealed class SqlitePhysicalDocumentStore : RelationalPhysicalDocumentStor
         IStorageScopeObserver? scopeObserver = null)
         : base(connection, manifest, routes, new SqlitePhysicalDocumentDialect(), access, scopeObserver)
     {
+    }
+
+    internal SqlitePhysicalDocumentStore(
+        SqliteConnection connection,
+        StorageManifest manifest,
+        IReadOnlyList<ExecutableStorageRoute> routes,
+        DocumentStoreAccess access,
+        IStorageScopeObserver? scopeObserver,
+        ProviderIdentity physicalSchemaProvider)
+        : base(
+            connection,
+            manifest,
+            routes,
+            new SqlitePhysicalDocumentDialect(),
+            access,
+            scopeObserver,
+            physicalSchemaProvider)
+    {
+        ArgumentNullException.ThrowIfNull(physicalSchemaProvider);
     }
 
     internal SqlitePhysicalDocumentStore(
@@ -66,6 +87,25 @@ public sealed class SqlitePhysicalDocumentStore : RelationalPhysicalDocumentStor
             scopeObserver)
     {
     }
+
+    internal SqlitePhysicalDocumentStore(
+        string connectionString,
+        StorageManifest manifest,
+        IReadOnlyList<ExecutableStorageRoute> routes,
+        DocumentStoreAccess access,
+        IStorageScopeObserver? scopeObserver,
+        ProviderIdentity physicalSchemaProvider)
+        : base(
+            SqliteRelationalSessions.CreateSerializedImmediate(connectionString),
+            manifest,
+            routes,
+            new SqlitePhysicalDocumentDialect(),
+            access,
+            scopeObserver,
+            physicalSchemaProvider)
+    {
+        ArgumentNullException.ThrowIfNull(physicalSchemaProvider);
+    }
 }
 
 internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocumentDialect
@@ -82,6 +122,9 @@ internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocument
         {
             SqliteExtendedErrorCode: ConstraintPrimaryKey or ConstraintUnique
         };
+    public override bool IsMissingPhysicalSchemaStateException(DbException exception) =>
+        exception is SqliteException { SqliteErrorCode: 1 } sqlite &&
+        sqlite.Message.Contains("no such table", StringComparison.Ordinal);
 
     public override string JsonValue(string canonicalJsonExpression, string stablePath)
     {
@@ -157,4 +200,15 @@ internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocument
         return ValueTask.FromResult<DbTransaction>(
             ((SqliteConnection)connection).BeginTransaction(deferred: false));
     }
+
+    public override ProviderIdentity PhysicalSchemaProvider => SqliteGroundworkCapabilities.Provider;
+
+    public override ValueTask<IAsyncDisposable> AcquireSchemaTransitionLeaseAsync(
+        DbConnection connection,
+        PhysicalSchemaTargetIdentity target,
+        CancellationToken cancellationToken) =>
+        SqlitePhysicalSchemaTransitionLock.AcquireAsync(
+            connection.ConnectionString,
+            target,
+            cancellationToken);
 }

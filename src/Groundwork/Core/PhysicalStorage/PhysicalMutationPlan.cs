@@ -63,6 +63,22 @@ public static class PhysicalMutationPlanCompiler
         if (storage.BoundedMutations.Count == 0)
             return new([], []);
 
+        // A scalar-selected bulk delete can still orphan collection-element rows, and an old
+        // route cannot reconstruct or maintain a collection aggregate after its route changes.
+        // Until one atomic bulk owner-and-element primitive exists, reject every bounded mutation
+        // on a collection-bearing route rather than certifying a subset that looks safe.
+        if (route.CollectionElementStorages.Count != 0)
+        {
+            return new(
+                [],
+                storage.BoundedMutations.Select(mutation => GroundworkDiagnostic.Error(
+                    "GW-MUTATION-007",
+                    $"Bounded mutation '{mutation.Identity}' targets a route with collection elements. " +
+                    "All collection-bearing bounded mutations require atomic owner-and-element maintenance.",
+                    $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"))
+                    .ToArray());
+        }
+
         var predicateQueryIdentities = storage.BoundedMutations
             .Select(mutation => mutation.PredicateQueryIdentity)
             .ToHashSet(StringComparer.Ordinal);
@@ -124,6 +140,15 @@ public static class PhysicalMutationPlanCompiler
                     $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"));
                 continue;
             }
+            if (predicate.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-MUTATION-007",
+                    $"Bounded mutation '{mutation.Identity}' selects documents through collection membership. " +
+                    "Collection-selected transitions and deletes require atomic owner-and-element maintenance.",
+                    $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"));
+                continue;
+            }
 
             var action = CompileAction(mutation, predicate, route, diagnostics);
             if (action is not null)
@@ -160,6 +185,17 @@ public static class PhysicalMutationPlanCompiler
                 "GW-MUTATION-005",
                 $"Transition path '{transition.Path}' must resolve to document content; " +
                 $"field source '{field.Field.Source}' is immutable mutation identity or envelope state.",
+                $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
+            return null;
+        }
+        var projection = route.ProjectedColumns.SingleOrDefault(candidate =>
+            string.Equals(candidate.Definition.Path, transition.Path, StringComparison.Ordinal));
+        if (projection?.Definition.Cardinality == ProjectionCardinality.CollectionElements)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MUTATION-007",
+                $"Transition path '{transition.Path}' targets a collection projection. " +
+                "Collection transitions require an atomic collection-replacement primitive.",
                 $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
             return null;
         }
