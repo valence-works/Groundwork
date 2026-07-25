@@ -252,17 +252,34 @@ public sealed class DatabaseSignalCollector :
          eventName.EndsWith("Started", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsDatabaseSource(string source) =>
-        source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("MongoDB", StringComparison.OrdinalIgnoreCase);
+        ClassifyDatabaseSource(source) != DatabaseSignalSourceKind.None;
 
     private static bool IsDatabaseActivitySource(string source) =>
-        source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase);
+        ClassifyDatabaseSource(source) is not (DatabaseSignalSourceKind.None or DatabaseSignalSourceKind.MongoDb);
+
+    private static DatabaseSignalSourceKind ClassifyDatabaseSource(string source)
+    {
+        if (source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase))
+            return DatabaseSignalSourceKind.SqlServer;
+        if (source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase))
+            return DatabaseSignalSourceKind.Sqlite;
+        if (source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
+            return DatabaseSignalSourceKind.PostgreSql;
+        return source.Contains("MongoDB", StringComparison.OrdinalIgnoreCase)
+            ? DatabaseSignalSourceKind.MongoDb
+            : DatabaseSignalSourceKind.None;
+    }
 
     private sealed record MongoDbCommandStartSignal(string DatabaseName);
+
+    private enum DatabaseSignalSourceKind
+    {
+        None,
+        Sqlite,
+        SqlServer,
+        PostgreSql,
+        MongoDb
+    }
 
     public sealed class MeasurementScope : IDisposable
     {

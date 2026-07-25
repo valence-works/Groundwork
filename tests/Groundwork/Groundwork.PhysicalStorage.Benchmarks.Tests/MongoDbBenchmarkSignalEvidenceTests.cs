@@ -10,11 +10,9 @@ public sealed class MongoDbBenchmarkSignalEvidenceCollection
 }
 
 [Collection(MongoDbBenchmarkSignalEvidenceCollection.Name)]
-public sealed class MongoDbBenchmarkSignalEvidenceTests : IAsyncDisposable
+public sealed class MongoDbBenchmarkSignalEvidenceTests()
+    : BenchmarkIntegrationTestBase("groundwork-mongodb-signal-evidence")
 {
-    private readonly string output =
-        Path.Combine(Path.GetTempPath(), $"groundwork-mongodb-signal-evidence-{Guid.NewGuid():N}");
-
     [Fact]
     public async Task Real_runner_persists_target_scoped_driver_command_counts()
     {
@@ -36,10 +34,10 @@ public sealed class MongoDbBenchmarkSignalEvidenceTests : IAsyncDisposable
         };
         var result = await new BenchmarkRunner().RunAsync(
             new BenchmarkRunRequest(
-                FindRepositoryRoot(),
+                RepositoryRoot,
                 configuration,
                 workloads,
-                output,
+                Output,
                 BaselineRun: null,
                 AllowContainers: true,
                 RegressionConfirmationRun: false),
@@ -66,24 +64,8 @@ public sealed class MongoDbBenchmarkSignalEvidenceTests : IAsyncDisposable
             });
         });
 
-        var raw = await File.ReadAllTextAsync(Path.Combine(output, "raw", "measurements.jsonl"));
+        var raw = await File.ReadAllTextAsync(Path.Combine(Output, "raw", "measurements.jsonl"));
         Assert.DoesNotContain("mongodb://", raw, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("groundwork_bench_", raw, StringComparison.Ordinal);
-    }
-
-    public ValueTask DisposeAsync()
-    {
-        if (Directory.Exists(output))
-            Directory.Delete(output, recursive: true);
-        return ValueTask.CompletedTask;
-    }
-
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Groundwork.slnx")))
-            directory = directory.Parent;
-        return directory?.FullName ??
-               throw new DirectoryNotFoundException("Could not locate the Groundwork repository root.");
     }
 }

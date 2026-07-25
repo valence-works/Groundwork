@@ -358,6 +358,27 @@ coverage. After remediation, the originating reviewers returned **PASS**:
 
 The focused verification suite passed 74 tests and `git diff --check` remained clean.
 
+The final exact-head audit then found two additional blockers. Evidence review proved that a
+diagnostic signal could retain a conflicting lower-precedence activity count and survive complete
+artifact resealing. Correctness review proved that MongoDB's runner-only synthetic activity test
+did not bind telemetry to the production target client. Both findings were remediated:
+
+- persisted signal states are now exclusive, every authoritative count must equal `roundTrips`,
+  and writer/reader plus fully resealed scheduled-group tests reject the forged dual-signal vector;
+- MongoDB now subscribes to the driver's public `CommandStartedEvent` on the target-owned client,
+  passes that client's database through the production `CreatePhysicalAsync` admission overload,
+  recreates the instrumented client for reset/restart, and uses it for measured backfill work; and
+- a real replica-set runner test covers indexed query, client reset, backfill, and client restart
+  while proving positive exact signal equality and absence of connection/target values in raw
+  evidence.
+
+The originating correctness, evidence-integrity, and scope/test-preservation reviewers all returned
+**PASS** on `63e166d62d6dd56bc00c12d2c860fc6d71fa77aa`. A standards follow-up also identified duplicated
+integration-test workspace setup and duplicated provider-source classification; both were extracted
+into single shared definitions without changing the protocol or evidence schema. The full benchmark
+test project passed 227 tests, including the live MongoDB evidence test, and the hosted SQLite
+non-decision smoke remained green.
+
 ## Remaining issue #50 acceptance work
 
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across

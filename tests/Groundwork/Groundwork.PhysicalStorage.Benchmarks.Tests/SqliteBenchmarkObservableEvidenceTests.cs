@@ -11,11 +11,9 @@ public sealed class SqliteObservableEvidenceCollection
 }
 
 [Collection(SqliteObservableEvidenceCollection.Name)]
-public sealed class SqliteBenchmarkObservableEvidenceTests : IAsyncDisposable
+public sealed class SqliteBenchmarkObservableEvidenceTests()
+    : BenchmarkIntegrationTestBase("groundwork-sqlite-observable-evidence")
 {
-    private readonly string output =
-        Path.Combine(Path.GetTempPath(), $"groundwork-sqlite-observable-evidence-{Guid.NewGuid():N}");
-
     [Fact]
     public async Task Real_runner_writes_nonempty_observable_result_evidence()
     {
@@ -30,10 +28,10 @@ public sealed class SqliteBenchmarkObservableEvidenceTests : IAsyncDisposable
         };
         var result = await new BenchmarkRunner().RunAsync(
             new BenchmarkRunRequest(
-                FindRepositoryRoot(),
+                RepositoryRoot,
                 configuration,
                 [BenchmarkWorkload.IndexedQuery],
-                output,
+                Output,
                 BaselineRun: null,
                 AllowContainers: false,
                 RegressionConfirmationRun: false),
@@ -66,7 +64,7 @@ public sealed class SqliteBenchmarkObservableEvidenceTests : IAsyncDisposable
                     item.Payload is not null &&
                     item.Payload.Contains("\"status\":\"open\"", StringComparison.Ordinal));
 
-        var evidencePath = Path.Combine(output, "reports", "consumer-evidence.json");
+        var evidencePath = Path.Combine(Output, "reports", "consumer-evidence.json");
         var evidence = JsonSerializer.Deserialize<BenchmarkConsumerEvidenceReport>(
             await File.ReadAllTextAsync(evidencePath),
             BenchmarkJson.Options);
@@ -84,7 +82,7 @@ public sealed class SqliteBenchmarkObservableEvidenceTests : IAsyncDisposable
             new SqliteBenchmarkTarget(
                 PhysicalStorageForm.SharedDocuments,
                 instance,
-                output,
+                Output,
                 migrationDatasetSize: 5);
         await target.InitializeAsync(CancellationToken.None);
         await target.SeedAsync(
@@ -127,19 +125,4 @@ public sealed class SqliteBenchmarkObservableEvidenceTests : IAsyncDisposable
     public static TheoryData<BenchmarkWorkload> AllWorkloads =>
         new(Enum.GetValues<BenchmarkWorkload>());
 
-    public ValueTask DisposeAsync()
-    {
-        if (Directory.Exists(output))
-            Directory.Delete(output, recursive: true);
-        return ValueTask.CompletedTask;
-    }
-
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Groundwork.slnx")))
-            directory = directory.Parent;
-        return directory?.FullName ??
-               throw new DirectoryNotFoundException("Could not locate the Groundwork repository root.");
-    }
 }
