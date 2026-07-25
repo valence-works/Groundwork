@@ -2155,6 +2155,15 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
 
         await using (var transaction = await store.BeginAsync(DocumentCommitScope.Of("workItem")))
         {
+            using (var collections = await database.ListCollectionNamesAsync())
+                Assert.Contains(
+                    MongoDbCollectionRolloutFence.CollectionName,
+                    await collections.ToListAsync());
+            Assert.Equal(
+                0,
+                await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+                    .CountDocumentsAsync(Builders<BsonDocument>.Filter.Empty));
+
             Assert.Equal(
                 DocumentStoreWriteStatus.Saved,
                 (await transaction.SaveAsync(new SaveDocumentRequest(
