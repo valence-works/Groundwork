@@ -255,6 +255,60 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Explicitly_unfiltered_global_id_route_executes_an_indexed_offset_page_and_provider_side_count()
+    {
+        var database = Database();
+        var model = UnfilteredGlobalIdModel();
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Global);
+        await store.SaveAsync(new SaveDocumentRequest("workItem", "c", "1", "{\"category\":\"ignored\"}"));
+        await store.SaveAsync(new SaveDocumentRequest("workItem", "a", "1", "{\"category\":\"ignored\"}"));
+        await store.SaveAsync(new SaveDocumentRequest("workItem", "b", "1", "{\"category\":\"ignored\"}"));
+
+        var pageQuery = new DocumentQuery(
+            "workItem",
+            "list-all-by-id",
+            [],
+            order: [new DocumentQueryOrder(PhysicalDocumentFieldPaths.Id)],
+            skip: 1,
+            take: 1);
+        var countQuery = new DocumentQuery(
+            pageQuery.DocumentKind,
+            pageQuery.QueryIdentity,
+            [],
+            pageQuery.Order,
+            resultOperation: BoundedQueryResultOperation.Count);
+
+        var page = await store.QueryAsync(pageQuery);
+        var count = await store.CountAsync(countQuery);
+        var explanation = await store.ExplainAsync(pageQuery);
+        var route = Assert.Single(model.Routes);
+
+        Assert.Equal(3, page.TotalCount);
+        Assert.Equal("b", Assert.Single(page.Documents).Id);
+        Assert.Equal(3, count);
+        Assert.Empty(explanation.Plan.Predicates);
+        Assert.Equal(PhysicalQueryAccessKind.NativeDocumentFields, explanation.Plan.AccessKind);
+        Assert.Equal(Assert.Single(route.Indexes).Name, explanation.Plan.IndexName);
+        Assert.Equal(
+            route.Envelope.Identity.ComparisonKey.Identifier,
+            Assert.Single(explanation.Plan.Order).Field.Identifier);
+        Assert.Equal(
+            [PhysicalDocumentQueryCommandKind.Count, PhysicalDocumentQueryCommandKind.Page],
+            explanation.Commands.Select(command => command.Kind));
+        Assert.All(explanation.Commands, command =>
+        {
+            Assert.Equal("mongodb-json", command.NativePlanFormat);
+            Assert.False(string.IsNullOrWhiteSpace(command.NativePlan));
+            Assert.NotEqual(0, command.ProviderAppliedMaximumRows);
+        });
+        var pageCommand = explanation.Commands.Single(command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        Assert.Contains(route.Indexes.Single().Name.Identifier, pageCommand.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("COLLSCAN", pageCommand.NativePlan, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Collection_element_storage_creates_a_strict_typed_collection_and_exact_owner_ordinal_key()
     {
         var database = Database();
@@ -3396,6 +3450,60 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 : []
         };
         return MongoDbPhysicalStorageModel.Compile(manifest);
+    }
+
+    private static MongoDbPhysicalStorageModel UnfilteredGlobalIdModel()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-id",
+            [new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all-by-id",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true,
+            sortFields: [new BoundedQuerySortField(PhysicalDocumentFieldPaths.Id, PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var unit = new StorageUnit(
+            new StorageUnitIdentity("workItem"),
+            "Work item",
+            StorageIntent.PortableDocument(),
+            LifecyclePolicy.Mutable,
+            IdentityPolicy.StringId(),
+            TenancyPolicy.Global,
+            ConcurrencyPolicy.Optimistic(),
+            SerializationPolicy.Json(),
+            [],
+            [],
+            PhysicalizationPolicy.Portable)
+        {
+            PhysicalStorage = new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                    "global_work_items",
+                    [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+                    indexes:
+                    [
+                        new PhysicalIndexDefinition(
+                            index.Identity,
+                            [new PhysicalIndexColumnDefinition("id_comparison_key", 0)])
+                    ])),
+                [index],
+                [query])
+        };
+        return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
+            new StorageManifestIdentity("mongo.unfiltered-global-id"),
+            new StorageManifestOwner("tests"),
+            new StorageManifestVersion("1"),
+            [unit],
+            new HashSet<string>(),
+            []));
     }
 
     private static DocumentQuery CollectionQuery(string value) =>

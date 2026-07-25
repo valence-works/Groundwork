@@ -293,7 +293,7 @@ public sealed class MongoDbPhysicalDocumentStore :
 
             foreach (var query in storage.BoundedQueries.Where(query => query.IndexIdentity == index.Identity))
             {
-                var predicates = query.PredicateFields.Count == 0
+                var predicates = query.PredicateBindingMode == BoundedQueryPredicateBindingMode.ImplicitFirstLogicalIndexField
                     ? index.Fields.Take(1).Select(field =>
                         new BoundedQueryPredicateField(field.Path, query.Operations)).ToArray()
                     : query.PredicateFields;

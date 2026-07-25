@@ -717,6 +717,12 @@ public sealed class PhysicalMutationDocumentStore : IPhysicalDocumentMutationExp
 
     private static void ValidateRuntimeShape(DocumentMutation mutation, PhysicalMutationPlan plan)
     {
+        if (plan.Predicate.Predicates.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Document mutation '{mutation.MutationIdentity}' cannot use an unfiltered predicate.");
+        }
+
         var transitionPath = (plan.Action as PhysicalTransitionMutationAction)?.Path;
         var comparisons = mutation.Clauses.SelectMany(clause => clause.Comparisons).ToArray();
         foreach (var clause in mutation.Clauses)

@@ -1519,6 +1519,44 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             dedicatedWithoutLinked: dedicatedWithoutLinked,
             normalizer: SqlServerGroundworkCapabilities.PhysicalNames));
 
+    protected override async Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
+    {
+        var model = CreateUnfilteredGlobalIdQueryModel(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            Guid.NewGuid().ToString("N")[..8]);
+        var connectionString = container.GetConnectionString();
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new SqlServerPhysicalSchemaExecutor(connectionString));
+        var route = model.Target.Routes.Single();
+        var store = new SqlServerPhysicalDocumentStore(
+            connectionString,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Global);
+        return new RelationalUnfilteredGlobalQueryFixture(
+            store,
+            SqlServerPhysicalQueryRuntime.Create(store, model.Manifest, route, model.Target.Provider),
+            route,
+            () => ValueTask.CompletedTask);
+    }
+
+    protected override void AssertUnfilteredGlobalIdQueryPlan(PhysicalDocumentQueryExplanation explanation)
+    {
+        Assert.All(explanation.Commands, command =>
+        {
+            Assert.Equal("sqlserver-statistics-xml", command.NativePlanFormat);
+            Assert.Contains("ShowPlanXML", command.NativePlan, StringComparison.Ordinal);
+        });
+        var page = explanation.Commands.Single(command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        Assert.Contains(explanation.Plan.IndexName!.Identifier, page.NativePlan, StringComparison.Ordinal);
+        Assert.Contains("PhysicalOp=\"Top\"", page.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("PhysicalOp=\"Table Scan\"", page.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("PhysicalOp=\"Sort\"", page.NativePlan, StringComparison.Ordinal);
+    }
+
     protected override async Task<RelationalServerIdentityFixture> CreateIdentityAsync(
         PhysicalStorageForm form,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal)

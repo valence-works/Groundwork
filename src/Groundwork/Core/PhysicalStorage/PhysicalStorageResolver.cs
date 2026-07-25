@@ -514,6 +514,7 @@ public static class PhysicalStorageResolver
                     query.PagingSupport,
                     query.SupportsDisjunction,
                     query.SupportsTotalCount,
+                    query.PredicateBindingMode,
                     Array.AsReadOnly(query.PredicateFields.ToArray()),
                     Array.AsReadOnly(query.ResidualPredicateFields.ToArray()),
                     Array.AsReadOnly(query.ResultOperations.Order().ToArray()),
@@ -1487,12 +1488,33 @@ public static class PhysicalStorageResolver
             return false;
         }
 
+        if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+            predicates.Length == 0 &&
+            query.SortFields.Count == 0)
+        {
+            return false;
+        }
+
         if (query.SortFields.Count == 0)
             return true;
         if (query.SortSupport == QuerySortSupport.None)
             return false;
 
-        var sortPaths = query.SortFields.Select(field => field.Path).ToArray();
+        var sortPaths = query.SortFields.Select(field => field.Path).ToList();
+        if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+            predicates.Length == 0 &&
+            !sortPaths.Contains(PhysicalDocumentFieldPaths.Id, StringComparer.Ordinal))
+        {
+            if (query.PagingSupport == QueryPagingSupport.Cursor)
+            {
+                if (indexPaths.Contains(PhysicalDocumentFieldPaths.Id, StringComparer.Ordinal))
+                    return false;
+            }
+            else
+            {
+                sortPaths.Add(PhysicalDocumentFieldPaths.Id);
+            }
+        }
         return CompoundIndexOrdering.TryResolveSortStart(
                    indexPaths,
                    predicatePaths,

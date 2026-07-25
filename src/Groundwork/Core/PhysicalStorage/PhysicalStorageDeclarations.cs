@@ -313,6 +313,19 @@ public enum BoundedQueryExecutionClass
     ScaleBearing
 }
 
+/// <summary>
+/// States whether a bounded query obtains its index-prefix predicates from the legacy first-logical-field
+/// convention or from the predicate fields explicitly declared by the caller.
+/// </summary>
+public enum BoundedQueryPredicateBindingMode
+{
+    /// <summary>Uses the first field of the referenced logical index as the predicate.</summary>
+    ImplicitFirstLogicalIndexField,
+
+    /// <summary>Uses exactly the declared predicate fields, including an intentionally empty list.</summary>
+    DeclaredFields
+}
+
 /// <summary>Declares the required direction for one stable path in compound query ordering.</summary>
 public sealed record BoundedQuerySortField(
     string Path,
@@ -439,6 +452,9 @@ public sealed class BoundedQueryDeclaration : IEquatable<BoundedQueryDeclaration
         SupportsDisjunction = supportsDisjunction;
         SupportsTotalCount = supportsTotalCount;
         SortFields = Array.AsReadOnly(sortFields?.ToArray() ?? []);
+        PredicateBindingMode = predicateFields is null
+            ? BoundedQueryPredicateBindingMode.ImplicitFirstLogicalIndexField
+            : BoundedQueryPredicateBindingMode.DeclaredFields;
         PredicateFields = Array.AsReadOnly(predicateFields?.ToArray() ?? []);
         ResidualPredicateFields = Array.AsReadOnly(residualPredicateFields?.ToArray() ?? []);
         ResultOperations = (resultOperations ?? DefaultResultOperations(supportsTotalCount)).ToFrozenSet();
@@ -464,10 +480,16 @@ public sealed class BoundedQueryDeclaration : IEquatable<BoundedQueryDeclaration
     public IReadOnlyList<BoundedQuerySortField> SortFields { get; }
 
     /// <summary>
-    /// Stable predicate paths and their allowed operations. An empty collection preserves the
-    /// compatibility convention that the first field of the referenced logical index is filtered.
+    /// Stable predicate paths and their allowed operations. When <see cref="PredicateBindingMode"/> is
+    /// <see cref="BoundedQueryPredicateBindingMode.ImplicitFirstLogicalIndexField"/>, this collection is
+    /// empty and the first field of the referenced logical index is used for compatibility. When the mode is
+    /// <see cref="BoundedQueryPredicateBindingMode.DeclaredFields"/>, this collection is authoritative and
+    /// may intentionally be empty for an unfiltered route.
     /// </summary>
     public IReadOnlyList<BoundedQueryPredicateField> PredicateFields { get; }
+
+    /// <summary>Controls how <see cref="PredicateFields"/> binds index-prefix predicates.</summary>
+    public BoundedQueryPredicateBindingMode PredicateBindingMode { get; }
 
     /// <summary>
     /// Optional typed predicate paths evaluated by the provider after indexed access selection and before
@@ -490,6 +512,7 @@ public sealed class BoundedQueryDeclaration : IEquatable<BoundedQueryDeclaration
         SupportsDisjunction == other.SupportsDisjunction &&
         SupportsTotalCount == other.SupportsTotalCount &&
         SortFields.SequenceEqual(other.SortFields) &&
+        PredicateBindingMode == other.PredicateBindingMode &&
         PredicateFields.SequenceEqual(other.PredicateFields) &&
         ResidualPredicateFields.SequenceEqual(other.ResidualPredicateFields) &&
         ResultOperations.SetEquals(other.ResultOperations) &&
@@ -511,6 +534,7 @@ public sealed class BoundedQueryDeclaration : IEquatable<BoundedQueryDeclaration
         hash.Add(SupportsTotalCount);
         foreach (var sortField in SortFields)
             hash.Add(sortField);
+        hash.Add(PredicateBindingMode);
         foreach (var predicateField in PredicateFields)
             hash.Add(predicateField);
         foreach (var residualPredicateField in ResidualPredicateFields)
@@ -548,6 +572,7 @@ public sealed record ScaleBearingPathDemand(
     QueryPagingSupport PagingSupport,
     bool SupportsDisjunction,
     bool SupportsTotalCount,
+    BoundedQueryPredicateBindingMode PredicateBindingMode,
     IReadOnlyList<BoundedQueryPredicateField> PredicateFields,
     IReadOnlyList<BoundedQueryResidualPredicateField> ResidualPredicateFields,
     IReadOnlyList<BoundedQueryResultOperation> ResultOperations,
@@ -567,6 +592,7 @@ public sealed record ScaleBearingPathDemand(
         PagingSupport == other.PagingSupport &&
         SupportsDisjunction == other.SupportsDisjunction &&
         SupportsTotalCount == other.SupportsTotalCount &&
+        PredicateBindingMode == other.PredicateBindingMode &&
         PredicateFields.SequenceEqual(other.PredicateFields) &&
         ResidualPredicateFields.SequenceEqual(other.ResidualPredicateFields) &&
         ResultOperations.Count == other.ResultOperations.Count &&
@@ -588,6 +614,7 @@ public sealed record ScaleBearingPathDemand(
         hash.Add(PagingSupport);
         hash.Add(SupportsDisjunction);
         hash.Add(SupportsTotalCount);
+        hash.Add(PredicateBindingMode);
         foreach (var predicateField in PredicateFields)
             hash.Add(predicateField);
         foreach (var residualPredicateField in ResidualPredicateFields)

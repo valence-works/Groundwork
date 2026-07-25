@@ -217,7 +217,7 @@ internal static class MongoDbScaleBearingOperationValidation
         bool containsServedInIndex)
     {
         var logicalIndex = storage.LogicalIndexes.Single(index => index.Identity == query.IndexIdentity);
-        var predicates = query.PredicateFields.Count == 0
+        var predicates = query.PredicateBindingMode == BoundedQueryPredicateBindingMode.ImplicitFirstLogicalIndexField
             ? logicalIndex.Fields.Take(1)
                 .Select(field => new BoundedQueryPredicateField(field.Path, query.Operations))
             : query.PredicateFields;

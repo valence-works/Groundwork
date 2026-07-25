@@ -754,11 +754,35 @@ public static class PhysicalQueryPlanCompiler
         }
 
         if (query.SortFields.Count == 0)
+        {
+            if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+                predicates.Count == 0)
+            {
+                diagnostics.Add(Error(
+                    "GW-QUERY-006",
+                    "An explicitly unfiltered bounded query must declare its provider-applied ordering.",
+                    target));
+                return false;
+            }
             return true;
+        }
 
         var sortPaths = query.SortFields
             .Select(field => identityFields.ResolveOrderPath(field.Path))
-            .ToArray();
+            .ToList();
+        var appendedIdentityTieBreak = false;
+        if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+            predicates.Count == 0)
+        {
+            var identityTieBreak = query.PagingSupport == QueryPagingSupport.Cursor
+                ? PhysicalDocumentIdentityFieldPaths.Lookup
+                : identityFields.ResolveOrderPath(PhysicalDocumentFieldPaths.Id);
+            if (!sortPaths.Contains(identityTieBreak, StringComparer.Ordinal))
+            {
+                sortPaths.Add(identityTieBreak);
+                appendedIdentityTieBreak = true;
+            }
+        }
         if (!CompoundIndexOrdering.TryResolveSortStart(
                 paths,
                 predicatePaths,
@@ -791,10 +815,12 @@ public static class PhysicalQueryPlanCompiler
                 identityFields.ResolveIndexPath(physicalIndex.Target, column.Column),
                 StringComparer.Ordinal))
             .Skip(start)
-            .Take(sortPaths.Length)
+            .Take(sortPaths.Count)
             .Select(column => column.Direction)
             .ToArray();
-        var requested = query.SortFields.Select(field => field.Direction).ToArray();
+        var requested = query.SortFields.Select(field => field.Direction).ToList();
+        if (appendedIdentityTieBreak)
+            requested.Add(PhysicalSortDirection.Ascending);
         if (!indexDirections.SequenceEqual(requested) &&
             !indexDirections.Select(Opposite).SequenceEqual(requested))
         {

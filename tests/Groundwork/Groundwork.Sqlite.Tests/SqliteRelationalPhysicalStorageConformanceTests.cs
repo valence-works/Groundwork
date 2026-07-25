@@ -124,6 +124,49 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         }
     }
 
+    protected override async Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
+    {
+        var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        try
+        {
+            var model = CreateUnfilteredGlobalIdQueryModel(
+                SqliteTestManifests.Provider,
+                ProviderPhysicalNameNormalizer.Identity,
+                Guid.NewGuid().ToString("N")[..8]);
+            await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+            var route = model.Target.Routes.Single();
+            var store = new SqlitePhysicalDocumentStore(
+                connection,
+                model.Manifest,
+                model.Target.Routes,
+                DocumentStoreAccess.Global);
+            return new RelationalUnfilteredGlobalQueryFixture(
+                store,
+                SqlitePhysicalQueryRuntime.Create(store, model.Manifest, route, model.Target.Provider),
+                route,
+                connection.DisposeAsync);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+    protected override void AssertUnfilteredGlobalIdQueryPlan(PhysicalDocumentQueryExplanation explanation)
+    {
+        Assert.All(explanation.Commands, command =>
+        {
+            Assert.Equal("sqlite-query-plan", command.NativePlanFormat);
+            Assert.False(string.IsNullOrWhiteSpace(command.NativePlan));
+        });
+        var page = explanation.Commands.Single(command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        Assert.Contains(explanation.Plan.IndexName!.Identifier, page.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("USE TEMP B-TREE FOR ORDER BY", page.NativePlan, StringComparison.Ordinal);
+    }
+
     protected override async Task<RelationalScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form)
     {
         var connection = new SqliteConnection("Data Source=:memory:");

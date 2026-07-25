@@ -61,6 +61,7 @@ public static class PhysicalStorageDefinitionSerializer
                 writer.WriteString("pagingSupport", demand.PagingSupport.ToString());
                 writer.WriteBoolean("supportsDisjunction", demand.SupportsDisjunction);
                 writer.WriteBoolean("supportsTotalCount", demand.SupportsTotalCount);
+                writer.WriteString("predicateBindingMode", demand.PredicateBindingMode.ToString());
                 writer.WritePropertyName("predicateFields");
                 writer.WriteStartArray();
                 foreach (var predicate in demand.PredicateFields)
