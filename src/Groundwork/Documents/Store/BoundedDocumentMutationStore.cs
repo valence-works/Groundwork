@@ -131,9 +131,18 @@ public static class BoundedMutationRequestFingerprint
                 .ToArray())
             .Select(comparisons => string.Join("\u001d", comparisons))
             .Order(StringComparer.Ordinal);
+        var canonicalPlan = CanonicalPlan(plan);
+        if (plan.RelationshipGuards.Count != 0)
+        {
+            canonicalPlan = string.Join(
+                "\u000f",
+                canonicalPlan,
+                "relationship-plan-v1",
+                Encode(plan.Fingerprint));
+        }
         var canonical = string.Join(
             "\u001c",
-            Encode(plan.Fingerprint),
+            canonicalPlan,
             Encode(mutation.DocumentKind),
             Encode(mutation.MutationIdentity),
             Encode(storageScope),
@@ -141,6 +150,54 @@ public static class BoundedMutationRequestFingerprint
             string.Join("\u001b", clauses));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
+
+    private static string CanonicalPlan(PhysicalMutationPlan plan)
+    {
+        var predicate = plan.Predicate;
+        var predicates = predicate.Predicates
+            .Select(item => string.Join(
+                "\u0018",
+                Encode(item.Path),
+                string.Join("\u0017", item.Operations.Order().Select(operation => ((int)operation).ToString(
+                    System.Globalization.CultureInfo.InvariantCulture)))))
+            .Order(StringComparer.Ordinal);
+        return string.Join(
+            "\u0016",
+            Encode(plan.RouteFingerprint),
+            Encode(predicate.StorageUnit.Value),
+            Encode(predicate.QueryIdentity),
+            Encode(predicate.LogicalIndexIdentity),
+            string.Join("\u0015", predicate.LogicalIndexPaths.Select(Encode)),
+            ((int)predicate.Form).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ((int)predicate.AccessKind).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ((int)predicate.Scope.Policy).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            predicate.Scope.IsMandatory ? "1" : "0",
+            predicate.Scope.UsesGlobalSentinel ? "1" : "0",
+            CanonicalIdentityPlan(predicate.DocumentIdentity),
+            string.Join("\u0014", predicates),
+            string.Join("\u0013", predicate.RequiredEqualityPrefixPaths.Select(Encode)),
+            predicate.SupportsDisjunction ? "1" : "0",
+            predicate.IsScaleBearing ? "1" : "0");
+    }
+
+    private static string CanonicalIdentityPlan(PhysicalQueryDocumentIdentityBinding identity) =>
+        string.Join(
+            "\u0011",
+            ((int)identity.StringCasePolicy).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Encode(identity.ComparisonAlgorithmId),
+            Encode(identity.LookupAlgorithmId),
+            CanonicalIdentityField(identity.Original),
+            CanonicalIdentityField(identity.Comparison),
+            CanonicalIdentityField(identity.Lookup));
+
+    private static string CanonicalIdentityField(PhysicalQueryField field) =>
+        string.Join(
+            "\u0010",
+            Encode(field.Path),
+            Encode(field.Identifier),
+            ((int)field.Source).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ((int)field.Target).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Encode(field.ObjectName.Identifier));
 
     private static string CanonicalComparison(
         DocumentQueryComparison comparison,
@@ -202,137 +259,6 @@ public sealed class PhysicalMutationSelectorCertification
     public IReadOnlyDictionary<string, string> FieldIdentifiers { get; }
 }
 
-public enum PhysicalRelationshipSelectorRole
-{
-    SourceCanonicalJson,
-    SourceReferenceDeclarationIndex,
-    TargetIdentityComparison,
-    TargetEqualityIndex,
-    ReferenceMaterialization,
-    ReferenceBySourceIndex,
-    ReferenceByTargetIndex,
-    TargetFence,
-    TargetFenceIndex,
-    TargetPredicate,
-    TargetPredicateIndex
-}
-
-/// <summary>
-/// Exact provider-owned evidence that a guarded mutation consumes one required relationship
-/// selector or generated materialization object. Generated identities are stable provider-neutral
-/// object identities; admitted route objects retain their exact provider-native names.
-/// </summary>
-public sealed record PhysicalRelationshipSelectorCertification(
-    string RelationshipIdentity,
-    PhysicalRelationshipSelectorRole Role,
-    string StorageIdentity,
-    string? IndexIdentity,
-    string? FieldIdentity)
-{
-    public string CanonicalIdentity => string.Concat(new string?[]
-    {
-        RelationshipIdentity,
-        ((int)Role).ToString(System.Globalization.CultureInfo.InvariantCulture),
-        StorageIdentity,
-        IndexIdentity,
-        FieldIdentity
-    }.Select(value => value is null ? "-1:" : $"{value.Length}:{value}"));
-
-    public static IReadOnlyList<PhysicalRelationshipSelectorCertification> ForPlan(
-        PhysicalMutationPlan plan)
-    {
-        ArgumentNullException.ThrowIfNull(plan);
-        return Array.AsReadOnly(plan.RelationshipGuards
-            .SelectMany(ForGuard)
-            .Distinct()
-            .OrderBy(selector => selector.RelationshipIdentity, StringComparer.Ordinal)
-            .ThenBy(selector => selector.Role)
-            .ThenBy(selector => selector.CanonicalIdentity, StringComparer.Ordinal)
-            .ToArray());
-    }
-
-    private static IEnumerable<PhysicalRelationshipSelectorCertification> ForGuard(
-        PhysicalMutationRelationshipGuard guard)
-    {
-        var relationship = guard switch
-        {
-            PhysicalRequireNoReferencesMutationGuard noReferences => noReferences.Relationship,
-            PhysicalRequireRelatedTargetNotEqualMutationGuard relatedTarget => relatedTarget.Relationship,
-            _ => throw new ArgumentOutOfRangeException(nameof(guard), guard, null)
-        };
-        var identity = relationship.Identity;
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.SourceCanonicalJson,
-            relationship.SourceRoute.PrimaryStorage.Name.Identifier,
-            null,
-            relationship.SourceCanonicalJsonReference.Identifier);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.SourceReferenceDeclarationIndex,
-            relationship.SourceRoute.PrimaryStorage.Name.Identifier,
-            relationship.SourceReferenceDeclarationIndex.Name.Identifier,
-            relationship.Declaration.SourceReferencePath);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.TargetIdentityComparison,
-            relationship.TargetRoute.PrimaryStorage.Name.Identifier,
-            null,
-            relationship.TargetIdentityComparison.Identifier);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.TargetEqualityIndex,
-            relationship.TargetRoute.PrimaryStorage.Name.Identifier,
-            relationship.TargetEqualityIndex.Name.Identifier,
-            relationship.TargetIdentityComparison.Identifier);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.ReferenceMaterialization,
-            relationship.Materialization.ReferenceStorageIdentity,
-            null,
-            null);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.ReferenceBySourceIndex,
-            relationship.Materialization.ReferenceStorageIdentity,
-            relationship.Materialization.ReferenceBySourceIndexIdentity,
-            null);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.ReferenceByTargetIndex,
-            relationship.Materialization.ReferenceStorageIdentity,
-            relationship.Materialization.ReferenceByTargetIndexIdentity,
-            null);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.TargetFence,
-            relationship.Materialization.FenceStorageIdentity,
-            null,
-            null);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.TargetFenceIndex,
-            relationship.Materialization.FenceStorageIdentity,
-            relationship.Materialization.FenceByTargetIndexIdentity,
-            null);
-
-        if (guard is not PhysicalRequireRelatedTargetNotEqualMutationGuard related)
-            yield break;
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.TargetPredicate,
-            relationship.TargetRoute.PrimaryStorage.Name.Identifier,
-            null,
-            related.TargetPredicateField.Identifier);
-        yield return new(
-            identity,
-            PhysicalRelationshipSelectorRole.TargetPredicateIndex,
-            relationship.TargetRoute.PrimaryStorage.Name.Identifier,
-            related.TargetPredicateIndex.Name.Identifier,
-            related.TargetPredicateField.Identifier);
-    }
-}
-
 /// <summary>
 /// Provider-owned evidence for the immutable physical selectors actually consumed by one bounded
 /// mutation. It supplements the provider-neutral predicate plan without rewriting its semantics.
@@ -343,8 +269,7 @@ public sealed class PhysicalMutationExecutionCertification
         PhysicalMutationPlan plan,
         PhysicalMutationSelectorCertification primary,
         PhysicalMutationSelectorCertification? linked,
-        string fingerprint,
-        IReadOnlyList<PhysicalRelationshipSelectorCertification>? relationshipSelectors = null)
+        string fingerprint)
     {
         ArgumentNullException.ThrowIfNull(plan);
         Primary = primary ?? throw new ArgumentNullException(nameof(primary));
@@ -356,31 +281,12 @@ public sealed class PhysicalMutationExecutionCertification
         StorageUnit = plan.Predicate.StorageUnit;
         MutationIdentity = plan.MutationIdentity;
         RouteFingerprint = plan.RouteFingerprint;
-        PlanFingerprint = plan.Fingerprint;
         ActionKind = plan.Action.Kind;
         var valueAction = plan.Action as IPhysicalValueMutationAction;
         ActionPath = valueAction?.Path;
         ActionTarget = valueAction?.TargetValue;
         AllowedSourceValues = Array.AsReadOnly(
             (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues.ToArray() ?? []);
-        RelationshipGuardIdentities = Array.AsReadOnly(plan.RelationshipGuards
-            .OrderBy(guard => guard.Kind)
-            .ThenBy(guard => guard.CanonicalIdentity, StringComparer.Ordinal)
-            .Select(guard => guard.CanonicalIdentity)
-            .ToArray());
-        var expectedRelationshipSelectors = PhysicalRelationshipSelectorCertification.ForPlan(plan);
-        var suppliedRelationshipSelectors = (relationshipSelectors ?? [])
-            .OrderBy(selector => selector.RelationshipIdentity, StringComparer.Ordinal)
-            .ThenBy(selector => selector.Role)
-            .ThenBy(selector => selector.CanonicalIdentity, StringComparer.Ordinal)
-            .ToArray();
-        if (!suppliedRelationshipSelectors.SequenceEqual(expectedRelationshipSelectors))
-        {
-            throw new ArgumentException(
-                "Executable mutation certification must supply the exact relationship materialization, fence, source, target, predicate, and index selector evidence required by the plan.",
-                nameof(relationshipSelectors));
-        }
-        RelationshipSelectors = Array.AsReadOnly(suppliedRelationshipSelectors);
     }
 
     public ProviderIdentity Provider { get; }
@@ -390,8 +296,6 @@ public sealed class PhysicalMutationExecutionCertification
     public string MutationIdentity { get; }
 
     public string RouteFingerprint { get; }
-
-    public string PlanFingerprint { get; }
 
     public BoundedMutationActionKind ActionKind { get; }
 
@@ -410,15 +314,6 @@ public sealed class PhysicalMutationExecutionCertification
     public IReadOnlyList<string> TransitionSources =>
         ActionKind == BoundedMutationActionKind.Transition ? AllowedSourceValues : [];
 
-    /// <summary>
-    /// Exact immutable cross-route guard bindings consumed by the native execution certification.
-    /// A provider must recertify when any relationship route, index, predicate, or fixed value
-    /// changes, even if the local mutation selector is unchanged.
-    /// </summary>
-    public IReadOnlyList<string> RelationshipGuardIdentities { get; }
-
-    public IReadOnlyList<PhysicalRelationshipSelectorCertification> RelationshipSelectors { get; }
-
     public PhysicalMutationSelectorCertification Primary { get; }
 
     public PhysicalMutationSelectorCertification? Linked { get; }
@@ -432,18 +327,11 @@ public sealed class PhysicalMutationExecutionCertification
                StorageUnit == plan.Predicate.StorageUnit &&
                MutationIdentity == plan.MutationIdentity &&
                RouteFingerprint == plan.RouteFingerprint &&
-               PlanFingerprint == plan.Fingerprint &&
                ActionKind == plan.Action.Kind &&
                ActionPath == valueAction?.Path &&
                ActionTarget == valueAction?.TargetValue &&
                AllowedSourceValues.SequenceEqual(
-                   (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues ?? []) &&
-               RelationshipGuardIdentities.SequenceEqual(plan.RelationshipGuards
-                   .OrderBy(guard => guard.Kind)
-                   .ThenBy(guard => guard.CanonicalIdentity, StringComparer.Ordinal)
-                   .Select(guard => guard.CanonicalIdentity)) &&
-               RelationshipSelectors.SequenceEqual(
-                   PhysicalRelationshipSelectorCertification.ForPlan(plan));
+                   (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues ?? []);
     }
 }
 
@@ -455,8 +343,7 @@ public sealed class PhysicalMutationEvidenceStageCertification
     public PhysicalMutationEvidenceStageCertification(
         PhysicalDocumentMutationCommandKind kind,
         string identity,
-        IReadOnlyList<PhysicalMutationSelectorCertification> selectors,
-        IReadOnlyList<PhysicalRelationshipSelectorCertification>? relationshipSelectors = null)
+        IReadOnlyList<PhysicalMutationSelectorCertification> selectors)
     {
         var expectedIdentity = kind switch
         {
@@ -486,11 +373,6 @@ public sealed class PhysicalMutationEvidenceStageCertification
         Kind = kind;
         Identity = identity;
         Selectors = Array.AsReadOnly(selectors.ToArray());
-        RelationshipSelectors = Array.AsReadOnly((relationshipSelectors ?? [])
-            .OrderBy(selector => selector.RelationshipIdentity, StringComparer.Ordinal)
-            .ThenBy(selector => selector.Role)
-            .ThenBy(selector => selector.CanonicalIdentity, StringComparer.Ordinal)
-            .ToArray());
     }
 
     public PhysicalDocumentMutationCommandKind Kind { get; }
@@ -498,15 +380,12 @@ public sealed class PhysicalMutationEvidenceStageCertification
     public string Identity { get; }
 
     public IReadOnlyList<PhysicalMutationSelectorCertification> Selectors { get; }
-
-    public IReadOnlyList<PhysicalRelationshipSelectorCertification> RelationshipSelectors { get; }
 }
 
 public sealed class PhysicalMutationHandlerCertification
 {
     private readonly PhysicalQueryHandlerCertification predicate;
     private readonly IReadOnlyList<string> allowedSourceValues;
-    private readonly IReadOnlyList<string> relationshipGuardIdentities;
     private readonly string? actionPath;
     private readonly string? actionTarget;
 
@@ -516,6 +395,16 @@ public sealed class PhysicalMutationHandlerCertification
         IReadOnlyList<PhysicalMutationEvidenceStageCertification>? evidenceStages = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        if (plan.RelationshipGuards.Count != 0)
+        {
+            throw new PhysicalRelationshipProviderNotSupportedException(
+                plan.Predicate.Provider,
+                plan.RelationshipGuards
+                    .Select(guard => guard.RelationshipIdentity)
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+                    .ToArray());
+        }
         MutationIdentity = plan.MutationIdentity;
         ActionKind = plan.Action.Kind;
         var valueAction = plan.Action as IPhysicalValueMutationAction;
@@ -523,23 +412,6 @@ public sealed class PhysicalMutationHandlerCertification
         actionTarget = valueAction?.TargetValue;
         allowedSourceValues = Array.AsReadOnly(
             (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues.ToArray() ?? []);
-        relationshipGuardIdentities = Array.AsReadOnly(plan.RelationshipGuards
-            .OrderBy(guard => guard.Kind)
-            .ThenBy(guard => guard.CanonicalIdentity, StringComparer.Ordinal)
-            .Select(guard => guard.CanonicalIdentity)
-            .ToArray());
-        if (relationshipGuardIdentities.Count != 0 && execution is null)
-        {
-            throw new ArgumentException(
-                "Relationship-guarded mutations require explicit provider execution certification and cannot use the local-selector-only evidence path.",
-                nameof(execution));
-        }
-        if (relationshipGuardIdentities.Count != 0 && evidenceStages is null)
-        {
-            throw new ArgumentException(
-                "Relationship-guarded mutations require explicit evidence-stage coverage for every relationship selector.",
-                nameof(evidenceStages));
-        }
         var fields = plan.Predicate.RequiredFields
             .GroupBy(field => field.Path, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First().Identifier, StringComparer.Ordinal);
@@ -596,20 +468,6 @@ public sealed class PhysicalMutationHandlerCertification
                 "Mutation evidence stages must cover every selector certified for the compiled mutation plan.",
                 nameof(evidenceStages));
         }
-        var expectedRelationshipSelectors = execution?.RelationshipSelectors ?? [];
-        var stagedRelationshipSelectors = stages
-            .SelectMany(stage => stage.RelationshipSelectors)
-            .Distinct()
-            .OrderBy(selector => selector.RelationshipIdentity, StringComparer.Ordinal)
-            .ThenBy(selector => selector.Role)
-            .ThenBy(selector => selector.CanonicalIdentity, StringComparer.Ordinal)
-            .ToArray();
-        if (!stagedRelationshipSelectors.SequenceEqual(expectedRelationshipSelectors))
-        {
-            throw new ArgumentException(
-                "Mutation evidence stages must cover every relationship selector certified for the compiled mutation plan, with no extras.",
-                nameof(evidenceStages));
-        }
         EvidenceStages = Array.AsReadOnly(stages);
     }
 
@@ -635,11 +493,7 @@ public sealed class PhysicalMutationHandlerCertification
         return actionPath == valueAction?.Path &&
                actionTarget == valueAction?.TargetValue &&
                allowedSourceValues.SequenceEqual(
-                   (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues ?? []) &&
-               relationshipGuardIdentities.SequenceEqual(plan.RelationshipGuards
-                   .OrderBy(guard => guard.Kind)
-                   .ThenBy(guard => guard.CanonicalIdentity, StringComparer.Ordinal)
-                   .Select(guard => guard.CanonicalIdentity));
+                   (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues ?? []);
     }
 
     private static IReadOnlyList<PhysicalMutationSelectorCertification> ExpectedSelectors(

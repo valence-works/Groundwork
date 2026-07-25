@@ -3,14 +3,15 @@ using System.Text;
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
+using Groundwork.Core.Scoping;
 using Groundwork.Core.Validation;
 
 namespace Groundwork.Core.PhysicalStorage;
 
 /// <summary>
-/// Stable provider-neutral identities for the materialized relationship and target-key fence.
-/// They are derived from manifest and relationship identities only, never a mutable manifest
-/// version or route fingerprint, so compatible upgrades address the same durable fence.
+/// Stable provider-neutral identities for one semantic generation of the materialized relationship
+/// and target-key fence. Physical renames and mutable manifest versions do not rotate the slot, but
+/// path, index, scope, case-policy, or target identity-algorithm changes do.
 /// </summary>
 public sealed record PhysicalRelationshipMaterializationIdentity(
     string ReferenceStorageIdentity,
@@ -21,14 +22,28 @@ public sealed record PhysicalRelationshipMaterializationIdentity(
 {
     internal static PhysicalRelationshipMaterializationIdentity Create(
         StorageManifestIdentity manifest,
-        ManifestRelationshipDeclaration relationship)
+        ManifestRelationshipDeclaration relationship,
+        ExecutableStorageRoute sourceRoute,
+        ExecutableStorageRoute targetRoute)
     {
         var root = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             PhysicalCanonicalEncoding.Join(
                 manifest.Value,
                 relationship.Identity,
                 relationship.SourceStorageUnit.Value,
-                relationship.TargetStorageUnit.Value)))).ToLowerInvariant();
+                relationship.SourceReferencePath,
+                relationship.SourceReferenceIndexIdentity,
+                relationship.TargetStorageUnit.Value,
+                relationship.TargetIdentityPath,
+                relationship.TargetEqualityIndexIdentity,
+                ((int)relationship.ReferenceCasePolicy).ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                ((int)sourceRoute.ScopePolicy).ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                ((int)targetRoute.ScopePolicy).ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                targetRoute.Envelope.Identity.ComparisonAlgorithmId,
+                targetRoute.Envelope.Identity.LookupAlgorithmId)))).ToLowerInvariant();
         return new(
             $"relationship-reference:{root}",
             $"relationship-reference-by-source:{root}",
@@ -86,10 +101,13 @@ public sealed record PhysicalRelationshipPlan(
     /// Projects an optional serialized reference into the exact comparison key used by the target
     /// identity route. A missing value remains absent; malformed or empty identities fail closed.
     /// </summary>
-    public string? ProjectReference(string? sourceReference) =>
-        sourceReference is null
-            ? null
-            : TargetRoute.Envelope.Identity.Project(sourceReference).ComparisonKey;
+    public string? ProjectReference(string? sourceReference)
+    {
+        if (sourceReference is null)
+            return null;
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceReference);
+        return TargetRoute.Envelope.Identity.Project(sourceReference).ComparisonKey;
+    }
 }
 
 public sealed class PhysicalRelationshipPlanCompilationResult
@@ -107,6 +125,85 @@ public sealed class PhysicalRelationshipPlanCompilationResult
     public IReadOnlyList<GroundworkDiagnostic> Diagnostics { get; }
 
     public bool IsValid => Diagnostics.All(diagnostic => !diagnostic.IsError);
+}
+
+/// <summary>
+/// An executable route set resolved and compiled from one exact manifest in one operation. The
+/// constructor is intentionally private so cross-unit admission cannot combine a local route with
+/// remote routes compiled from another manifest.
+/// </summary>
+public sealed class ManifestExecutableRouteSet
+{
+    private ManifestExecutableRouteSet(
+        StorageManifest manifest,
+        IReadOnlyList<ExecutableStorageRoute> routes)
+    {
+        Manifest = manifest;
+        Routes = Array.AsReadOnly(routes
+            .OrderBy(route => route.StorageUnit.Value, StringComparer.Ordinal)
+            .ToArray());
+    }
+
+    internal StorageManifest Manifest { get; }
+
+    public StorageManifestIdentity ManifestIdentity => Manifest.Identity;
+
+    public StorageManifestVersion ManifestVersion => Manifest.Version;
+
+    public IReadOnlyList<ExecutableStorageRoute> Routes { get; }
+
+    internal static ManifestExecutableRouteSet Create(
+        StorageManifest manifest,
+        IReadOnlyList<ExecutableStorageRoute> routes) =>
+        new(manifest, routes);
+}
+
+public sealed class ManifestExecutableRouteSetCompilationResult
+{
+    public ManifestExecutableRouteSetCompilationResult(
+        ManifestExecutableRouteSet? routeSet,
+        IReadOnlyList<GroundworkDiagnostic> diagnostics)
+    {
+        RouteSet = routeSet;
+        Diagnostics = Array.AsReadOnly(diagnostics.ToArray());
+    }
+
+    public ManifestExecutableRouteSet? RouteSet { get; }
+
+    public IReadOnlyList<GroundworkDiagnostic> Diagnostics { get; }
+
+    public bool IsValid => RouteSet is not null && Diagnostics.All(diagnostic => !diagnostic.IsError);
+}
+
+/// <summary>
+/// Resolves and compiles all routes from one manifest before exposing the sealed route set used by
+/// cross-unit admission.
+/// </summary>
+public static class ManifestExecutableRouteSetCompiler
+{
+    public static ManifestExecutableRouteSetCompilationResult Compile(
+        StorageManifest manifest,
+        IPhysicalNamePolicy namePolicy,
+        IProviderPhysicalNameNormalizer providerNames)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(namePolicy);
+        ArgumentNullException.ThrowIfNull(providerNames);
+        var diagnostics = new StorageManifestValidator().Validate(manifest).Diagnostics.ToList();
+        if (diagnostics.Any(diagnostic => diagnostic.IsError))
+            return new(null, diagnostics);
+
+        var resolution = PhysicalStorageResolver.Resolve(manifest, namePolicy, providerNames);
+        diagnostics.AddRange(resolution.Diagnostics);
+        if (!resolution.IsValid)
+            return new(null, diagnostics);
+
+        var routes = ExecutableStorageRouteCompiler.Compile(resolution.Definitions);
+        diagnostics.AddRange(routes.Diagnostics);
+        return routes.IsValid
+            ? new(ManifestExecutableRouteSet.Create(manifest, routes.Routes), diagnostics)
+            : new(null, diagnostics);
+    }
 }
 
 public sealed class PhysicalRelationshipProviderNotSupportedException : NotSupportedException
@@ -160,11 +257,11 @@ public static class PhysicalRelationshipProviderAdmission
 public static class PhysicalRelationshipPlanCompiler
 {
     public static PhysicalRelationshipPlanCompilationResult Compile(
-        StorageManifest manifest,
-        IReadOnlyList<ExecutableStorageRoute> routes)
+        ManifestExecutableRouteSet routeSet)
     {
-        ArgumentNullException.ThrowIfNull(manifest);
-        ArgumentNullException.ThrowIfNull(routes);
+        ArgumentNullException.ThrowIfNull(routeSet);
+        var manifest = routeSet.Manifest;
+        var routes = routeSet.Routes;
         var diagnostics = new List<GroundworkDiagnostic>();
         var routeGroups = routes
             .GroupBy(route => route.StorageUnit)
@@ -324,7 +421,11 @@ public static class PhysicalRelationshipPlanCompiler
                 targetRoute,
                 targetIdentity,
                 targetIndex,
-                PhysicalRelationshipMaterializationIdentity.Create(manifest.Identity, relationship)));
+                PhysicalRelationshipMaterializationIdentity.Create(
+                    manifest.Identity,
+                    relationship,
+                    sourceRoute,
+                    targetRoute)));
         }
 
         return diagnostics.Any(diagnostic => diagnostic.IsError)
@@ -353,8 +454,27 @@ public static class PhysicalRelationshipPlanCompiler
             candidate.Identity == indexIdentity &&
             candidate.Target == ExecutableStorageObjectRole.PrimaryStorage &&
             expectedColumnIdentifier is not null &&
-            candidate.Columns.Any(column =>
-                column.Column.Identifier == expectedColumnIdentifier));
+            HasRelationshipEqualityPrefix(route, candidate, expectedColumnIdentifier));
+    }
+
+    internal static bool HasRelationshipEqualityPrefix(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        string fieldIdentifier)
+    {
+        var expected = new List<string>();
+        if (route.Discriminator.ParticipatesInPrimaryKey)
+            expected.Add(route.Discriminator.Column.Identifier);
+        if (route.ScopePolicy == StorageScopePolicy.Scoped &&
+            route.ScopeKey.ParticipatesInPrimaryKey)
+            expected.Add(route.ScopeKey.Column.Identifier);
+        expected.Add(fieldIdentifier);
+        return index.Target == ExecutableStorageObjectRole.PrimaryStorage &&
+               index.Columns.Count >= expected.Count &&
+               index.Columns
+                   .Take(expected.Count)
+                   .Select(column => column.Column.Identifier)
+                   .SequenceEqual(expected, StringComparer.Ordinal);
     }
 
     private static GroundworkDiagnostic Error(string code, string message, string target) =>

@@ -43,6 +43,8 @@ public sealed record PhysicalAssignMutationAction(
 /// </summary>
 public abstract record PhysicalMutationRelationshipGuard(BoundedMutationRelationshipGuardKind Kind)
 {
+    public abstract string RelationshipIdentity { get; }
+
     public abstract string CanonicalIdentity { get; }
 }
 
@@ -55,6 +57,8 @@ public sealed record PhysicalRequireNoReferencesMutationGuard(
     PhysicalRelationshipPlan Relationship) :
     PhysicalMutationRelationshipGuard(BoundedMutationRelationshipGuardKind.RequireNoReferences)
 {
+    public override string RelationshipIdentity => Relationship.Identity;
+
     public override string CanonicalIdentity => Relationship.CanonicalIdentity;
 }
 
@@ -65,6 +69,8 @@ public sealed record PhysicalRequireRelatedTargetNotEqualMutationGuard(
     string DisallowedTargetValue) :
     PhysicalMutationRelationshipGuard(BoundedMutationRelationshipGuardKind.RequireRelatedTargetNotEqual)
 {
+    public override string RelationshipIdentity => Relationship.Identity;
+
     public override string CanonicalIdentity => PhysicalCanonicalEncoding.Join(
         Relationship.CanonicalIdentity,
         TargetPredicateField.Path,
@@ -238,15 +244,15 @@ public static class PhysicalMutationPlanCompiler
     /// can advertise or execute the mutation.
     /// </summary>
     public static PhysicalMutationPlanCompilationResult Compile(
-        StorageManifest manifest,
-        IReadOnlyList<ExecutableStorageRoute> routes,
+        ManifestExecutableRouteSet routeSet,
         ExecutableStorageRoute route,
         StorageUnitPhysicalStorage storage,
         PhysicalQueryPlannerCapabilities predicateCapabilities,
         bool supportsAtomicCollectionMaintenance = false)
     {
-        ArgumentNullException.ThrowIfNull(manifest);
-        ArgumentNullException.ThrowIfNull(routes);
+        ArgumentNullException.ThrowIfNull(routeSet);
+        var manifest = routeSet.Manifest;
+        var routes = routeSet.Routes;
         var manifestUnit = manifest.StorageUnits.SingleOrDefault(unit => unit.Identity == route.StorageUnit);
         var admittedRoutes = routes
             .Where(candidate => candidate.StorageUnit == route.StorageUnit)
@@ -273,7 +279,7 @@ public static class PhysicalMutationPlanCompiler
                     $"physicalMutations.{route.StorageUnit.Value}")]);
         }
 
-        var relationshipCompilation = PhysicalRelationshipPlanCompiler.Compile(manifest, routes);
+        var relationshipCompilation = PhysicalRelationshipPlanCompiler.Compile(routeSet);
         if (!relationshipCompilation.IsValid)
             return new([], relationshipCompilation.Diagnostics);
         return CompileCore(
@@ -572,14 +578,15 @@ public static class PhysicalMutationPlanCompiler
             ? declarations[0]
             : null;
         var physical = route.Indexes.SingleOrDefault(candidate => candidate.Identity == indexIdentity);
+        var projectedIdentifier = route.ProjectedColumns.SingleOrDefault(projection =>
+            projection.Target == ExecutableStorageObjectRole.PrimaryStorage &&
+            projection.Definition.Path == path)?.Column.Identifier;
         if (index is null || declarations.Length != 1 || physical is null ||
-            !physical.Columns.Any(column =>
-                string.Equals(
-                    column.Column.Identifier,
-                    route.ProjectedColumns.SingleOrDefault(projection =>
-                        projection.Target == ExecutableStorageObjectRole.PrimaryStorage &&
-                        projection.Definition.Path == path)?.Column.Identifier,
-                    StringComparison.Ordinal)))
+            projectedIdentifier is null ||
+            !PhysicalRelationshipPlanCompiler.HasRelationshipEqualityPrefix(
+                route,
+                physical,
+                projectedIdentifier))
         {
             diagnostics.Add(GroundworkDiagnostic.Error(
                 diagnosticCode,

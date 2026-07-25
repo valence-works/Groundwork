@@ -33,6 +33,21 @@ internal static class SchemaToolTargetCompiler
         diagnostics.AddRange(new StorageManifestValidator().Validate(manifest).Diagnostics);
         if (diagnostics.Any(item => item.IsError))
             return new SchemaToolTargetCompilation(null, Order(diagnostics));
+        try
+        {
+            PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+                manifest,
+                descriptor.Identity,
+                supportsRelationshipMaterialization: false);
+        }
+        catch (PhysicalRelationshipProviderNotSupportedException exception)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-RELATIONSHIP-012",
+                exception.Message,
+                "manifest.relationships"));
+            return new SchemaToolTargetCompilation(null, Order(diagnostics));
+        }
 
         if (descriptor.Alias == "mongodb")
         {
