@@ -102,7 +102,12 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         Enum.GetValues<PortableQueryOperation>().ToFrozenSet();
 
     public IReadOnlySet<BoundedMutationActionKind> SupportedActions { get; } =
-        Enum.GetValues<BoundedMutationActionKind>().ToFrozenSet();
+        new[]
+        {
+            BoundedMutationActionKind.Delete,
+            BoundedMutationActionKind.Transition,
+            BoundedMutationActionKind.Assign
+        }.ToFrozenSet();
 
     public IReadOnlyDictionary<string, string> NativeFieldIdentifiers { get; } =
         FrozenDictionary<string, string>.Empty;
@@ -158,21 +163,28 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
                 var affected = await CountSelectionAsync(connection, transaction, ct);
                 if (intercept is not null)
                     await intercept(RelationalPhysicalMutationExecutionPoint.AfterSelection, connection, transaction, ct);
-                if (plan.Action is PhysicalDeleteMutationAction)
-                    await DeleteSelectionAsync(
-                        connection,
-                        transaction,
-                        store.GetRoute(mutation.DocumentKind),
-                        affected,
-                        ct);
-                else
-                    await TransitionSelectionAsync(
-                        connection,
-                        transaction,
-                        store.GetRoute(mutation.DocumentKind),
-                        (PhysicalTransitionMutationAction)plan.Action,
-                        affected,
-                        ct);
+                switch (plan.Action)
+                {
+                    case PhysicalDeleteMutationAction:
+                        await DeleteSelectionAsync(
+                            connection,
+                            transaction,
+                            store.GetRoute(mutation.DocumentKind),
+                            affected,
+                            ct);
+                        break;
+                    case IPhysicalValueMutationAction assignment:
+                        await AssignSelectionAsync(
+                            connection,
+                            transaction,
+                            store.GetRoute(mutation.DocumentKind),
+                            assignment,
+                            affected,
+                            ct);
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(plan), plan.Action.Kind, null);
+                }
                 await RecordOperationAsync(
                     connection,
                     transaction,
@@ -719,35 +731,35 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             []);
     }
 
-    private async Task TransitionSelectionAsync(
+    private async Task AssignSelectionAsync(
         DbConnection connection,
         DbTransaction transaction,
         ExecutableStorageRoute route,
-        PhysicalTransitionMutationAction transition,
+        IPhysicalValueMutationAction assignment,
         long expectedAffected,
         CancellationToken ct)
     {
         var parameters = new List<(string Name, object? Value)>
         {
-            ("transitionPath", store.ConvertMutationJsonPath(transition.Path)),
-            ("transitionJson", store.ConvertMutationJsonValue(transition.TargetValue, transition.Field.ValueKind)),
-            ("transitionUpdated", DateTimeOffset.UtcNow.ToUniversalTime().ToString("O"))
+            ("assignmentPath", store.ConvertMutationJsonPath(assignment.Path)),
+            ("assignmentJson", store.ConvertMutationJsonValue(assignment.TargetValue, assignment.Field.ValueKind)),
+            ("assignmentUpdated", DateTimeOffset.UtcNow.ToUniversalTime().ToString("O"))
         };
         var primaryAssignments = new List<string>
         {
             $"{store.Q(route.Envelope.CanonicalJson.Identifier)} = " +
             store.SetJsonValue(
                 $"p.{store.Q(route.Envelope.CanonicalJson.Identifier)}",
-                store.P("transitionPath"),
-                store.P("transitionJson")),
+                store.P("assignmentPath"),
+                store.P("assignmentJson")),
             $"{store.Q(route.Envelope.Version.Identifier)} = p.{store.Q(route.Envelope.Version.Identifier)} + 1",
-            $"{store.Q(RelationalPhysicalStorageColumns.UpdatedUtc)} = {store.P("transitionUpdated")}"
+            $"{store.Q(RelationalPhysicalStorageColumns.UpdatedUtc)} = {store.P("assignmentUpdated")}"
         };
         var primaryProjections = route.ProjectedColumns
             .Where(column => column.Target == ExecutableStorageObjectRole.PrimaryStorage &&
-                             column.Definition.Path == transition.Path)
+                             column.Definition.Path == assignment.Path)
             .ToArray();
-        AddProjectionAssignments(primaryAssignments, parameters, primaryProjections, transition);
+        AddProjectionAssignments(primaryAssignments, parameters, primaryProjections, assignment);
         var primaryAffected = await ExecuteAsync(
             connection,
             transaction,
@@ -759,7 +771,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
                 PrimarySelectionJoin(route, "p", "s")),
             parameters,
             ct);
-        EnsureAffectedCount("primary transition", primaryAffected, expectedAffected);
+        EnsureAffectedCount("primary assignment", primaryAffected, expectedAffected);
 
         if (route.LinkedIndexStorage is null)
             return;
@@ -767,9 +779,9 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         var linkedParameters = new List<(string Name, object? Value)>();
         var linkedProjections = route.ProjectedColumns
             .Where(column => column.Target == ExecutableStorageObjectRole.LinkedIndexStorage &&
-                             column.Definition.Path == transition.Path)
+                             column.Definition.Path == assignment.Path)
             .ToArray();
-        AddProjectionAssignments(linkedAssignments, linkedParameters, linkedProjections, transition);
+        AddProjectionAssignments(linkedAssignments, linkedParameters, linkedProjections, assignment);
         if (linkedAssignments.Count == 0)
             return;
         var linkedAffected = await ExecuteAsync(
@@ -783,24 +795,24 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
                 LinkedSelectionJoin(route, "l", "s")),
             linkedParameters,
             ct);
-        EnsureAffectedCount("linked transition", linkedAffected, expectedAffected);
+        EnsureAffectedCount("linked assignment", linkedAffected, expectedAffected);
     }
 
     private void AddProjectionAssignments(
         List<string> assignments,
         List<(string Name, object? Value)> parameters,
         IReadOnlyList<ExecutableProjectedColumnRoute> projections,
-        PhysicalTransitionMutationAction transition)
+        IPhysicalValueMutationAction assignment)
     {
         foreach (var projection in projections)
         {
-            var name = $"transitionProjection{parameters.Count}";
+            var name = $"assignmentProjection{parameters.Count}";
             assignments.Add($"{store.Q(projection.Column.Identifier)} = {store.P(name)}");
             parameters.Add((
                 name,
                 store.ConvertPhysicalQueryValue(
-                    transition.TargetValue,
-                    transition.Field.ValueKind,
+                    assignment.TargetValue,
+                    assignment.Field.ValueKind,
                     projection.Definition)));
         }
     }

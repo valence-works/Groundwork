@@ -123,8 +123,8 @@ public sealed class MongoDbPhysicalStorageModel
                 {
                     ("bounded mutation", mutation.Identity),
                     ("bounded mutation query", mutation.PredicateQueryIdentity)
-                }.Concat(mutation.Action is BoundedTransitionMutationAction transition
-                    ? [("bounded mutation transition path", transition.Path)]
+                }.Concat(mutation.Action is IPhysicalValueMutationAction valueAction
+                    ? [("bounded mutation action path", valueAction.Path)]
                     : [])));
             names.AddRange(storage.NameOverrides.SelectMany(nameOverride => new[]
             {

@@ -167,6 +167,74 @@ public sealed class SqliteBoundedMutationTests
     }
 
     [Fact]
+    public async Task Assignment_updates_every_route_selected_document_and_replays_the_exact_count()
+    {
+        await using var fixture = await CreateAsync();
+        await fixture.SaveJsonAsync("missing", """{"category":"assignment-batch"}""");
+        await fixture.SaveJsonAsync("extension", """{"category":"assignment-batch","priority":-17}""");
+        await fixture.SaveJsonAsync("different", """{"category":"assignment-batch","priority":7}""");
+        await fixture.SaveJsonAsync("already-target", """{"category":"assignment-batch","priority":42}""");
+        await fixture.SaveJsonAsync("unrelated", """{"category":"other","priority":7}""");
+        var request = AssignPriority("assign-priority-1", "assignment-batch");
+
+        var completed = await fixture.Mutations.ExecuteAsync(request);
+        var replayed = await fixture.Mutations.ExecuteAsync(request);
+
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 4), completed);
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Replayed, 4), replayed);
+        foreach (var id in new[] { "missing", "extension", "different", "already-target" })
+            Assert.Equal(42, Priority((await fixture.Documents.LoadAsync(DocumentKind, id))!.ContentJson));
+        Assert.Equal(7, Priority((await fixture.Documents.LoadAsync(DocumentKind, "unrelated"))!.ContentJson));
+    }
+
+    [Fact]
+    public async Task Assignment_failure_before_commit_rolls_back_value_projection_and_replay_ledger()
+    {
+        await using var fixture = await CreateAsync(point =>
+            point == RelationalPhysicalMutationExecutionPoint.BeforeCommit
+                ? ValueTask.FromException(new SimulatedMutationFailureException())
+                : ValueTask.CompletedTask);
+        await fixture.SaveJsonAsync("rollback-target", """{"category":"assignment-batch","priority":7}""");
+        var request = AssignPriority("assign-rollback-1", "assignment-batch");
+
+        await Assert.ThrowsAsync<SimulatedMutationFailureException>(() =>
+            fixture.Mutations.ExecuteAsync(request));
+
+        Assert.Equal(7, Priority((await fixture.Documents.LoadAsync(DocumentKind, "rollback-target"))!.ContentJson));
+        Assert.Equal(0, await fixture.CountMutationOperationsAsync());
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(request));
+        Assert.Equal(42, Priority((await fixture.Documents.LoadAsync(DocumentKind, "rollback-target"))!.ContentJson));
+    }
+
+    [Fact]
+    public async Task Assignment_acknowledgement_loss_replays_the_durable_matched_count()
+    {
+        var loseAcknowledgement = true;
+        await using var fixture = await CreateAsync(point =>
+        {
+            if (point == RelationalPhysicalMutationExecutionPoint.AfterCommitBeforeAcknowledgement &&
+                loseAcknowledgement)
+            {
+                loseAcknowledgement = false;
+                return ValueTask.FromException(new SimulatedMutationAcknowledgementLossException());
+            }
+            return ValueTask.CompletedTask;
+        });
+        await fixture.SaveJsonAsync("ack-loss-target", """{"category":"assignment-batch","priority":null}""");
+        var request = AssignPriority("assign-ack-loss-1", "assignment-batch");
+
+        await Assert.ThrowsAsync<SimulatedMutationAcknowledgementLossException>(() =>
+            fixture.Mutations.ExecuteAsync(request));
+
+        Assert.Equal(42, Priority((await fixture.Documents.LoadAsync(DocumentKind, "ack-loss-target"))!.ContentJson));
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Replayed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(request));
+    }
+
+    [Fact]
     public async Task Linked_mutation_hydrates_primary_through_Unicode_equivalent_identity_evidence()
     {
         await using var fixture = await CreateAsync(
@@ -867,8 +935,17 @@ public sealed class SqliteBoundedMutationTests
     private static DocumentMutation Transition(string operationId) =>
         new(DocumentKind, "revoke-pending", operationId);
 
+    private static DocumentMutation AssignPriority(string operationId, string category) =>
+        new(DocumentKind, "assign-priority", operationId,
+        [
+            DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", category))
+        ]);
+
     private static string Category(string json) =>
         JsonDocument.Parse(json).RootElement.GetProperty("category").GetString()!;
+
+    private static int Priority(string json) =>
+        JsonDocument.Parse(json).RootElement.GetProperty("priority").GetInt32();
 
     private static string Q(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
@@ -984,6 +1061,10 @@ public sealed class SqliteBoundedMutationTests
                                 "list-by-category",
                                 BoundedMutationAction.Transition("category", ["pending"], "revoked")),
                             new BoundedMutationDeclaration(
+                                "assign-priority",
+                                "list-by-category",
+                                BoundedMutationAction.Assign("priority", "42")),
+                            new BoundedMutationDeclaration(
                                 "prune-by-category-cutoff",
                                 "prune-by-category-cutoff",
                                 BoundedMutationAction.Delete())
@@ -1018,6 +1099,16 @@ public sealed class SqliteBoundedMutationTests
 
         public Task SaveCollectionAsync(string id, string category, string permission) =>
             SqliteBoundedMutationTests.SaveCollectionAsync(Documents, id, category, permission);
+
+        public async Task SaveJsonAsync(string id, string contentJson)
+        {
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await Documents.SaveAsync(new SaveDocumentRequest(
+                DocumentKind,
+                id,
+                "1",
+                contentJson,
+                ExpectedVersion: 0))).Status);
+        }
 
         public async Task ChangeLinkedIdentityEvidenceAsync(
             string originalId,

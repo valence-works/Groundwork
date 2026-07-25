@@ -1267,6 +1267,116 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.Equal(Assert.Single(fixture.Route.ProjectedColumns).Column.Identifier, transition.Field.Identifier);
     }
 
+    [Fact]
+    public void NamedAssignmentFixesAProjectedTargetIndependentlyOfTheSelectionPredicate()
+    {
+        var fixture = CreateAssignmentFixture();
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var assignment = Assert.IsType<PhysicalAssignMutationAction>(Assert.Single(result.Plans).Action);
+        Assert.Equal(BoundedMutationActionKind.Assign, assignment.Kind);
+        Assert.Equal("status", assignment.Path);
+        Assert.Equal("revoked", assignment.TargetValue);
+        Assert.Equal(IndexValueKind.Keyword, assignment.Field.ValueKind);
+        Assert.Equal(
+            fixture.Route.ProjectedColumns.Single(column => column.Definition.Path == "status").Column.Identifier,
+            assignment.Field.Identifier);
+        Assert.Equal("list-by-stimulus-type", Assert.Single(result.Plans).Predicate.QueryIdentity);
+    }
+
+    [Fact]
+    public void AssignmentDeclarationHasClosedValueSemantics()
+    {
+        var assignment = BoundedMutationAction.Assign("status", "revoked");
+        var equivalent = BoundedMutationAction.Assign("status", "revoked");
+
+        Assert.Equal(assignment, equivalent);
+        Assert.Equal(assignment.GetHashCode(), equivalent.GetHashCode());
+        Assert.NotEqual(assignment, BoundedMutationAction.Assign("status", "disabled"));
+        Assert.NotEqual(assignment, BoundedMutationAction.Assign("state", "revoked"));
+        Assert.NotEqual(
+            assignment,
+            BoundedMutationAction.Transition("status", ["pending"], "revoked"));
+        Assert.Throws<ArgumentException>(() => BoundedMutationAction.Assign("", "revoked"));
+        Assert.Throws<ArgumentException>(() => BoundedMutationAction.Assign("status", ""));
+    }
+
+    [Fact]
+    public void AssignmentIsRejectedBeforeProviderIoWhenTheHandlerDoesNotAdvertiseIt()
+    {
+        var fixture = CreateAssignmentFixture();
+        var capabilities = Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns);
+        var plan = Assert.Single(PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            capabilities).Plans);
+        var handler = new RecordingMutationHandler(
+            plan.HandlerIdentity,
+            PhysicalQuerySourceKind.PrimaryProjectedColumns,
+            [new PhysicalMutationHandlerCertification(plan)],
+            new HashSet<BoundedMutationActionKind>
+            {
+                BoundedMutationActionKind.Delete,
+                BoundedMutationActionKind.Transition
+            });
+
+        Assert.Throws<ArgumentException>(() => new PhysicalMutationDocumentStore(
+            fixture.Route,
+            fixture.Storage,
+            capabilities,
+            [handler]));
+        Assert.Equal(0, handler.ExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(false, ProjectionCardinality.Scalar)]
+    [InlineData(true, ProjectionCardinality.CollectionElements)]
+    public void NamedAssignmentRejectsMissingOrCollectionTargetProjection(
+        bool includeTarget,
+        ProjectionCardinality cardinality)
+    {
+        var fixture = CreateAssignmentFixture(includeTarget, cardinality);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == (includeTarget ? "GW-MUTATION-007" : "GW-MUTATION-009"));
+    }
+
+    [Fact]
+    public void AssignmentRequestFingerprintBindsTheManifestFixedTargetValue()
+    {
+        var revoked = CreateAssignmentFixture(targetValue: "revoked");
+        var disabled = CreateAssignmentFixture(targetValue: "disabled");
+        var revokedPlan = Assert.Single(PhysicalMutationPlanCompiler.Compile(
+            revoked.Route,
+            revoked.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)).Plans);
+        var disabledPlan = Assert.Single(PhysicalMutationPlanCompiler.Compile(
+            disabled.Route,
+            disabled.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)).Plans);
+        var request = new DocumentMutation(
+            "workflowTriggerBinding",
+            "assign-status",
+            "operation-a",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("stimulusType", "http"))]);
+
+        Assert.NotEqual(
+            BoundedMutationRequestFingerprint.Create(request, revokedPlan, "tenant-a"),
+            BoundedMutationRequestFingerprint.Create(request, disabledPlan, "tenant-a"));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -3454,6 +3564,54 @@ public sealed class PhysicalQueryPlanCompilerTests
         BoundedQueryExecutionClass executionClass) =>
         CreateFixture(form, Query(executionClass));
 
+    private static PlanningFixture CreateAssignmentFixture(
+        bool includeTarget = true,
+        ProjectionCardinality targetCardinality = ProjectionCardinality.Scalar,
+        string targetValue = "revoked")
+    {
+        var logicalIndex = StimulusTypeIndex();
+        var query = Query(BoundedQueryExecutionClass.ScaleBearing);
+        var projections = new List<ProjectedColumnDefinition>
+        {
+            new("stimulusType", "stimulusType", PortablePhysicalType.String)
+        };
+        if (includeTarget)
+        {
+            projections.Add(new ProjectedColumnDefinition(
+                "status",
+                "status",
+                PortablePhysicalType.String,
+                IsNullable: targetCardinality == ProjectionCardinality.CollectionElements,
+                Cardinality: targetCardinality,
+                MaxCollectionElements: targetCardinality == ProjectionCardinality.CollectionElements ? 16 : null));
+        }
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "workflow_trigger_bindings",
+            projections,
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    logicalIndex.Identity,
+                    [
+                        new PhysicalIndexColumnDefinition("storage_scope", 0),
+                        new PhysicalIndexColumnDefinition("stimulusType", 1)
+                    ])
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [logicalIndex],
+            [query],
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "assign-status",
+                    query.Identity,
+                    BoundedMutationAction.Assign("status", targetValue))
+            ]);
+        return Resolve(storage, null);
+    }
+
     private static PlanningFixture CreateFixture(
         PhysicalStorageForm form,
         BoundedQueryDeclaration query)
@@ -4107,14 +4265,15 @@ public sealed class PhysicalQueryPlanCompilerTests
     private sealed class RecordingMutationHandler(
         string identity,
         PhysicalQuerySourceKind source,
-        IReadOnlyList<PhysicalMutationHandlerCertification> certifications) : IPhysicalDocumentMutationHandler
+        IReadOnlyList<PhysicalMutationHandlerCertification> certifications,
+        IReadOnlySet<BoundedMutationActionKind>? supportedActions = null) : IPhysicalDocumentMutationHandler
     {
         public string Identity { get; } = identity;
         public PhysicalQuerySourceKind Source { get; } = source;
         public IReadOnlySet<PortableQueryOperation> SupportedOperations { get; } =
             Enum.GetValues<PortableQueryOperation>().ToHashSet();
         public IReadOnlySet<BoundedMutationActionKind> SupportedActions { get; } =
-            Enum.GetValues<BoundedMutationActionKind>().ToHashSet();
+            supportedActions ?? Enum.GetValues<BoundedMutationActionKind>().ToHashSet();
         public IReadOnlyDictionary<string, string> NativeFieldIdentifiers { get; } =
             new Dictionary<string, string>();
         public IReadOnlyList<PhysicalMutationHandlerCertification> Certifications { get; } = certifications;

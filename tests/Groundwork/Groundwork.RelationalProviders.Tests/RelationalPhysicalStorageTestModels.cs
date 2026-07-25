@@ -16,6 +16,7 @@ internal sealed record RelationalMutationScenarioOptions(
     bool IncludeCategoryTransition = false,
     bool IncludeRangeDelete = false,
     bool IncludeTypedTransitions = false,
+    bool IncludePriorityAssignment = false,
     RelationalTypedTransitionTestOptions? TypedTransitions = null);
 
 internal static class RelationalPhysicalStorageTestModels
@@ -27,6 +28,7 @@ internal static class RelationalPhysicalStorageTestModels
         bool scoped = false,
         bool dedicatedWithoutLinked = false,
         PortablePhysicalType priorityType = PortablePhysicalType.Int32,
+        bool priorityNullable = false,
         int? priorityPrecision = null,
         int? priorityScale = null,
         int? priorityLength = null,
@@ -89,7 +91,8 @@ internal static class RelationalPhysicalStorageTestModels
                 priorityType,
                 Length: priorityLength,
                 Precision: priorityPrecision,
-                Scale: priorityScale));
+                Scale: priorityScale,
+                IsNullable: priorityNullable));
             if (includeLatestPerCategory)
                 columns.Add(new ProjectedColumnDefinition("visible", "visible", PortablePhysicalType.Boolean));
             var priorityIndexColumns = new List<PhysicalIndexColumnDefinition>();
@@ -321,6 +324,13 @@ internal static class RelationalPhysicalStorageTestModels
                     $"list-by-{field.Name}",
                     BoundedMutationAction.Transition(field.Name, [values.Source], values.Target)));
             }
+        }
+        if (mutationOptions.IncludePriorityAssignment)
+        {
+            boundedMutations.Add(new BoundedMutationDeclaration(
+                "assign-priority",
+                "list-by-category",
+                BoundedMutationAction.Assign("priority", "42")));
         }
 
         var definition = dedicatedWithoutLinked

@@ -608,6 +608,10 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         RelationalBoundedMutationServerAssertions.TransitionUpdatesExactIndexedIdentitySetAsync(MutationHarness());
 
     [Fact]
+    public Task Bounded_assignment_updates_every_route_selected_document_and_replays_the_exact_count() =>
+        RelationalBoundedMutationServerAssertions.AssignmentUpdatesEveryRouteSelectedDocumentAndReplaysExactCountAsync(MutationHarness());
+
+    [Fact]
     public Task Concurrent_bounded_retry_completes_once_and_replays_the_exact_count() =>
         RelationalBoundedMutationServerAssertions.ConcurrentRetryReplaysExactResultAsync(MutationHarness());
 

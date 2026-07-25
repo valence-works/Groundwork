@@ -331,29 +331,32 @@ internal static class RelationalPhysicalMutationRuntime
                 Environment.NewLine,
                 compilation.Diagnostics.Select(item => $"{item.Code}: {item.Message}")));
         }
-        CertifyTransitionValues(context.Store, context.Route, compilation.Plans);
+        CertifyMutationValues(context.Store, context.Route, compilation.Plans);
         return new RuntimeComponents(storage, capabilities, compilation);
     }
 
-    private static void CertifyTransitionValues(
+    private static void CertifyMutationValues(
         RelationalPhysicalDocumentStore store,
         ExecutableStorageRoute route,
         IReadOnlyList<PhysicalMutationPlan> plans)
     {
-        foreach (var transition in plans.Select(plan => plan.Action).OfType<PhysicalTransitionMutationAction>())
+        foreach (var assignment in plans.Select(plan => plan.Action).OfType<IPhysicalValueMutationAction>())
         {
             var projections = route.ProjectedColumns
-                .Where(column => string.Equals(column.Definition.Path, transition.Path, StringComparison.Ordinal))
+                .Where(column => string.Equals(column.Definition.Path, assignment.Path, StringComparison.Ordinal))
                 .ToArray();
-            foreach (var value in transition.AllowedSourceValues.Append(transition.TargetValue))
+            var values = assignment is PhysicalTransitionMutationAction transition
+                ? transition.AllowedSourceValues.Append(transition.TargetValue)
+                : [assignment.TargetValue];
+            foreach (var value in values)
             {
-                RelationalPhysicalProjectionValues.ConvertScalar(value, transition.Field.ValueKind);
-                store.ConvertMutationJsonValue(value, transition.Field.ValueKind);
+                RelationalPhysicalProjectionValues.ConvertScalar(value, assignment.Field.ValueKind);
+                store.ConvertMutationJsonValue(value, assignment.Field.ValueKind);
                 foreach (var projection in projections)
                 {
                     store.ConvertPhysicalQueryValue(
                         value,
-                        transition.Field.ValueKind,
+                        assignment.Field.ValueKind,
                         projection.Definition);
                 }
             }
@@ -388,6 +391,7 @@ internal static class RelationalPhysicalMutationRuntime
                     DerivedTypes =
                     {
                         new JsonDerivedType(typeof(BoundedDeleteMutationAction), "delete"),
+                        new JsonDerivedType(typeof(BoundedAssignMutationAction), "assign"),
                         new JsonDerivedType(typeof(BoundedTransitionMutationAction), "transition")
                     }
                 };

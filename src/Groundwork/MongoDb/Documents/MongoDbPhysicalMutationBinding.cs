@@ -66,12 +66,33 @@ internal sealed class MongoDbPhysicalMutationBinding
         }
 
         MongoDbPhysicalMutationModelValidation.Validate(route, storage);
+        ValidateFixedValues(route, compilation.Plans);
         return compilation.Plans
             .OrderBy(plan => plan.MutationIdentity, StringComparer.Ordinal)
             .Select(plan => new MongoDbPhysicalMutationBinding(
                 plan,
                 MongoDbPhysicalMutationSchemaBinding.Create(route, storage, plan)))
             .ToArray();
+    }
+
+    private static void ValidateFixedValues(
+        ExecutableStorageRoute route,
+        IReadOnlyList<PhysicalMutationPlan> plans)
+    {
+        foreach (var assignment in plans.Select(plan => plan.Action).OfType<IPhysicalValueMutationAction>())
+        {
+            var values = assignment is PhysicalTransitionMutationAction transition
+                ? transition.AllowedSourceValues.Append(transition.TargetValue)
+                : [assignment.TargetValue];
+            foreach (var value in values)
+            {
+                _ = MongoDbPhysicalMutationStorage.QueryValue(
+                    route,
+                    assignment.Path,
+                    assignment.Field.ValueKind,
+                    value);
+            }
+        }
     }
 }
 
@@ -261,9 +282,9 @@ internal sealed class MongoDbPhysicalMutationSchemaBinding
         string handlerIdentity,
         string fenceField,
         BoundedMutationActionKind actionKind,
-        string? transitionPath,
-        IReadOnlyList<string> transitionSources,
-        string? transitionTarget,
+        string? actionPath,
+        IReadOnlyList<string> allowedSourceValues,
+        string? actionTarget,
         MongoDbPhysicalMutationSelector primary,
         MongoDbPhysicalMutationSelector? linked,
         string? canonicalJson = null)
@@ -274,9 +295,9 @@ internal sealed class MongoDbPhysicalMutationSchemaBinding
         HandlerIdentity = handlerIdentity;
         FenceField = fenceField;
         ActionKind = actionKind;
-        TransitionPath = transitionPath;
-        TransitionSources = Array.AsReadOnly(transitionSources.Order(StringComparer.Ordinal).ToArray());
-        TransitionTarget = transitionTarget;
+        ActionPath = actionPath;
+        AllowedSourceValues = Array.AsReadOnly(allowedSourceValues.Order(StringComparer.Ordinal).ToArray());
+        ActionTarget = actionTarget;
         Primary = primary;
         Linked = linked;
         CanonicalJson = canonicalJson ?? Serialize(this);
@@ -301,11 +322,11 @@ internal sealed class MongoDbPhysicalMutationSchemaBinding
 
     public BoundedMutationActionKind ActionKind { get; }
 
-    public string? TransitionPath { get; }
+    public string? ActionPath { get; }
 
-    public IReadOnlyList<string> TransitionSources { get; }
+    public IReadOnlyList<string> AllowedSourceValues { get; }
 
-    public string? TransitionTarget { get; }
+    public string? ActionTarget { get; }
 
     public MongoDbPhysicalMutationSelector Primary { get; }
 
@@ -336,7 +357,7 @@ internal sealed class MongoDbPhysicalMutationSchemaBinding
                 logicalIndex,
                 plan.Predicate,
                 ExecutableStorageObjectRole.LinkedIndexStorage);
-        var transition = plan.Action as PhysicalTransitionMutationAction;
+        var valueAction = plan.Action as IPhysicalValueMutationAction;
         return new MongoDbPhysicalMutationSchemaBinding(
             plan.Predicate.Provider.Name,
             route,
@@ -344,9 +365,9 @@ internal sealed class MongoDbPhysicalMutationSchemaBinding
             plan.HandlerIdentity,
             MongoDbPhysicalMutationStorage.BindingFenceField(route.StorageUnit, plan.MutationIdentity),
             plan.Action.Kind,
-            transition?.Path,
-            transition?.AllowedSourceValues ?? [],
-            transition?.TargetValue,
+            valueAction?.Path,
+            (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues ?? [],
+            valueAction?.TargetValue,
             primary,
             linked);
     }
@@ -386,9 +407,9 @@ internal sealed class MongoDbPhysicalMutationSchemaBinding
         var action = new BsonDocument
         {
             ["kind"] = binding.ActionKind.ToString(),
-            ["path"] = binding.TransitionPath is null ? BsonNull.Value : binding.TransitionPath,
-            ["sources"] = new BsonArray(binding.TransitionSources),
-            ["target"] = binding.TransitionTarget is null ? BsonNull.Value : binding.TransitionTarget
+            ["path"] = binding.ActionPath is null ? BsonNull.Value : binding.ActionPath,
+            ["sources"] = new BsonArray(binding.AllowedSourceValues),
+            ["target"] = binding.ActionTarget is null ? BsonNull.Value : binding.ActionTarget
         };
         var document = new BsonDocument
         {
