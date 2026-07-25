@@ -1802,29 +1802,25 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         var exactComparison = collection.IdComparisonKey.Column.Identifier;
         var expectedIndex = SqlServerPhysicalName.Normalize($"PK_{collection.Storage.Name.Identifier}");
         var collectionScans = document.Descendants().Where(node =>
-            string.Equals(node.Name.LocalName, "RelOp", StringComparison.Ordinal) &&
+            IsShowPlanElement(node, "RelOp") &&
             node.Attribute("PhysicalOp")?.Value.EndsWith("Scan", StringComparison.Ordinal) == true &&
             node.Descendants().Any(candidate =>
-                string.Equals(candidate.Name.LocalName, "Object", StringComparison.Ordinal) &&
-                candidate.Attribute("Table")?.Value.Contains(collection.Storage.Name.Identifier, StringComparison.Ordinal) == true));
+                IsShowPlanElement(candidate, "Object") &&
+                ShowPlanIdentifierEquals(candidate.Attribute("Table")?.Value, collection.Storage.Name.Identifier)));
         if (collectionScans.Any())
             return false;
 
         return document.Descendants().Any(node =>
         {
-            if (!string.Equals(node.Name.LocalName, "RelOp", StringComparison.Ordinal) ||
+            if (!IsShowPlanElement(node, "RelOp") ||
                 !string.Equals(node.Attribute("PhysicalOp")?.Value, "Index Seek", StringComparison.Ordinal))
                 return false;
 
             var target = node.Descendants().FirstOrDefault(candidate =>
-                string.Equals(candidate.Name.LocalName, "Object", StringComparison.Ordinal) &&
-                candidate.Attribute("Table")?.Value.Contains(
-                    collection.Storage.Name.Identifier,
-                    StringComparison.Ordinal) == true);
-            if (target?.Attribute("Table")?.Value.Contains(
-                       collection.Storage.Name.Identifier,
-                       StringComparison.Ordinal) != true ||
-                target.Attribute("Index")?.Value.Contains(expectedIndex, StringComparison.Ordinal) != true)
+                IsShowPlanElement(candidate, "Object") &&
+                ShowPlanIdentifierEquals(candidate.Attribute("Table")?.Value, collection.Storage.Name.Identifier));
+            if (target is null ||
+                !ShowPlanIdentifierEquals(target.Attribute("Index")?.Value, expectedIndex))
                 return false;
 
             var seekText = node.ToString(SaveOptions.DisableFormatting);
@@ -1833,18 +1829,48 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
                 return false;
 
             return node.Ancestors()
-                .Where(ancestor => string.Equals(ancestor.Name.LocalName, "RelOp", StringComparison.Ordinal))
-                .Any(ancestor => ancestor.Descendants().Any(descendant =>
+                .Where(ancestor =>
+                    IsShowPlanElement(ancestor, "RelOp") &&
+                    string.Equals(ancestor.Attribute("PhysicalOp")?.Value, "Nested Loops", StringComparison.Ordinal))
+                .Any(ancestor =>
                 {
-                    if (!string.Equals(descendant.Name.LocalName, "RelOp", StringComparison.Ordinal) ||
-                        !string.Equals(descendant.Attribute("PhysicalOp")?.Value, "RID Lookup", StringComparison.Ordinal))
-                        return false;
-                    var lookupText = descendant.ToString(SaveOptions.DisableFormatting);
-                    return lookupText.Contains(collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
-                           lookupText.Contains($"Column=\"{exactComparison}\"", StringComparison.Ordinal);
-                }));
+                    var branches = ImmediateRelOpBranches(ancestor).ToArray();
+                    var seekBranch = branches.SingleOrDefault(branch =>
+                        branch.DescendantsAndSelf().Contains(node));
+                    return seekBranch is not null && branches
+                        .Where(branch => branch != seekBranch)
+                        .SelectMany(branch => branch.DescendantsAndSelf())
+                        .Any(descendant =>
+                            IsShowPlanElement(descendant, "RelOp") &&
+                            string.Equals(
+                                descendant.Attribute("PhysicalOp")?.Value,
+                                "RID Lookup",
+                                StringComparison.Ordinal) &&
+                            descendant.Descendants().Any(candidate =>
+                                IsShowPlanElement(candidate, "Object") &&
+                                ShowPlanIdentifierEquals(
+                                    candidate.Attribute("Table")?.Value,
+                                    collection.Storage.Name.Identifier)) &&
+                            descendant.Descendants().Any(candidate =>
+                                IsShowPlanElement(candidate, "ColumnReference") &&
+                                ShowPlanIdentifierEquals(
+                                    candidate.Attribute("Column")?.Value,
+                                    exactComparison)));
+                });
         });
     }
+
+    private static IEnumerable<XElement> ImmediateRelOpBranches(XElement parent) =>
+        parent.Descendants().Where(candidate =>
+            IsShowPlanElement(candidate, "RelOp") &&
+            candidate.Ancestors().FirstOrDefault(ancestor => IsShowPlanElement(ancestor, "RelOp")) == parent);
+
+    private static bool IsShowPlanElement(XElement element, string localName) =>
+        string.Equals(element.Name.LocalName, localName, StringComparison.Ordinal);
+
+    private static bool ShowPlanIdentifierEquals(string? actual, string expected) =>
+        actual is not null &&
+        string.Equals(actual.Trim('[', ']'), expected, StringComparison.Ordinal);
 
     [Fact]
     public void Collection_owner_primary_key_plan_recognition_rejects_non_owner_access()
@@ -1863,6 +1889,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             <ColumnReference Column="{{collection.IdLookupKey.Column.Identifier}}" />
             """;
         var comparison = $"<ColumnReference Column=\"{collection.IdComparisonKey.Column.Identifier}\" />";
+        var expectedIndex = SqlServerPhysicalName.Normalize($"PK_{collection.Storage.Name.Identifier}");
         var fixtures = new[]
         {
             $$"""
@@ -1873,6 +1900,15 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
               """,
             $$"""
               <ShowPlanXML><RelOp PhysicalOp="Nested Loops"><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" Index="[{{SqlServerPhysicalName.Normalize($"PK_{collection.Storage.Name.Identifier}")}}]" /><SeekPredicates>{{ownerColumns}}{{comparison}}</SeekPredicates></IndexScan></RelOp><RelOp PhysicalOp="Table Scan"><TableScan><Object Table="[{{collection.Storage.Name.Identifier}}]" /></TableScan></RelOp></RelOp></ShowPlanXML>
+              """,
+            $$"""
+              <ShowPlanXML><RelOp PhysicalOp="Nested Loops"><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[decoy_{{collection.Storage.Name.Identifier}}_decoy]" Index="[{{expectedIndex}}]" /><SeekPredicates>{{ownerColumns}}</SeekPredicates></IndexScan></RelOp><RelOp PhysicalOp="RID Lookup"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" /></IndexScan><Predicate>{{comparison}}</Predicate></RelOp></RelOp></ShowPlanXML>
+              """,
+            $$"""
+              <ShowPlanXML><RelOp PhysicalOp="Nested Loops"><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" Index="[decoy_{{expectedIndex}}_decoy]" /><SeekPredicates>{{ownerColumns}}</SeekPredicates></IndexScan></RelOp><RelOp PhysicalOp="RID Lookup"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" /></IndexScan><Predicate>{{comparison}}</Predicate></RelOp></RelOp></ShowPlanXML>
+              """,
+            $$"""
+              <ShowPlanXML><RelOp PhysicalOp="Table Delete"><RelOp PhysicalOp="Nested Loops"><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" Index="[{{expectedIndex}}]" /><SeekPredicates>{{ownerColumns}}</SeekPredicates></IndexScan></RelOp><RelOp PhysicalOp="Compute Scalar" /></RelOp><RelOp PhysicalOp="RID Lookup"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" /></IndexScan><Predicate>{{comparison}}</Predicate></RelOp></RelOp></ShowPlanXML>
               """
         };
 

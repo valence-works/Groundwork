@@ -129,10 +129,10 @@ public sealed class SqliteBoundedMutationTests
     [Fact]
     public async Task Delete_is_bounded_exact_idempotent_and_rejects_operation_reuse()
     {
-        await using var fixture = await CreateAsync();
-        await fixture.SaveAsync("stale-a", "stale");
-        await fixture.SaveAsync("stale-b", "stale");
-        await fixture.SaveAsync("current", "current");
+        await using var fixture = await CreateAsync(includeCollection: true);
+        await fixture.SaveCollectionAsync("stale-a", "stale", "stale-a-element");
+        await fixture.SaveCollectionAsync("stale-b", "stale", "stale-b-element");
+        await fixture.SaveCollectionAsync("current", "current", "current-element");
         var request = Delete("prune-1", "stale");
 
         var completed = await fixture.Mutations.ExecuteAsync(request);
@@ -145,6 +145,7 @@ public sealed class SqliteBoundedMutationTests
         Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "current"));
         await Assert.ThrowsAsync<BoundedMutationOperationConflictException>(() =>
             fixture.Mutations.ExecuteAsync(Delete("prune-1", "current")));
+        Assert.Equal(1L, await fixture.CountCollectionElementsAsync());
     }
 
     [Fact]
@@ -815,9 +816,10 @@ public sealed class SqliteBoundedMutationTests
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
-        var (manifest, target) = CreateModel(scoped: true);
+        var (manifest, target) = CreateModel(scoped: true, includeCollection: true);
         await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
         var route = target.Routes.Single();
+        var elements = Assert.Single(route.CollectionElementStorages);
         var tenantA = new SqlitePhysicalDocumentStore(
             connection,
             manifest,
@@ -828,8 +830,8 @@ public sealed class SqliteBoundedMutationTests
             manifest,
             target.Routes,
             DocumentStoreAccess.Scoped(new StorageScope("tenant-b")));
-        await SaveAsync(tenantA, "same-id", "stale", 1);
-        await SaveAsync(tenantB, "same-id", "stale", 1);
+        await SaveCollectionAsync(tenantA, "same-id", "stale", "tenant-a-element");
+        await SaveCollectionAsync(tenantB, "same-id", "stale", "tenant-b-element");
 
         var result = await SqlitePhysicalMutationRuntime.Create(tenantA, manifest, route, target.Provider)
             .ExecuteAsync(Delete("tenant-a-prune", "stale"));
@@ -837,6 +839,9 @@ public sealed class SqliteBoundedMutationTests
         Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 1), result);
         Assert.Null(await tenantA.LoadAsync(DocumentKind, "same-id"));
         Assert.NotNull(await tenantB.LoadAsync(DocumentKind, "same-id"));
+        await using var count = connection.CreateCommand();
+        count.CommandText = $"SELECT COUNT(*) FROM {Q(elements.Storage.Name.Identifier)};";
+        Assert.Equal(1L, Convert.ToInt64(await count.ExecuteScalarAsync()));
     }
 
     [Fact]
