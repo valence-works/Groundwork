@@ -83,11 +83,15 @@ public sealed record BenchmarkConsumerEvidenceReport(
         ArgumentNullException.ThrowIfNull(machine);
         ArgumentNullException.ThrowIfNull(providers);
         ArgumentNullException.ThrowIfNull(layout);
-        var shape = report.DataShape ?? new BenchmarkDataShape(
-            configuration.DatasetSize,
-            0,
-            BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
+        if (report.Cases.Count == 0)
+            return [];
+        var shape = report.DataShape ?? configuration.DataShape ?? CreateDirectDataShape(report, configuration);
         shape.Validate();
+        if (report.Cases.Any(result => !shape.PayloadProfile.AppliesTo(result.Case.Workload)))
+        {
+            throw new InvalidOperationException(
+                "Consumer evidence cannot bind a workload to an inapplicable payload profile.");
+        }
         var results = report.Cases
             .OrderBy(result => result.Case.Identity, StringComparer.Ordinal)
             .Select(result =>
@@ -148,6 +152,25 @@ public sealed record BenchmarkConsumerEvidenceReport(
             .ToArray();
 
         return results;
+    }
+
+    private static BenchmarkDataShape CreateDirectDataShape(
+        BenchmarkRunReport report,
+        BenchmarkRunConfiguration configuration)
+    {
+        var profileIds = report.Cases
+            .Select(result => BenchmarkPayloadProfiles.For(result.Case.Workload).Id)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (profileIds.Length != 1)
+        {
+            throw new InvalidOperationException(
+                "Consumer evidence requires a fixed payload profile for every reported worker.");
+        }
+        return new BenchmarkDataShape(
+            configuration.DatasetSize,
+            BenchmarkPayloadProfiles.GetReviewed(profileIds[0]),
+            BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
     }
 
     /// <summary>

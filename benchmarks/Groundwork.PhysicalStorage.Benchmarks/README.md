@@ -6,10 +6,9 @@ the three physical storage forms. It materializes real manifests, creates real s
 production sessions and bounded-query translation, and records provider-native query plans.
 
 It does **not** complete issue #50. The scheduled protocol now carries the ratified 1K/100K/1M
-dataset dimension, the accepted one-warm-up/three-measured-process scheduled protocol, and a
-ratified selectivity policy: 10% is the mandatory indexed-query acceptance shape and 50% is a
-retained scan characterization. Concrete payload vectors remain explicit inputs until they are
-ratified. The harness contains no EF Core comparison, cannot promote
+dataset dimension, the accepted one-warm-up/three-measured-process scheduled protocol, a closed
+reviewed payload-profile binding, and a ratified selectivity policy: 10% is the mandatory
+indexed-query acceptance shape and 50% is a retained scan characterization. The harness contains no EF Core comparison, cannot promote
 baselines, and cannot make an Elsa migration go/no-go decision.
 
 ## Current correctness and plan gates
@@ -53,7 +52,7 @@ serialized as an immutable worker request and measured in a separate process:
 |---|---:|---:|
 | Seed | 20260713 | 20260713 |
 | Primary dataset | 250 | 1,000; 100,000; 1,000,000 |
-| Payload padding | 0 bytes | 0 bytes (explicit control value) |
+| Payload profile | reviewed workload binding | `ordinary-json-v1` for ordinary workloads; `storage-growth-1k-v1` for `storage-growth` |
 | Query selectivity | 1,000 basis points (mandatory index gate) | 1,000 basis points (mandatory index gate); 5,000 basis points (scan characterization) |
 | Untimed warm-up processes | 1 per tuple | 1 per tuple |
 | Independent measured processes | 1 | 3 |
@@ -67,9 +66,12 @@ serialized as an immutable worker request and measured in a separate process:
 | Default providers | SQLite | All four |
 | Storage forms | All three | All three |
 
-Use `--payload-padding-bytes`, `--selectivity-bps`, and `--independent-runs` to supply reviewed
-overrides without changing code. These values are recorded in worker requests, fingerprints, and
-consumer evidence. The reviewed 5,000-basis-point shape is the only non-gating characterization;
+Use `--payload-profiles`, `--selectivity-bps`, and `--independent-runs` to supply reviewed
+scheduled controls without changing code. Payload profiles are recorded in full in worker requests,
+configuration artifacts, data-shape identities, and consumer-evidence fingerprints. A legacy
+`--payload-padding-bytes` override remains available only to make non-promotable smoke diagnostics
+explicit; scheduled runs fail closed rather than accepting raw padding. The reviewed
+5,000-basis-point shape is the only non-gating characterization;
 every other selectivity retains the declared-index gate unless a later reviewed policy says
 otherwise. Providing payload values does not make a run promotable.
 
@@ -86,7 +88,7 @@ not perform candidate promotion or migration-decision gating.
 The scheduled cardinality is calculated, not inferred:
 
 - `4 providers × 3 forms × 3 dataset sizes = 36` shards;
-- each shard has `2 selectivity shapes × 14 workloads × (1 untimed warm-up + 3 measured repetitions) = 112` workers;
+- each shard has `2 selectivity shapes × 14 workloads × (1 untimed warm-up + 3 measured repetitions) = 112` workers; the reviewed payload profile is bound per workload, not multiplied into a second dimension;
 - the complete schedule therefore has `4,032` workers: `1,008` warm-up and `3,024` measured; and
 - the mandatory 30-second measured floor alone is `3,024 × 30 = 90,720 seconds`, or 25.2 aggregate
   measured hours before setup, seeding, validation, and artifact work.
@@ -123,7 +125,7 @@ dotnet run -c Release --project benchmarks/Groundwork.PhysicalStorage.Benchmarks
   --providers postgresql \
   --forms entity \
   --workloads indexed-query,mixed-compound-ordering \
-  --payload-padding-bytes 0,1024 \
+  --payload-profiles ordinary-json-v1,storage-growth-1k-v1 \
   --selectivity-bps 1000,5000 \
   --independent-runs 3
 ```
@@ -171,7 +173,7 @@ database-reported version, isolation strategy, pooling behavior, and session lif
 | `pagination-and-count` | Page and count operations with agreement asserted |
 | `backfill-migration` | Time materialization/backfill, then validate projection/query correctness outside timing |
 | `client-restart-validation` | Dispose/clear client-side state, recreate it, and verify durable reads |
-| `storage-growth` | Writes with fixed 1 KiB payload padding |
+| `storage-growth` | Writes with the declared `storage-growth-1k-v1` fixed 1 KiB payload profile |
 
 `client-reset-point-read-batch` resets client/provider state once before the batch. It does not flush
 the database buffer pool, operating-system page cache, or disk cache, and it is not cold-disk or

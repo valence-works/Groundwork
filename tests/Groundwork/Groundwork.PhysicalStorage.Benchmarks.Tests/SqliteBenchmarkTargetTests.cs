@@ -119,6 +119,53 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         Assert.Equal(5, execution.LogicalMutations);
     }
 
+    [Fact]
+    public async Task Storage_growth_consumes_the_declared_profile_instead_of_a_hidden_1KiB_override()
+    {
+        await using var reviewed = new SqliteBenchmarkTarget(
+            PhysicalStorageForm.SharedDocuments,
+            Guid.NewGuid().ToString("N")[..8],
+            scratch,
+            5);
+        await reviewed.InitializeAsync(CancellationToken.None);
+        await reviewed.SeedAsync(
+            BenchmarkProfiles.ReproducibleSeed,
+            new BenchmarkDataShape(
+                25,
+                BenchmarkPayloadProfiles.For(BenchmarkWorkload.StorageGrowth),
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints),
+            CancellationToken.None);
+        var reviewedExecution = await reviewed.ExecuteAsync(
+            BenchmarkWorkload.StorageGrowth,
+            iteration: 0,
+            operations: 1,
+            concurrency: 1,
+            CancellationToken.None);
+
+        await using var legacy = new SqliteBenchmarkTarget(
+            PhysicalStorageForm.SharedDocuments,
+            Guid.NewGuid().ToString("N")[..8],
+            scratch,
+            5);
+        await legacy.InitializeAsync(CancellationToken.None);
+        await legacy.SeedAsync(
+            BenchmarkProfiles.ReproducibleSeed,
+            new BenchmarkDataShape(
+                25,
+                BenchmarkPayloadProfiles.CreateLegacyPadding(0),
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints),
+            CancellationToken.None);
+        var legacyExecution = await legacy.ExecuteAsync(
+            BenchmarkWorkload.StorageGrowth,
+            iteration: 0,
+            operations: 1,
+            concurrency: 1,
+            CancellationToken.None);
+
+        Assert.True(reviewedExecution.LogicalPayloadBytes >= 1_024);
+        Assert.True(legacyExecution.LogicalPayloadBytes < 1_024);
+    }
+
     public ValueTask DisposeAsync()
     {
         if (Directory.Exists(scratch))

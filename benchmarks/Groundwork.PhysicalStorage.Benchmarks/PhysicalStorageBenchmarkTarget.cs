@@ -20,7 +20,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
     private long generatedId;
     private int seededCount;
     private int selectedDocumentCount;
-    private int payloadPaddingBytes;
+    private BenchmarkPayloadProfile payloadProfile = BenchmarkPayloadProfiles.CreateLegacyPadding(0);
 
     protected PhysicalStorageBenchmarkTarget(
         BenchmarkProvider provider,
@@ -61,7 +61,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
         ArgumentNullException.ThrowIfNull(shape);
         shape.Validate();
         var count = shape.DatasetSize;
-        payloadPaddingBytes = shape.PayloadPaddingBytes;
+        payloadProfile = shape.PayloadProfile;
         selectedDocumentCount = shape.GetSelectedDocumentCount();
         var random = new Random(seed);
         const int batchSize = 100;
@@ -79,7 +79,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
                     status,
                     rank,
                     index % 5 == 0 ? "priority" : "ordinary",
-                    payloadPaddingBytes);
+                    payloadProfile.PaddingBytes);
                 var result = await unitOfWork.SaveAsync(
                     Save($"seed-{index:D8}", payload),
                     cancellationToken);
@@ -186,7 +186,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
         {
             var id = NewId($"prepare-{workload}");
             RequireStatus(await TenantA.SaveAsync(
-                    Save(id, Payload("open", index, "prepared", payloadPaddingBytes)),
+                    Save(id, Payload("open", index, "prepared", payloadProfile.PaddingBytes)),
                     cancellationToken),
                 DocumentStoreWriteStatus.Saved,
                 "workload preparation");
@@ -218,7 +218,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
             BenchmarkWorkload.MixedCompoundOrdering => await IndexedQueriesAsync(
                 operations, includeOrdering: true, operationLatencies, cancellationToken),
             BenchmarkWorkload.Insert => await InsertsAsync(
-                operations, payloadPaddingBytes, operationLatencies, cancellationToken),
+                operations, payloadProfile.PaddingBytes, operationLatencies, cancellationToken),
             BenchmarkWorkload.Update => await UpdatesAsync(operations, operationLatencies, cancellationToken),
             BenchmarkWorkload.Delete => await DeletesAsync(operations, operationLatencies, cancellationToken),
             BenchmarkWorkload.UnitOfWork => await UnitOfWorkAsync(operations, operationLatencies, cancellationToken),
@@ -236,7 +236,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
                 operationLatencies),
             BenchmarkWorkload.StorageGrowth => await InsertsAsync(
                 operations,
-                payloadPadding: payloadPaddingBytes == 0 ? 1_024 : payloadPaddingBytes,
+                payloadPadding: payloadProfile.PaddingBytes,
                 operationLatencies,
                 cancellationToken),
             _ => throw new ArgumentOutOfRangeException(nameof(workload), workload, null)
@@ -430,7 +430,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
         for (var index = 0; index < operations; index++)
         {
             var id = Dequeue(queue, BenchmarkWorkload.Update);
-            var payload = Payload("closed", index, "updated", payloadPaddingBytes);
+            var payload = Payload("closed", index, "updated", payloadProfile.PaddingBytes);
             payloadBytes += Encoding.UTF8.GetByteCount(payload);
             var result = await ObserveAsync(
                 () => TenantA.SaveAsync(Save(id, payload, expectedVersion: 1), cancellationToken),
@@ -493,7 +493,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
                 cancellationToken);
             for (var index = 0; index < operations; index++)
             {
-                var payload = Payload("open", index, "uow", payloadPaddingBytes);
+                var payload = Payload("open", index, "uow", payloadProfile.PaddingBytes);
                 payloadBytes += Encoding.UTF8.GetByteCount(payload);
                 var result = await unitOfWork.SaveAsync(
                     Save(NewId("uow"), payload),
@@ -522,7 +522,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
             var id = Dequeue(queue, BenchmarkWorkload.OptimisticConcurrency);
             var result = await ObserveAsync(
                 () => TenantA.SaveAsync(
-                    Save(id, Payload("closed", index, "stale", payloadPaddingBytes), expectedVersion: 0),
+                    Save(id, Payload("closed", index, "stale", payloadProfile.PaddingBytes), expectedVersion: 0),
                     cancellationToken),
                 operationLatencies);
             RequireStatus(
@@ -556,7 +556,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
             var attempts = Enumerable.Range(0, concurrency).Select(async index =>
             {
                 await start.Task.WaitAsync(cancellationToken);
-                var payload = Payload("open", index, "concurrent", payloadPaddingBytes);
+                var payload = Payload("open", index, "concurrent", payloadProfile.PaddingBytes);
                 var timestamp = Stopwatch.GetTimestamp();
                 var result = await TenantA.SaveAsync(Save(id, payload), cancellationToken);
                 return (Attempt: index, Result: result, Payload: payload, Latency: ElapsedNanoseconds(timestamp));

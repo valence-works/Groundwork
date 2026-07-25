@@ -49,12 +49,13 @@ public sealed class BenchmarkRunner
         request.Configuration.Validate();
         if (request.Workloads.Count == 0)
             throw new ArgumentException("At least one workload must be selected.", nameof(request));
-        var dataShape = request.DataShape ??
-                        new BenchmarkDataShape(
-                            request.Configuration.DatasetSize,
-                            0,
-                            BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
+        var dataShape = request.DataShape ?? CreateDirectDataShape(request);
         dataShape.Validate();
+        if (request.Workloads.Any(workload => !dataShape.PayloadProfile.AppliesTo(workload)))
+        {
+            throw new InvalidOperationException(
+                "The worker data-shape payload profile does not apply to every selected workload.");
+        }
         var planAssertionMode = BenchmarkSelectivityPolicy.PlanAssertionModeFor(dataShape);
         var executionConfiguration = request.Configuration with { DataShape = dataShape };
         executionConfiguration.Validate();
@@ -371,6 +372,24 @@ public sealed class BenchmarkRunner
             }
             throw;
         }
+    }
+
+    private static BenchmarkDataShape CreateDirectDataShape(BenchmarkRunRequest request)
+    {
+        var profiles = request.Workloads
+            .Select(BenchmarkPayloadProfiles.For)
+            .Select(profile => profile.Id)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (profiles.Length != 1)
+        {
+            throw new InvalidOperationException(
+                "A direct benchmark run spanning multiple workload payload profiles must be expanded into worker requests first.");
+        }
+        return new BenchmarkDataShape(
+            request.Configuration.DatasetSize,
+            BenchmarkPayloadProfiles.GetReviewed(profiles[0]),
+            BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
     }
 
     private static void ValidateExecution(WorkloadExecution execution, BenchmarkCase benchmarkCase)

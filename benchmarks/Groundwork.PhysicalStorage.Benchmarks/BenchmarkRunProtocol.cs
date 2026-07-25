@@ -45,6 +45,19 @@ public static class BenchmarkRunProtocol
             throw new InvalidOperationException("Each worker must carry one fixed data shape and no matrix dimensions.");
         if (invocation.Request.Configuration.DatasetSize != invocation.Request.DataShape.DatasetSize)
             throw new InvalidOperationException("Worker dataset size must match its fixed data shape.");
+        invocation.Request.DataShape.Validate();
+        var workload = invocation.Request.Workloads.Single();
+        if (!invocation.Request.DataShape.PayloadProfile.AppliesTo(workload))
+        {
+            throw new InvalidOperationException(
+                "Worker payload profile does not apply to its selected workload.");
+        }
+        if (invocation.Request.Configuration.Mode == BenchmarkRunMode.Scheduled &&
+            !invocation.Request.DataShape.PayloadProfile.Reviewed)
+        {
+            throw new InvalidOperationException(
+                "Scheduled worker payload profile must be reviewed.");
+        }
     }
 
     public static IReadOnlyList<BenchmarkWorkerInvocation> CreateInvocations(
@@ -65,13 +78,19 @@ public static class BenchmarkRunProtocol
         }
         var invocations = new List<BenchmarkWorkerInvocation>();
         var ordinal = 0;
-        foreach (var shape in dimensions.CreateShapes())
+        foreach (var provider in request.Configuration.Providers)
         {
-            foreach (var provider in request.Configuration.Providers)
+            foreach (var form in request.Configuration.StorageForms)
             {
-                foreach (var form in request.Configuration.StorageForms)
+                foreach (var workload in request.Workloads)
                 {
-                    foreach (var workload in request.Workloads)
+                    var shapes = dimensions.CreateShapes(workload);
+                    if (shapes.Count == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"No selected benchmark payload profile applies to workload '{workload}'.");
+                    }
+                    foreach (var shape in shapes)
                     {
                         var workerConfiguration = request.Configuration with
                         {
@@ -80,41 +99,41 @@ public static class BenchmarkRunProtocol
                             StorageForms = [form],
                             DataShape = null
                         };
-                        Add(BenchmarkExecutionRole.UntimedWarmup, independentRun: 0);
-                        for (var independentRun = 1; independentRun <= dimensions.IndependentRuns; independentRun++)
-                            Add(BenchmarkExecutionRole.Measured, independentRun);
+                            Add(BenchmarkExecutionRole.UntimedWarmup, independentRun: 0);
+                            for (var independentRun = 1; independentRun <= dimensions.IndependentRuns; independentRun++)
+                                Add(BenchmarkExecutionRole.Measured, independentRun);
 
-                        void Add(BenchmarkExecutionRole role, int independentRun)
-                        {
-                            var invocation = new BenchmarkWorkerInvocation(
-                                ProtocolVersion,
-                                runGroupId,
-                                ++ordinal,
-                                independentRun,
-                                role,
-                                request with
-                                {
-                                    Configuration = workerConfiguration,
-                                    Workloads = [workload],
-                                    OutputDirectory = null,
-                                    Dimensions = null,
-                                    DataShape = shape,
-                                    IndependentRun = independentRun,
-                                    Role = role,
-                                    BaselineRun = null,
-                                    RegressionConfirmationRun = false
-                                })
+                            void Add(BenchmarkExecutionRole role, int independentRun)
                             {
-                                ExpectedGitCommit = expectedGit.Commit,
-                                ExpectedGitTreeDigest = expectedGit.TreeDigest
-                            };
-                            ValidateInvocation(invocation);
-                            invocations.Add(invocation);
+                                var invocation = new BenchmarkWorkerInvocation(
+                                    ProtocolVersion,
+                                    runGroupId,
+                                    ++ordinal,
+                                    independentRun,
+                                    role,
+                                    request with
+                                    {
+                                        Configuration = workerConfiguration,
+                                        Workloads = [workload],
+                                        OutputDirectory = null,
+                                        Dimensions = null,
+                                        DataShape = shape,
+                                        IndependentRun = independentRun,
+                                        Role = role,
+                                        BaselineRun = null,
+                                        RegressionConfirmationRun = false
+                                    })
+                                {
+                                    ExpectedGitCommit = expectedGit.Commit,
+                                    ExpectedGitTreeDigest = expectedGit.TreeDigest
+                                };
+                                ValidateInvocation(invocation);
+                                invocations.Add(invocation);
+                            }
                         }
                     }
                 }
             }
-        }
         return invocations;
     }
 
@@ -125,5 +144,8 @@ public static class BenchmarkRunProtocol
                 [request.Configuration.DatasetSize],
                 PayloadPaddingBytes: [0],
                 QuerySelectivityBasisPoints: [BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints],
-                IndependentRuns: 1);
+                IndependentRuns: 1)
+            {
+                PayloadProfileIds = BenchmarkPayloadProfiles.DefaultReviewedIds
+            };
 }
