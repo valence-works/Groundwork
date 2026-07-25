@@ -42,6 +42,10 @@ public sealed record PhysicalRelationshipMaterializationIdentity(
                     System.Globalization.CultureInfo.InvariantCulture),
                 ((int)targetRoute.ScopePolicy).ToString(
                     System.Globalization.CultureInfo.InvariantCulture),
+                ((int)sourceRoute.Envelope.Identity.StringCasePolicy).ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                sourceRoute.Envelope.Identity.ComparisonAlgorithmId,
+                sourceRoute.Envelope.Identity.LookupAlgorithmId,
                 targetRoute.Envelope.Identity.ComparisonAlgorithmId,
                 targetRoute.Envelope.Identity.LookupAlgorithmId)))).ToLowerInvariant();
         return new(
@@ -138,7 +142,7 @@ public sealed class ManifestExecutableRouteSet
         StorageManifest manifest,
         IReadOnlyList<ExecutableStorageRoute> routes)
     {
-        Manifest = manifest;
+        Manifest = Snapshot(manifest);
         Routes = Array.AsReadOnly(routes
             .OrderBy(route => route.StorageUnit.Value, StringComparer.Ordinal)
             .ToArray());
@@ -156,6 +160,35 @@ public sealed class ManifestExecutableRouteSet
         StorageManifest manifest,
         IReadOnlyList<ExecutableStorageRoute> routes) =>
         new(manifest, routes);
+
+    private static StorageManifest Snapshot(StorageManifest manifest) =>
+        new(
+            manifest.Identity,
+            manifest.Owner,
+            manifest.Version,
+            manifest.StorageUnits.Select(Snapshot).ToArray(),
+            manifest.RequiredCapabilities.ToHashSet(StringComparer.Ordinal),
+            manifest.CompatibilityNotes.ToArray())
+        {
+            SharedDocumentStorages = manifest.SharedDocumentStorages.ToArray(),
+            Relationships = manifest.Relationships.ToArray()
+        };
+
+    private static StorageUnit Snapshot(StorageUnit unit) =>
+        unit with
+        {
+            Indexes = unit.Indexes.ToArray(),
+            Queries = unit.Queries.ToArray(),
+            PhysicalStorage = unit.PhysicalStorage is null
+                ? null
+                : new StorageUnitPhysicalStorage(
+                    unit.PhysicalStorage.ProvisioningMode,
+                    unit.PhysicalStorage.Policy,
+                    unit.PhysicalStorage.LogicalIndexes,
+                    unit.PhysicalStorage.BoundedQueries,
+                    unit.PhysicalStorage.NameOverrides,
+                    unit.PhysicalStorage.BoundedMutations)
+        };
 }
 
 public sealed class ManifestExecutableRouteSetCompilationResult
@@ -238,15 +271,20 @@ public static class PhysicalRelationshipProviderAdmission
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(provider);
-        if (supportsRelationshipMaterialization || manifest.Relationships.Count == 0)
+        var relationshipIdentities = manifest.Relationships
+            .Select(relationship => relationship.Identity)
+            .Concat(manifest.StorageUnits
+                .SelectMany(unit => unit.PhysicalStorage?.BoundedMutations ?? [])
+                .SelectMany(mutation => mutation.RelationshipGuards)
+                .Select(guard => guard.RelationshipIdentity))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (supportsRelationshipMaterialization || relationshipIdentities.Length == 0)
             return;
         throw new PhysicalRelationshipProviderNotSupportedException(
             provider,
-            manifest.Relationships
-                .Select(relationship => relationship.Identity)
-                .Distinct(StringComparer.Ordinal)
-                .Order(StringComparer.Ordinal)
-                .ToArray());
+            relationshipIdentities);
     }
 }
 

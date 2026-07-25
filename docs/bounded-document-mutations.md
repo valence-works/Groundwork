@@ -104,15 +104,15 @@ exact usable equality prefix. Missing references remain absent, while blank or m
 values fail closed.
 
 The generated relationship materialization and target-key fence identities rotate when reference
-paths, indexes, scope, case policy, or target identity algorithms change. Provider-native physical
-renames do not rotate those identities.
+paths, indexes, scope, case policy, or source/target identity algorithms change. Provider-native
+physical renames do not rotate those identities.
 
 This checkpoint defines Core admission only. SQLite, SQL Server, PostgreSQL, and MongoDB currently
-advertise no relationship-materialization capability and reject any relationship-bearing manifest
-with `GW-RELATIONSHIP-012` before schema or document I/O. Guarded mutation handler certification
-also fails closed. A provider may advertise the capability only after its native relationship
-materialization, target-key fence, atomic execution, runtime evidence, and recovery behavior pass
-the provider conformance contract.
+advertise no relationship-materialization capability and reject any manifest containing a
+relationship declaration or relationship guard with `GW-RELATIONSHIP-012` before schema or
+document I/O. Guarded mutation handler certification also fails closed. A provider may advertise
+the capability only after its native relationship materialization, target-key fence, atomic
+execution, runtime evidence, and recovery behavior pass the provider conformance contract.
 
 Relational providers retain all five ledger identity values for exact collision verification while
 using provider-generated SHA-256 keys for the primary key. SQL Server hashes each unbounded

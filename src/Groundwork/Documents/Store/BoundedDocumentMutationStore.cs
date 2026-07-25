@@ -138,7 +138,16 @@ public static class BoundedMutationRequestFingerprint
                 "\u000f",
                 canonicalPlan,
                 "relationship-plan-v1",
-                Encode(plan.Fingerprint));
+                string.Join(
+                    "\u000e",
+                    plan.RelationshipGuards
+                        .OrderBy(guard => guard.Kind)
+                        .ThenBy(guard => guard.CanonicalIdentity, StringComparer.Ordinal)
+                        .Select(guard => string.Join(
+                            "\u000d",
+                            Encode(((int)guard.Kind).ToString(
+                                System.Globalization.CultureInfo.InvariantCulture)),
+                            Encode(guard.CanonicalIdentity)))));
         }
         var canonical = string.Join(
             "\u001c",
