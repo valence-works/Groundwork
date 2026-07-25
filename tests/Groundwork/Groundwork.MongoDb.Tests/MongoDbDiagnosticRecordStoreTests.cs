@@ -473,7 +473,8 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
         {
             Fields = [],
             Limits = TestDefinition.Limits with { MaxBatchRecords = 20, MaxPayloadBytes = 1_048_576 },
-            LogicalHighWaterField = null
+            LogicalHighWaterField = null,
+            GroupReductionProfiles = []
         };
         var fixture = new MongoDbDiagnosticRecordStoreFixture(replicaSet.PrimaryClient, replicaSet.SecondaryClient);
         var store = (MongoDbDiagnosticRecordStore)fixture.OpenStore(definition);
@@ -544,6 +545,7 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
         {
             LogicalHighWaterField = null,
             Fields = Enumerable.Range(0, 10).Select(index => Field($"message-{index}")).ToArray(),
+            GroupReductionProfiles = [],
             Limits = TestDefinition.Limits with
             {
                 MaxPayloadBytes = 1_000_000,

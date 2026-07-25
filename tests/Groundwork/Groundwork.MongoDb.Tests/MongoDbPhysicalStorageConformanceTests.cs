@@ -2137,6 +2137,144 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Unit_of_work_against_a_pre_fence_database_prepares_and_touches_the_fence()
+    {
+        var database = Database();
+        var model = CollectionEvolutionModel(includeCollection: false);
+        var materializer = new MongoDbGroundworkMaterializer(database);
+        await materializer.MaterializeAsync(model);
+        await database.DropCollectionAsync(MongoDbCollectionRolloutFence.CollectionName);
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.NoChanges,
+            (await materializer.MaterializeAsync(model)).Outcome);
+        var route = Assert.Single(model.Routes);
+        var store = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+
+        await using (var transaction = await store.BeginAsync(DocumentCommitScope.Of("workItem")))
+        {
+            using (var collections = await database.ListCollectionNamesAsync())
+                Assert.Contains(
+                    MongoDbCollectionRolloutFence.CollectionName,
+                    await collections.ToListAsync());
+            Assert.Equal(
+                0,
+                await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+                    .CountDocumentsAsync(Builders<BsonDocument>.Filter.Empty));
+
+            Assert.Equal(
+                DocumentStoreWriteStatus.Saved,
+                (await transaction.SaveAsync(new SaveDocumentRequest(
+                    "workItem",
+                    "unit-of-work",
+                    "1",
+                    """{"category":"uow"}"""))).Status);
+            await transaction.CommitAsync();
+        }
+
+        var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .SingleAsync();
+        Assert.Equal(MongoDbCollectionRolloutFence.Signature(route), fence["required_signature"].AsString);
+        Assert.Equal(1, fence["activity"].ToInt64());
+        Assert.NotNull(await store.LoadAsync("workItem", "unit-of-work"));
+    }
+
+    [Fact]
+    public async Task Concurrent_writers_retry_the_shared_rollout_fence_until_every_distinct_write_commits()
+    {
+        const int writerCount = 16;
+        var database = Database();
+        var model = CollectionEvolutionModel(includeCollection: false);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var route = Assert.Single(model.Routes);
+        var initialFence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .SingleAsync();
+        Assert.Equal(MongoDbCollectionRolloutFence.Signature(route), initialFence["required_signature"].AsString);
+        Assert.Equal(0, initialFence["activity"].ToInt64());
+        var databaseName = database.DatabaseNamespace.DatabaseName;
+        var readyWriters = 0;
+        var transactionAttempts = new int[writerCount];
+        var releaseWriters = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var barrierTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        async ValueTask SynchronizeFirstFenceTouch(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref readyWriters) == writerCount)
+                releaseWriters.TrySetResult();
+            try
+            {
+                await releaseWriters.Task.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"Only {Volatile.Read(ref readyWriters)} of {writerCount} writers reached the rollout-fence barrier.");
+            }
+        }
+
+        var clients = Enumerable.Range(0, writerCount)
+            .Select(_ => new MongoClient(container.GetConnectionString()))
+            .ToArray();
+
+        try
+        {
+            var stores = clients.Select((client, writerIndex) => new MongoDbPhysicalDocumentStore(
+                    client.GetDatabase(databaseName),
+                    model,
+                    DocumentStoreAccess.Scoped(new("tenant-a")),
+                    scopeObserver: null,
+                    options: null,
+                    TimeProvider.System,
+                    MongoDbPhysicalDocumentStoreExecutionHooks.None with
+                    {
+                        TransactionBodyStarting = (_, _, _) =>
+                        {
+                            Interlocked.Increment(ref transactionAttempts[writerIndex]);
+                            return ValueTask.CompletedTask;
+                        },
+                        RolloutFenceExistingBeforeTouch = cancellationToken =>
+                            Volatile.Read(ref transactionAttempts[writerIndex]) == 1
+                                ? SynchronizeFirstFenceTouch(cancellationToken)
+                                : ValueTask.CompletedTask
+                    }))
+                .ToArray();
+            var writes = await Task.WhenAll(stores.Select((store, index) =>
+                store.SaveAsync(new SaveDocumentRequest(
+                    "workItem",
+                    $"writer-{index:D2}",
+                    "1",
+                    $$"""{"category":"writer-{{index:D2}}"}"""),
+                    barrierTimeout.Token)));
+
+            Assert.All(writes, result => Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status));
+            Assert.Equal(writerCount, readyWriters);
+            Assert.Contains(transactionAttempts, attempts => attempts > 1);
+            foreach (var (store, index) in stores.Select((store, index) => (store, index)))
+                Assert.NotNull(await store.LoadAsync("workItem", $"writer-{index:D2}"));
+
+            var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+                .Find(Builders<BsonDocument>.Filter.Eq(
+                    "_id",
+                    MongoDbCollectionRolloutFence.Identity(route)))
+                .SingleAsync();
+            Assert.Equal(writerCount, fence["activity"].ToInt64());
+        }
+        finally
+        {
+            foreach (var client in clients)
+                client.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task Applied_state_rejects_collection_rollout_fence_drift()
     {
         var database = Database();

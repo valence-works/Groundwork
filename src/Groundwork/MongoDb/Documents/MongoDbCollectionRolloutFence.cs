@@ -41,9 +41,11 @@ internal static class MongoDbCollectionRolloutFence
         IClientSessionHandle session,
         ExecutableStorageRoute route,
         Func<CancellationToken, ValueTask> missingBeforeInsert,
+        Func<CancellationToken, ValueTask> existingBeforeTouch,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(missingBeforeInsert);
+        ArgumentNullException.ThrowIfNull(existingBeforeTouch);
         var fences = database.GetCollection<BsonDocument>(CollectionName);
         var identity = Identity(route);
         var expected = Signature(route);
@@ -79,6 +81,7 @@ internal static class MongoDbCollectionRolloutFence
         var actual = current.GetValue(RequiredSignature, "").AsString;
         if (!string.Equals(actual, expected, StringComparison.Ordinal))
             throw UpgradeRequired(route, expected, actual);
+        await existingBeforeTouch(cancellationToken);
         var touched = await fences.UpdateOneAsync(
             session,
             Builders<BsonDocument>.Filter.Eq("_id", identity) &
