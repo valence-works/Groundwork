@@ -33,6 +33,27 @@ public sealed class SqliteDiagnosticRecordStoreTests : RelationalDiagnosticRecor
     }
 
     [Fact]
+    public void Grouped_query_command_selects_the_newest_scoped_records_before_reduction()
+    {
+        var fixture = new SqliteDiagnosticRecordStoreFixture();
+        var store = Assert.IsType<SqliteDiagnosticRecordStore>(fixture.OpenStore(TestDefinition));
+        var command = store.Inner.BuildGroupQueryCommand(
+            new(
+                new("tenant-a", "shell-a"),
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"),
+                InputRecordLimit: 2),
+            snapshotHighWater: 42);
+
+        Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY r.cursor DESC", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("LIMIT @inputLimit", command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(2, command.Parameters["inputLimit"]);
+    }
+
+    [Fact]
     public void Structured_native_rows_remain_compatible_with_seek_recognizer()
     {
         Assert.True(SqliteDiagnosticRecordStoreFixture.UsesSeekPlan(
@@ -219,7 +240,8 @@ public sealed class SqliteDiagnosticRecordMaterializerTests
                         definition.Stream,
                         "service-groups",
                         10,
-                        new("start")));
+                        new("start"),
+                        InputRecordLimit: 10));
 
             Assert.Equal(DiagnosticRecordPlanOperation.GroupedQuery, plan.Operation);
             Assert.Equal(DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan, plan.Format);
@@ -1163,28 +1185,27 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
             return false;
         var rowsById = rows.ToDictionary(row => row.Id);
 
-        foreach (var reduction in rows.Where(row =>
-                     row.Detail.StartsWith("MATERIALIZE reducer_", StringComparison.Ordinal)))
-        {
-            var subtree = rows
-                .Where(row => IsDescendantOrSelf(row, reduction.Id, rowsById))
+        var hasBoundedInputWindow = rows
+            .Where(row => row.Detail.Equals("MATERIALIZE input_window", StringComparison.Ordinal))
+            .Any(window => rows
+                .Where(row => IsDescendantOrSelf(row, window.Id, rowsById))
                 .Select(row => row.Detail)
-                .ToArray();
-            var hasScopedRecordAccess = subtree.Any(line =>
+                .Any(line =>
                 line.Contains("SEARCH r ", StringComparison.Ordinal) &&
                 line.Contains("groundwork_diagnostic_records", StringComparison.Ordinal) &&
-                HasScopeConstraints(line));
-            var hasScopedFieldAccess = subtree.Any(line =>
+                HasScopeConstraints(line)));
+        var hasScopedFieldAccess = rows.Select(row => row.Detail).Any(line =>
                 line.Contains("SEARCH ", StringComparison.Ordinal) &&
                 line.Contains("groundwork_diagnostic_fields", StringComparison.Ordinal) &&
                 HasScopeConstraints(line));
-            var hasAggregate = subtree.Any(line =>
-                line.Equals("USE TEMP B-TREE FOR GROUP BY", StringComparison.Ordinal));
-            if (hasScopedRecordAccess && hasScopedFieldAccess && hasAggregate)
-                return true;
-        }
+        var hasAggregate = rows
+            .Where(row => row.Detail.StartsWith("MATERIALIZE reducer_", StringComparison.Ordinal))
+            .Any(reduction => rows
+                .Where(row => IsDescendantOrSelf(row, reduction.Id, rowsById))
+                .Select(row => row.Detail)
+                .Any(line => line.Equals("USE TEMP B-TREE FOR GROUP BY", StringComparison.Ordinal)));
 
-        return false;
+        return hasBoundedInputWindow && hasScopedFieldAccess && hasAggregate;
     }
 
     public ValueTask<IReadOnlyList<string>> ReadComparisonKeysAsync(

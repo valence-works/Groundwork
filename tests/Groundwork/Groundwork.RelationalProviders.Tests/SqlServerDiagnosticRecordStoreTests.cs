@@ -40,6 +40,27 @@ public sealed class SqlServerDiagnosticRecordStoreTests(SqlServerDiagnosticConta
     }
 
     [Fact]
+    public void Grouped_query_command_selects_the_newest_scoped_records_before_reduction()
+    {
+        var fixture = (SqlServerDiagnosticRecordStoreFixture)CreateServerFixture();
+        var store = Assert.IsType<SqlServerDiagnosticRecordStore>(fixture.OpenStore(TestDefinition));
+        var command = store.Inner.BuildGroupQueryCommand(
+            new(
+                new("tenant-a", "shell-a"),
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"),
+                InputRecordLimit: 2),
+            snapshotHighWater: 42);
+
+        Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("SELECT TOP (@inputLimit)", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY r.[cursor] DESC", command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(2, command.Parameters["inputLimit"]);
+    }
+
+    [Fact]
     public async Task Materializer_uses_native_binary_utf8_text_and_all_durable_tables()
     {
         var fixture = (SqlServerDiagnosticRecordStoreFixture)CreateServerFixture();
@@ -316,7 +337,8 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
                     HasScopedTableAccess(
                         aggregate,
                         ns,
-                        RelationalDiagnosticRecordSchema.FieldsTable))
+                        RelationalDiagnosticRecordSchema.FieldsTable) &&
+                    HasBoundedScopedInputWindow(aggregate, ns))
                 {
                     return true;
                 }
@@ -325,6 +347,13 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
 
         return false;
     }
+
+    private static bool HasBoundedScopedInputWindow(XElement aggregate, XNamespace ns) =>
+        aggregate.Descendants(ns + "RelOp").Any(operation =>
+            operation.Attribute("LogicalOp")?.Value == "Top" &&
+            operation.DescendantsAndSelf().Attributes().Any(attribute =>
+                attribute.Value.Contains("@inputLimit", StringComparison.Ordinal)) &&
+            HasScopedTableAccess(operation, ns, RelationalDiagnosticRecordSchema.RecordsTable));
 
     private static bool HasScopedTableAccess(XElement aggregate, XNamespace ns, string table) =>
         aggregate.Descendants(ns + "RelOp").Any(operation =>
@@ -595,11 +624,16 @@ public sealed class SqlServerDiagnosticPlanRecognizerTests
 
     private static string ScopedInputs() =>
         $"""
-         <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
-           <IndexScan>
-             <Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" />
-             <SeekPredicates>{ScopeColumns()}</SeekPredicates>
-           </IndexScan>
+         <RelOp LogicalOp="Top" PhysicalOp="Top">
+           <Top>
+             <TopExpression><ScalarOperator ScalarString="@inputLimit" /></TopExpression>
+             <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
+               <IndexScan>
+                 <Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" />
+                 <SeekPredicates>{ScopeColumns()}</SeekPredicates>
+               </IndexScan>
+             </RelOp>
+           </Top>
          </RelOp>
          <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
            <IndexScan>

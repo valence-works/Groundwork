@@ -64,7 +64,29 @@ public sealed class PostgreSqlDiagnosticRecordStoreTests(PostgreSqlDiagnosticCon
                 TestDefinition.Stream,
                 "service-summary",
                 10,
-                new("start"))).AsTask());
+                new("start"),
+                InputRecordLimit: 100)).AsTask());
+    }
+
+    [Fact]
+    public void Grouped_query_command_selects_the_newest_scoped_records_before_reduction()
+    {
+        var fixture = (PostgreSqlDiagnosticRecordStoreFixture)CreateServerFixture();
+        var store = Assert.IsType<PostgreSqlDiagnosticRecordStore>(fixture.OpenStore(TestDefinition));
+        var command = store.Inner.BuildGroupQueryCommand(
+            new(
+                new("tenant-a", "shell-a"),
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"),
+                InputRecordLimit: 2),
+            snapshotHighWater: 42);
+
+        Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY r.cursor DESC", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("LIMIT @inputLimit", command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(2, command.Parameters["inputLimit"]);
     }
 
     [Fact]
@@ -580,6 +602,11 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
                     candidate => IsScopedRelationAccess(
                         candidate,
                         RelationalDiagnosticRecordSchema.FieldsTable),
+                    []) &&
+                FindInPlanLineage(
+                    element,
+                    planRoot,
+                    candidate => IsBoundedScopedInputWindow(candidate, planRoot),
                     []))
             {
                 return true;
@@ -602,6 +629,20 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
 
         return false;
     }
+
+    private static bool IsBoundedScopedInputWindow(JsonElement element, JsonElement planRoot) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty("Node Type", out var nodeType) &&
+        nodeType.GetString() == "Limit" &&
+        FindInPlanLineage(
+            element,
+            planRoot,
+            IsNewestScopedRecordAccess,
+            []);
+
+    private static bool IsNewestScopedRecordAccess(JsonElement element) =>
+        IsScopedRelationAccess(element, RelationalDiagnosticRecordSchema.RecordsTable) &&
+        HasPropertyValue(element, "Scan Direction", "Backward");
 
     private static bool FindInPlanLineage(
         JsonElement element,
@@ -742,10 +783,25 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
         var plan = GroupedPlan(
             $$"""
               {
-                "Node Type": "Aggregate",
+                "Node Type": "Sort",
                 "Plans": [
-                  {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
-                  {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "f")}}
+                  {
+                    "Node Type": "Limit",
+                    "Subplan Name": "CTE input_window",
+                    "Plans": [{{NewestRecordSeek()}}]
+                  },
+                  {
+                    "Node Type": "Nested Loop",
+                    "Subplan Name": "CTE base_records",
+                    "Plans": [
+                      {"Node Type": "CTE Scan", "CTE Name": "input_window"},
+                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
+                    ]
+                  },
+                  {
+                    "Node Type": "Aggregate",
+                    "Plans": [{"Node Type": "CTE Scan", "CTE Name": "base_records"}]
+                  }
                 ]
               }
               """);
@@ -762,10 +818,15 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
                 "Node Type": "Sort",
                 "Plans": [
                   {
+                    "Node Type": "Limit",
+                    "Subplan Name": "CTE input_window",
+                    "Plans": [{{NewestRecordSeek()}}]
+                  },
+                  {
                     "Node Type": "Nested Loop",
                     "Subplan Name": "CTE base_records",
                     "Plans": [
-                      {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
+                      {"Node Type": "CTE Scan", "CTE Name": "input_window"},
                       {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
                     ]
                   },
@@ -815,6 +876,11 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
                       {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
                       {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
                     ]
+                  },
+                  {
+                    "Node Type": "Limit",
+                    "Subplan Name": "CTE input_window",
+                    "Plans": [{{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}}]
                   },
                   {
                     "Node Type": "Aggregate",
@@ -932,6 +998,17 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
             "Relation Name": "{{relation}}",
             "Alias": "{{alias}}",
             "Index Cond": "({{alias}}.tenant_id = 'tenant-a' AND {{alias}}.scope_id = 'shell-a' AND {{alias}}.stream_id = 'logs')"
+          }
+          """;
+
+    private static string NewestRecordSeek() =>
+        $$"""
+          {
+            "Node Type": "Index Scan",
+            "Scan Direction": "Backward",
+            "Relation Name": "{{RelationalDiagnosticRecordSchema.RecordsTable}}",
+            "Alias": "r",
+            "Index Cond": "(r.tenant_id = 'tenant-a' AND r.scope_id = 'shell-a' AND r.stream_id = 'logs' AND r.cursor <= 10)"
           }
           """;
 }

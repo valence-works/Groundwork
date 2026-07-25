@@ -90,6 +90,7 @@ public sealed record DiagnosticRecordPhysicalSchemaState(
             writer.WriteNumber("maxRecordIdBytes", definition.Limits.MaxRecordIdBytes);
             writer.WriteNumber("maxFieldsPerRecord", definition.Limits.MaxFieldsPerRecord);
             writer.WriteNumber("maxQueryLimit", definition.Limits.MaxQueryLimit);
+            writer.WriteNumber("maxGroupedQueryInputRecords", definition.Limits.MaxGroupedQueryInputRecords);
             writer.WriteNumber("maxPredicateNodes", definition.Limits.MaxPredicateNodes);
             writer.WriteNumber("maxPredicateValues", definition.Limits.MaxPredicateValues);
             writer.WriteNumber("maxJsonDepth", definition.Limits.MaxJsonDepth);

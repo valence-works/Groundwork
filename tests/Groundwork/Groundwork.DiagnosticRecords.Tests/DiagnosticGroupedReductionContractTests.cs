@@ -64,6 +64,29 @@ public sealed class DiagnosticGroupedReductionContractTests
     }
 
     [Fact]
+    public void Group_query_requires_a_positive_stream_bounded_input_window()
+    {
+        var definition = Definition(Profile()) with
+        {
+            Limits = new(MaxGroupedQueryInputRecords: 64)
+        };
+
+        var missing = Assert.Throws<DiagnosticRecordValidationException>(() =>
+            DiagnosticRecordGroupQueryValidator.Validate(
+                Query() with { InputRecordLimit = 0 },
+                definition,
+                SupportedHandler.Instance));
+        var excessive = Assert.Throws<DiagnosticRecordValidationException>(() =>
+            DiagnosticRecordGroupQueryValidator.Validate(
+                Query() with { InputRecordLimit = 65 },
+                definition,
+                SupportedHandler.Instance));
+
+        Assert.Contains(missing.Errors, error => error.Code == "group_query.input_window.invalid");
+        Assert.Contains(excessive.Errors, error => error.Code == "group_query.input_window.invalid");
+    }
+
+    [Fact]
     public async Task Default_group_handler_fails_with_the_stable_capability_error_without_a_provider_executor()
     {
         var exception = await Assert.ThrowsAsync<DiagnosticRecordValidationException>(() =>
@@ -81,7 +104,8 @@ public sealed class DiagnosticGroupedReductionContractTests
             new("42"),
             DiagnosticFieldValue.Timestamp(DateTimeOffset.Parse("2026-07-24T12:00:00Z")),
             "trace-a",
-            DiagnosticRequestFingerprint.ForGroupQuery(query, definition));
+            DiagnosticRequestFingerprint.ForGroupQuery(query, definition),
+            query.InputRecordLimit);
         var exception = Assert.Throws<DiagnosticRecordValidationException>(() =>
             DiagnosticRecordGroupQueryValidator.Validate(
                 query with { Take = query.Take - 1, Continuation = continuation },
@@ -100,7 +124,8 @@ public sealed class DiagnosticGroupedReductionContractTests
             new("42"),
             DiagnosticFieldValue.Timestamp(DateTimeOffset.Parse("2026-07-24T12:00:00Z")),
             "trace-a",
-            DiagnosticRequestFingerprint.ForGroupQuery(query, definition));
+            DiagnosticRequestFingerprint.ForGroupQuery(query, definition),
+            query.InputRecordLimit);
         var changed = definition with
         {
             Fields = definition.Fields.Select(field =>
@@ -115,6 +140,30 @@ public sealed class DiagnosticGroupedReductionContractTests
 
         Assert.Equal(definition.SchemaVersion, changed.SchemaVersion);
         Assert.Contains(exception.Errors, error => error.Code == "group_query.continuation.query_mismatch");
+    }
+
+    [Fact]
+    public void Group_continuation_reuses_the_original_input_window_and_fingerprint()
+    {
+        var definition = Definition(Profile());
+        var query = Query();
+        var continuation = new DiagnosticRecordGroupContinuation(
+            new("42"),
+            DiagnosticFieldValue.Timestamp(DateTimeOffset.Parse("2026-07-24T12:00:00Z")),
+            "trace-a",
+            DiagnosticRequestFingerprint.ForGroupQuery(query, definition),
+            query.InputRecordLimit);
+
+        var exception = Assert.Throws<DiagnosticRecordValidationException>(() =>
+            DiagnosticRecordGroupQueryValidator.Validate(
+                query with { InputRecordLimit = query.InputRecordLimit - 1, Continuation = continuation },
+                definition,
+                SupportedHandler.Instance));
+
+        Assert.Contains(exception.Errors, error => error.Code == "group_query.continuation.input_window_mismatch");
+        Assert.NotEqual(
+            DiagnosticRequestFingerprint.ForGroupQuery(query, definition),
+            DiagnosticRequestFingerprint.ForGroupQuery(query with { InputRecordLimit = query.InputRecordLimit - 1 }, definition));
     }
 
     [Fact]
@@ -208,7 +257,8 @@ public sealed class DiagnosticGroupedReductionContractTests
         "trace-summary",
         25,
         new("start"),
-        new DiagnosticRecordGroupPredicate.Comparison(
+        InputRecordLimit: 64,
+        Predicate: new DiagnosticRecordGroupPredicate.Comparison(
             "status",
             DiagnosticPredicateOperator.Equal,
             [DiagnosticFieldValue.Int64(2)]));
