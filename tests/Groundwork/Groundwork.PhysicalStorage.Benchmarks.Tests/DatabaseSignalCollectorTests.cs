@@ -109,24 +109,21 @@ public sealed class DatabaseSignalCollectorTests
     }
 
     [Fact]
-    public void Mongo_client_activity_is_scoped_to_the_measured_database()
+    public void Mongo_command_events_are_scoped_to_the_measured_database()
     {
         using var collector = new DatabaseSignalCollector();
-        using var source = new ActivitySource("MongoDB.Driver.Core.Extensions.DiagnosticSources");
         using var measurement = collector.BeginMeasurement(DatabaseSignalTarget.ForMongoDb("groundwork_measured"));
 
-        using (var other = source.StartActivity("mongo.command", ActivityKind.Client))
-            other!.SetTag("db.namespace", "groundwork_other.documents");
-        using (var measured = source.StartActivity("mongo.command", ActivityKind.Client))
-            measured!.SetTag("db.namespace", "groundwork_measured.documents");
+        DatabaseSignalCollector.PublishMongoDbCommandStart("groundwork_other");
+        DatabaseSignalCollector.PublishMongoDbCommandStart("groundwork_measured");
 
         var signals = measurement.Complete();
 
-        Assert.Null(signals.CommandStarts);
-        Assert.Equal(1, signals.ClientActivities);
+        Assert.Equal(1, signals.CommandStarts);
+        Assert.Null(signals.ClientActivities);
         Assert.Equal(1, signals.ObservableRoundTrips);
         Assert.Equal(DatabaseSignalAvailability.Observed, signals.Evidence.Availability);
-        Assert.Equal("target-scoped-client-activity", signals.Evidence.Source);
+        Assert.Equal("target-scoped-diagnostic-command", signals.Evidence.Source);
     }
 
     [Fact]

@@ -110,15 +110,6 @@ public sealed class DatabaseSignalTarget
     internal bool MatchesActivity(Activity activity)
     {
         ArgumentNullException.ThrowIfNull(activity);
-        if (provider == BenchmarkProvider.MongoDb)
-        {
-            if (!activity.Source.Name.Contains("MongoDB", StringComparison.OrdinalIgnoreCase))
-                return false;
-            var databaseNamespace = Tag(activity, "db.namespace") ?? Tag(activity, "db.name");
-            return string.Equals(databaseNamespace, target, StringComparison.Ordinal) ||
-                   databaseNamespace?.StartsWith(target + ".", StringComparison.Ordinal) == true;
-        }
-
         if (!IsProviderSource(activity.Source.Name))
             return false;
         var connectionString = Tag(activity, "db.connection_string") ??
@@ -126,6 +117,10 @@ public sealed class DatabaseSignalTarget
                                Tag(activity, "connection_string");
         return connectionString is not null && MatchesConnectionString(connectionString);
     }
+
+    internal bool MatchesMongoDbDatabase(string databaseName) =>
+        provider == BenchmarkProvider.MongoDb &&
+        string.Equals(databaseName, target, StringComparison.Ordinal);
 
     private bool MatchesConnectionString(string connectionString)
     {
@@ -159,7 +154,6 @@ public sealed class DatabaseSignalTarget
         BenchmarkProvider.Sqlite => source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase),
         BenchmarkProvider.SqlServer => source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase),
         BenchmarkProvider.PostgreSql => source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase),
-        BenchmarkProvider.MongoDb => source.Contains("MongoDB", StringComparison.OrdinalIgnoreCase),
         _ => false
     };
 
@@ -180,19 +174,22 @@ public sealed class DatabaseSignalCollector :
     IObserver<KeyValuePair<string, object?>>,
     IDisposable
 {
+    private const string MongoCommandEventName = "CommandStart";
+    private static readonly DiagnosticListener MongoCommandListener =
+        new("Groundwork.MongoDB.Driver.Commands");
     private readonly ConcurrentBag<IDisposable> subscriptions = [];
     private readonly IDisposable allListenersSubscription;
     private readonly ActivityListener activityListener;
-    private readonly AsyncLocal<MeasurementScope?> activeMeasurement = new();
+    private MeasurementScope? activeMeasurement;
 
     public DatabaseSignalCollector()
     {
         allListenersSubscription = DiagnosticListener.AllListeners.Subscribe(this);
         activityListener = new ActivityListener
         {
-            ShouldListenTo = static source => IsDatabaseSource(source.Name),
+            ShouldListenTo = static source => IsDatabaseActivitySource(source.Name),
             Sample = static (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
-            ActivityStopped = activity => activeMeasurement.Value?.TryRecordClientActivity(activity)
+            ActivityStopped = activity => Volatile.Read(ref activeMeasurement)?.TryRecordClientActivity(activity)
         };
         ActivitySource.AddActivityListener(activityListener);
     }
@@ -200,10 +197,9 @@ public sealed class DatabaseSignalCollector :
     public MeasurementScope BeginMeasurement(DatabaseSignalTarget target)
     {
         ArgumentNullException.ThrowIfNull(target);
-        if (activeMeasurement.Value is not null)
-            throw new InvalidOperationException("A database signal measurement is already active on this execution context.");
         var measurement = new MeasurementScope(this, target);
-        activeMeasurement.Value = measurement;
+        if (Interlocked.CompareExchange(ref activeMeasurement, measurement, null) is not null)
+            throw new InvalidOperationException("A database signal measurement is already active.");
         return measurement;
     }
 
@@ -216,7 +212,13 @@ public sealed class DatabaseSignalCollector :
     public void OnNext(KeyValuePair<string, object?> value)
     {
         if (IsCommandStartEvent(value.Key))
-            activeMeasurement.Value?.TryRecordCommand(value.Value);
+        {
+            var measurement = Volatile.Read(ref activeMeasurement);
+            if (value.Value is MongoDbCommandStartSignal mongo)
+                measurement?.TryRecordMongoDbCommand(mongo.DatabaseName);
+            else
+                measurement?.TryRecordCommand(value.Value);
+        }
     }
 
     public void OnError(Exception error)
@@ -229,11 +231,18 @@ public sealed class DatabaseSignalCollector :
 
     public void Dispose()
     {
-        activeMeasurement.Value = null;
+        Interlocked.Exchange(ref activeMeasurement, null);
         activityListener.Dispose();
         allListenersSubscription.Dispose();
         while (subscriptions.TryTake(out var subscription))
             subscription.Dispose();
+    }
+
+    internal static void PublishMongoDbCommandStart(string databaseName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
+        if (MongoCommandListener.IsEnabled(MongoCommandEventName))
+            MongoCommandListener.Write(MongoCommandEventName, new MongoDbCommandStartSignal(databaseName));
     }
 
     public static bool IsCommandStartEvent(string eventName) =>
@@ -247,6 +256,13 @@ public sealed class DatabaseSignalCollector :
         source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) ||
         source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) ||
         source.Contains("MongoDB", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsDatabaseActivitySource(string source) =>
+        source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase) ||
+        source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) ||
+        source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase);
+
+    private sealed record MongoDbCommandStartSignal(string DatabaseName);
 
     public sealed class MeasurementScope : IDisposable
     {
@@ -269,6 +285,12 @@ public sealed class DatabaseSignalCollector :
                 Interlocked.Increment(ref commandStarts);
         }
 
+        internal void TryRecordMongoDbCommand(string databaseName)
+        {
+            if (target.MatchesMongoDbDatabase(databaseName))
+                Interlocked.Increment(ref commandStarts);
+        }
+
         internal void TryRecordClientActivity(Activity activity)
         {
             if (activity.Kind == ActivityKind.Client && target.MatchesActivity(activity))
@@ -285,8 +307,8 @@ public sealed class DatabaseSignalCollector :
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref disposed, 1) == 0 && ReferenceEquals(owner.activeMeasurement.Value, this))
-                owner.activeMeasurement.Value = null;
+            if (Interlocked.Exchange(ref disposed, 1) == 0)
+                Interlocked.CompareExchange(ref owner.activeMeasurement, null, this);
         }
 
         private static DatabaseSignalSnapshot CreateSnapshot(long commandStarts, long clientActivities)

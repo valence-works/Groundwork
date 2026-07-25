@@ -9,6 +9,7 @@ using Groundwork.MongoDb.Documents;
 using Groundwork.MongoDb.Materialization;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using MongoDB.Driver.Core.Events;
 
 namespace Groundwork.PhysicalStorage.Benchmarks;
 
@@ -26,6 +27,7 @@ public sealed class MongoDbBenchmarkTarget(
     private readonly string databaseName = $"groundwork_bench_{instance}_{storageForm}".ToLowerInvariant();
     private readonly int migrationDatasetSize = migrationDatasetSize;
     private readonly string sourceDescription = sourceDescription;
+    private MongoClient? client;
     private MongoDbPhysicalDocumentStoreHandle? tenantAHandle;
     private MongoDbPhysicalDocumentStoreHandle? tenantBHandle;
     private MigrationState? migration;
@@ -42,6 +44,9 @@ public sealed class MongoDbBenchmarkTarget(
     public override DatabaseSignalTarget SignalTarget => DatabaseSignalTarget.ForMongoDb(databaseName);
 
     private StorageManifest Manifest { get; set; } = null!;
+    private MongoClient Client => client
+        ?? throw new InvalidOperationException("MongoDB target client is not initialized.");
+    private IMongoDatabase Database => Client.GetDatabase(databaseName);
     private MongoDbPhysicalStorageModel Model => tenantAHandle?.Model
         ?? throw new InvalidOperationException("MongoDB target is not initialized.");
 
@@ -49,8 +54,7 @@ public sealed class MongoDbBenchmarkTarget(
     {
         Manifest = BenchmarkModelFactory.CreateManifest(StorageForm, Instance);
         await OpenStoresAsync(cancellationToken);
-        using var client = new MongoClient(connectionString);
-        var buildInfo = await client.GetDatabase("admin").RunCommandAsync<BsonDocument>(
+        var buildInfo = await Client.GetDatabase("admin").RunCommandAsync<BsonDocument>(
             new BsonDocument("buildInfo", 1),
             cancellationToken: cancellationToken);
         ProviderVersion = buildInfo.GetValue("version", "unknown").AsString;
@@ -117,8 +121,7 @@ public sealed class MongoDbBenchmarkTarget(
         var initialManifest = BenchmarkModelFactory.CreateManifest(StorageForm, suffix, includeCategory: false);
         var additiveManifest = BenchmarkModelFactory.CreateManifest(StorageForm, suffix, includeCategory: true);
         var initialHandle = await MongoDbDocumentStoreFactory.CreatePhysicalAsync(
-            connectionString,
-            databaseName,
+            Database,
             initialManifest,
             MongoDbGroundworkCapabilities.Provider,
             DocumentStoreAccess.Scoped(new("tenant-a")),
@@ -153,8 +156,6 @@ public sealed class MongoDbBenchmarkTarget(
 
     public override async Task<StorageSnapshot> CaptureStorageAsync(CancellationToken cancellationToken)
     {
-        using var client = new MongoClient(connectionString);
-        var database = client.GetDatabase(databaseName);
         var route = Model.Routes.Single();
         var collections = new[] { route.PrimaryStorage.Name.Identifier, route.LinkedIndexStorage?.Name.Identifier }
             .Where(name => name is not null).Cast<string>().ToArray();
@@ -164,7 +165,7 @@ public sealed class MongoDbBenchmarkTarget(
         long linkedRows = 0;
         foreach (var collection in collections)
         {
-            var stats = await database.RunCommandAsync<BsonDocument>(
+            var stats = await Database.RunCommandAsync<BsonDocument>(
                 new BsonDocument { ["collStats"] = collection, ["scale"] = 1 },
                 cancellationToken: cancellationToken);
             var storageBytes = stats.GetValue("storageSize", 0).ToInt64();
@@ -187,27 +188,23 @@ public sealed class MongoDbBenchmarkTarget(
 
     public override async ValueTask DisposeAsync()
     {
-        if (tenantAHandle is not null)
-            await tenantAHandle.DisposeAsync();
-        if (tenantBHandle is not null)
-            await tenantBHandle.DisposeAsync();
         if (migration is not null)
             await migration.InitialHandle.DisposeAsync();
-        using var client = new MongoClient(connectionString);
-        await client.DropDatabaseAsync(databaseName);
+        await DisposeClientStateAsync();
+        using var cleanupClient = new MongoClient(connectionString);
+        await cleanupClient.DropDatabaseAsync(databaseName);
     }
 
     protected override async Task ResetClientStateAsync(CancellationToken cancellationToken)
     {
-        await DisposeHandlesAsync();
+        await DisposeClientStateAsync();
         await OpenStoresAsync(cancellationToken);
     }
 
     protected override async Task<WorkloadExecution> ExecuteBackfillMigrationAsync(CancellationToken cancellationToken)
     {
         var state = migration ?? throw new InvalidOperationException("Migration iteration was not prepared.");
-        using var client = new MongoClient(connectionString);
-        var result = await new MongoDbGroundworkMaterializer(client.GetDatabase(databaseName))
+        var result = await new MongoDbGroundworkMaterializer(Database)
             .MaterializeAsync(state.Additive, cancellationToken: cancellationToken);
         if (result.Outcome != PhysicalSchemaApplicationOutcome.Applied)
             throw new InvalidOperationException($"Backfill migration returned {result.Outcome}; expected Applied.");
@@ -225,8 +222,7 @@ public sealed class MongoDbBenchmarkTarget(
     {
         var state = migration ?? throw new InvalidOperationException("Migration iteration was not executed.");
         await using var additiveHandle = await MongoDbDocumentStoreFactory.CreatePhysicalAsync(
-            connectionString,
-            databaseName,
+            Database,
             state.AdditiveManifest,
             MongoDbGroundworkCapabilities.Provider,
             DocumentStoreAccess.Scoped(new("tenant-a")),
@@ -241,8 +237,7 @@ public sealed class MongoDbBenchmarkTarget(
         var collectionName = category.Target == ExecutableStorageObjectRole.PrimaryStorage
             ? route.PrimaryStorage.Name.Identifier
             : route.LinkedIndexStorage!.Name.Identifier;
-        using var client = new MongoClient(connectionString);
-        var collection = client.GetDatabase(databaseName).GetCollection<BsonDocument>(collectionName);
+        var collection = Database.GetCollection<BsonDocument>(collectionName);
         var projectionCount = await collection.CountDocumentsAsync(
             Builders<BsonDocument>.Filter.Eq(category.Column.Identifier, "migration"),
             cancellationToken: cancellationToken);
@@ -259,7 +254,7 @@ public sealed class MongoDbBenchmarkTarget(
         int operations,
         CancellationToken cancellationToken)
     {
-        await DisposeHandlesAsync();
+        await DisposeClientStateAsync();
         await OpenStoresAsync(cancellationToken);
         var documents = new List<DocumentEnvelope>(operations);
         for (var index = 0; index < operations; index++)
@@ -282,22 +277,57 @@ public sealed class MongoDbBenchmarkTarget(
 
     private async Task OpenStoresAsync(CancellationToken cancellationToken)
     {
-        tenantAHandle = await CreateHandleAsync(DocumentStoreAccess.Scoped(new("tenant-a")), cancellationToken);
-        tenantBHandle = await CreateHandleAsync(DocumentStoreAccess.Scoped(new("tenant-b")), cancellationToken);
-        SetStores(tenantAHandle.Store, tenantBHandle.Store, tenantAHandle.Store);
+        client = CreateInstrumentedClient();
+        try
+        {
+            tenantAHandle = await CreateHandleAsync(
+                Database,
+                DocumentStoreAccess.Scoped(new("tenant-a")),
+                cancellationToken);
+            tenantBHandle = await CreateHandleAsync(
+                Database,
+                DocumentStoreAccess.Scoped(new("tenant-b")),
+                cancellationToken);
+            SetStores(tenantAHandle.Store, tenantBHandle.Store, tenantAHandle.Store);
+        }
+        catch
+        {
+            await DisposeClientStateAsync();
+            throw;
+        }
     }
 
     private Task<MongoDbPhysicalDocumentStoreHandle> CreateHandleAsync(
+        IMongoDatabase database,
         DocumentStoreAccess access,
         CancellationToken cancellationToken) =>
         MongoDbDocumentStoreFactory.CreatePhysicalAsync(
-            connectionString,
-            databaseName,
+            database,
             Manifest,
             MongoDbGroundworkCapabilities.Provider,
             access,
             BenchmarkModelFactory.NamePolicy(Instance),
             cancellationToken: cancellationToken);
+
+    private MongoClient CreateInstrumentedClient()
+    {
+        var settings = MongoClientSettings.FromConnectionString(connectionString);
+        var existingConfigurator = settings.ClusterConfigurator;
+        settings.ClusterConfigurator = builder =>
+        {
+            existingConfigurator?.Invoke(builder);
+            builder.Subscribe<CommandStartedEvent>(started =>
+                DatabaseSignalCollector.PublishMongoDbCommandStart(started.DatabaseNamespace.DatabaseName));
+        };
+        return new MongoClient(settings);
+    }
+
+    private async Task DisposeClientStateAsync()
+    {
+        await DisposeHandlesAsync();
+        client?.Dispose();
+        client = null;
+    }
 
     private async Task DisposeHandlesAsync()
     {

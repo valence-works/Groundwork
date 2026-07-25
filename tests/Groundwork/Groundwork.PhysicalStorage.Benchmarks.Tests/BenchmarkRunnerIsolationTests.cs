@@ -402,9 +402,6 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
                 ? "Microsoft.Data.Sqlite"
                 : provider == BenchmarkProvider.SqlServer ? "Microsoft.Data.SqlClient" : "Npgsql")
             : null;
-        private readonly ActivitySource? activitySource = emitTargetScopedTelemetry && provider == BenchmarkProvider.MongoDb
-            ? new ActivitySource("MongoDB.Driver.Core.Extensions.DiagnosticSources")
-            : null;
 
         public BenchmarkProvider Provider => provider;
         public PhysicalStorageForm StorageForm => storageForm;
@@ -494,17 +491,15 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         public ValueTask DisposeAsync()
         {
             diagnosticListener?.Dispose();
-            activitySource?.Dispose();
             Disposed = true;
             return ValueTask.CompletedTask;
         }
 
         private void EmitTargetScopedTelemetry()
         {
-            if (activitySource is not null)
+            if (emitTargetScopedTelemetry && provider == BenchmarkProvider.MongoDb)
             {
-                using var activity = activitySource.StartActivity("mongo.command", ActivityKind.Client);
-                activity!.SetTag("db.namespace", $"{MongoDatabase}.documents");
+                DatabaseSignalCollector.PublishMongoDbCommandStart(MongoDatabase);
                 return;
             }
 

@@ -283,9 +283,10 @@ Every measured raw sample now carries a sealed `databaseSignal` object. SQLite a
 accept provider diagnostic command starts only when the command is bound to the disposable measured
 database target. PostgreSQL uses a target-specific `Application Name` on every production-path
 connection so its diagnostic commands cannot be confused with another schema sharing the same
-server database. MongoDB accepts client activity only when the driver reports the measured database
-namespace. The target selector and all connection values remain in memory; artifacts contain only
-the provider-neutral source, availability, and positive counts.
+server database. MongoDB configures the production target client with the driver's public
+`CommandStartedEvent` subscriber and accepts a command only when its database namespace matches the
+measured target. The target selector and all connection values remain in memory; artifacts contain
+only the provider-neutral source, availability, and positive counts.
 
 These are observable client command/activity signals, not a claim that the harness has exact
 wire-level server round-trip accounting. `roundTrips` is written exclusively from the matching
