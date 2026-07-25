@@ -133,7 +133,7 @@
             "source": { "const": "target-scoped-diagnostic-command" },
             "reason": { "type": "null" },
             "commandStarts": { "type": "integer", "minimum": 1 },
-            "clientActivities": { "type": ["integer", "null"], "minimum": 1 },
+            "clientActivities": { "type": "null" },
             "observableRoundTrips": { "type": "integer", "minimum": 1 }
           },
           "required": ["availability", "source", "reason", "commandStarts", "clientActivities", "observableRoundTrips"]

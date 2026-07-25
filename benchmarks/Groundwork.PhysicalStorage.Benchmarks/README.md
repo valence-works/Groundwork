@@ -344,8 +344,9 @@ unavailable observation and that SQL Server/PostgreSQL lacked positive selector 
 coverage. After remediation, the originating reviewers returned **PASS**:
 
 - **Correctness and mechanism — addressed:** the runner accepts only the scoped snapshot's
-  observable count; diagnostic and client-activity evidence must agree exactly with the persisted
-  round-trip count; unavailable evidence cannot claim a count.
+  observable count; persisted diagnostic-command and client-activity evidence states are exclusive,
+  and their authoritative count must agree exactly with the persisted round-trip count; unavailable
+  evidence cannot claim a count.
 - **Evidence integrity — addressed:** writer, reader, summarizer, report reconstruction, JSON
   Schema validation, and fully resealed scheduled-group verification reject forged or internally
   inconsistent signal counts.

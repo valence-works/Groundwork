@@ -88,6 +88,19 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rejects_a_resealed_raw_and_summary_pair_with_conflicting_secondary_signal_count()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { ForgeMeasuredSecondarySignalCount = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Rejects_measured_workers_that_do_not_meet_the_authenticated_operation_and_duration_floors()
     {
         var fixture = await ScheduledGroupFixture.CreateAsync(
@@ -191,6 +204,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             public bool TamperMeasuredRawDatabaseSignal { get; init; }
             public bool ForgeMeasuredUnavailableRoundTrips { get; init; }
             public bool ForgeMeasuredObservedCountMismatch { get; init; }
+            public bool ForgeMeasuredSecondarySignalCount { get; init; }
             public bool GitDirty { get; init; }
             public bool WriteMeasuredIntegrityLedger { get; init; } = true;
             public int MeasuredSampleCount { get; init; } = 30;
@@ -319,11 +333,16 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                                                 role == BenchmarkExecutionRole.Measured;
             var forgeObservedCountMismatch = options.ForgeMeasuredObservedCountMismatch &&
                                                role == BenchmarkExecutionRole.Measured;
+            var forgeSecondarySignalCount = options.ForgeMeasuredSecondarySignalCount &&
+                                            role == BenchmarkExecutionRole.Measured;
             if (forgeUnavailableRoundTrips)
                 samples = ForgeUnavailableRoundTrips(samples);
             else if (forgeObservedCountMismatch)
                 samples = ForgeObservedCountMismatch(samples);
-            var forgeDatabaseSignal = forgeUnavailableRoundTrips || forgeObservedCountMismatch;
+            else if (forgeSecondarySignalCount)
+                samples = ForgeSecondarySignalCount(samples);
+            var forgeDatabaseSignal =
+                forgeUnavailableRoundTrips || forgeObservedCountMismatch || forgeSecondarySignalCount;
             var benchmarkCase = new BenchmarkCase(
                 BenchmarkProvider.Sqlite,
                 PhysicalStorageForm.PhysicalEntityTable,
@@ -498,6 +517,19 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     CommandStarts: 1,
                     ClientActivities: null,
                     ObservableRoundTrips: 2)
+            }).ToArray();
+
+        private static IReadOnlyList<BenchmarkSample> ForgeSecondarySignalCount(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select(sample => sample with
+            {
+                RoundTrips = 1,
+                DatabaseSignal = new DatabaseSignalEvidence(
+                    DatabaseSignalAvailability.Observed,
+                    "target-scoped-diagnostic-command",
+                    null,
+                    CommandStarts: 1,
+                    ClientActivities: 2,
+                    ObservableRoundTrips: 1)
             }).ToArray();
 
         private static BenchmarkRunReport CreateForgedDatabaseSignalReport(

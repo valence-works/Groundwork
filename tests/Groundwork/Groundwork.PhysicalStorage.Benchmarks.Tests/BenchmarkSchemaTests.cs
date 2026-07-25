@@ -102,6 +102,10 @@ public sealed class BenchmarkSchemaTests
         Assert.Equal(3, signal.GetProperty("oneOf").GetArrayLength());
         Assert.Equal(
             "null",
+            signal.GetProperty("oneOf")[0].GetProperty("properties")
+                .GetProperty("clientActivities").GetProperty("type").GetString());
+        Assert.Equal(
+            "null",
             signal.GetProperty("oneOf")[1].GetProperty("properties")
                 .GetProperty("commandStarts").GetProperty("type").GetString());
         Assert.Equal(2, sample.GetProperty("allOf").GetArrayLength());

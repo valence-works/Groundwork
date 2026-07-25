@@ -36,6 +36,31 @@ public sealed class DatabaseSignalCollectorTests
         Assert.DoesNotContain(signals.ToProviderWork(), pair => pair.Value == 0);
     }
 
+    [Fact]
+    public void Diagnostic_evidence_excludes_the_lower_precedence_activity_count()
+    {
+        const string measuredPath = "/tmp/groundwork-dual-signal.db";
+        using var collector = new DatabaseSignalCollector();
+        using var listener = new DiagnosticListener("Microsoft.Data.Sqlite");
+        using var source = new ActivitySource("Microsoft.Data.Sqlite");
+        using var connection = new SqliteConnection($"Data Source={measuredPath}");
+        using var command = connection.CreateCommand();
+        using var measurement = collector.BeginMeasurement(DatabaseSignalTarget.ForSqlite(measuredPath));
+
+        listener.Write("CommandStart", new { Command = command });
+        using (var activity = source.StartActivity("sqlite.command", ActivityKind.Client))
+            activity!.SetTag("db.connection_string", connection.ConnectionString);
+
+        var signals = measurement.Complete();
+
+        Assert.Equal(1, signals.CommandStarts);
+        Assert.Equal(1, signals.ClientActivities);
+        Assert.Equal("target-scoped-diagnostic-command", signals.Evidence.Source);
+        Assert.Equal(1, signals.Evidence.CommandStarts);
+        Assert.Null(signals.Evidence.ClientActivities);
+        Assert.Equal(1, signals.Evidence.ObservableRoundTrips);
+    }
+
     [Theory]
     [InlineData(BenchmarkProvider.SqlServer)]
     [InlineData(BenchmarkProvider.PostgreSql)]

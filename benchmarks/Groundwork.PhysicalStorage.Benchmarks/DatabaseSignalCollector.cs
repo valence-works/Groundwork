@@ -312,7 +312,7 @@ public sealed class DatabaseSignalCollector :
                         ? "no-target-scoped-provider-telemetry"
                         : null,
                     observedCommands,
-                    observedActivities,
+                    observedCommands.HasValue ? null : observedActivities,
                     observableRoundTrips));
         }
 
