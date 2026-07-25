@@ -144,7 +144,6 @@ public sealed class MongoDbPhysicalDocumentStore :
         foreach (var unit in units)
             ResolveScope(unit, StorageScopeOperation.BeginUnitOfWork);
         await transactionCapability.EnsureSupportedAsync(scope.Kinds, "physical storage", cancellationToken);
-        await EnsureRolloutFenceAsync(cancellationToken);
 
         var session = await startSessionAsync(cancellationToken);
         try
@@ -152,6 +151,7 @@ public sealed class MongoDbPhysicalDocumentStore :
             session.StartTransaction(new TransactionOptions(
                 ReadConcern.Snapshot,
                 writeConcern: WriteConcern.WMajority));
+            await EnsureRolloutFenceAsync(cancellationToken);
             return new UnitOfWork(this, session, scope);
         }
         catch

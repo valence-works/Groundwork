@@ -2137,6 +2137,45 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Unit_of_work_against_a_pre_fence_database_prepares_and_touches_the_fence()
+    {
+        var database = Database();
+        var model = CollectionEvolutionModel(includeCollection: false);
+        var materializer = new MongoDbGroundworkMaterializer(database);
+        await materializer.MaterializeAsync(model);
+        await database.DropCollectionAsync(MongoDbCollectionRolloutFence.CollectionName);
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.NoChanges,
+            (await materializer.MaterializeAsync(model)).Outcome);
+        var route = Assert.Single(model.Routes);
+        var store = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+
+        await using (var transaction = await store.BeginAsync(DocumentCommitScope.Of("workItem")))
+        {
+            Assert.Equal(
+                DocumentStoreWriteStatus.Saved,
+                (await transaction.SaveAsync(new SaveDocumentRequest(
+                    "workItem",
+                    "unit-of-work",
+                    "1",
+                    """{"category":"uow"}"""))).Status);
+            await transaction.CommitAsync();
+        }
+
+        var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .SingleAsync();
+        Assert.Equal(MongoDbCollectionRolloutFence.Signature(route), fence["required_signature"].AsString);
+        Assert.Equal(1, fence["activity"].ToInt64());
+        Assert.NotNull(await store.LoadAsync("workItem", "unit-of-work"));
+    }
+
+    [Fact]
     public async Task Concurrent_writers_retry_the_shared_rollout_fence_until_every_distinct_write_commits()
     {
         const int writerCount = 16;
