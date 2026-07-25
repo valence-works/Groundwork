@@ -8,7 +8,7 @@ public static class Issue50EvidenceRequirements
     [
         "The required 1K/100K/1M matrix for the reviewed payload profiles and the ratified 10% indexed-query acceptance and 50% scan-characterization selectivity shapes has not been executed.",
         "exact-HEAD live evidence from all four providers (SQLite, SQL Server, PostgreSQL, and MongoDB) is incomplete.",
-        "Target-scoped provider database-work signals, sustained concurrent-load evidence, and actual bounded recovery evidence are incomplete.",
+        "Target-scoped provider database-work signals and actual bounded recovery evidence are incomplete.",
         "The approved immutable-baseline publication and comparison workflow is incomplete."
     ];
 }
@@ -59,6 +59,12 @@ public static class BaselineEligibilityEvaluator
         }
         if (cases.Any(result => !AllPassed(result.Correctness)))
             diagnostics.Add("Future baseline activation also requires all correctness gates to pass.");
+        if (!HasSustainedConcurrentLoadEvidence(cases, configuration.Concurrency))
+        {
+            diagnostics.Add(
+                "Future baseline activation also requires every concurrent-create sample to retain complete " +
+                "sustained concurrent-load evidence at configured parallelism.");
+        }
         if (cases.Any(result =>
                 result.PlanArtifacts.Count != BenchmarkPlanRequests.ForWorkloads([result.Case.Workload]).Count ||
                 result.PlanArtifacts.Any(string.IsNullOrWhiteSpace) ||
@@ -108,4 +114,19 @@ public static class BaselineEligibilityEvaluator
         result.UnitOfWorkRollback &&
         result.BoundedQuery &&
         result.MixedOrdering;
+
+    private static bool HasSustainedConcurrentLoadEvidence(
+        IReadOnlyList<BenchmarkCaseResult> cases,
+        int configuredParallelism)
+    {
+        var concurrentCases = cases
+            .Where(result => result.Case.Workload == BenchmarkWorkload.ConcurrentCreate)
+            .ToArray();
+        return concurrentCases.Length > 0 &&
+               concurrentCases.All(result => result.Samples.Count > 0 &&
+                                            result.Samples.All(sample =>
+                                                sample.HasValidConcurrentLoadEvidence(
+                                                    BenchmarkWorkload.ConcurrentCreate,
+                                                    configuredParallelism)));
+    }
 }

@@ -166,6 +166,37 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Concurrent_create_rejects_a_target_that_omits_sustained_load_evidence()
+    {
+        var environment = new RecordingEnvironment();
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            DatasetSize = 10,
+            MigrationDatasetSize = 1,
+            WarmupIterations = 1,
+            MeasurementIterations = 5,
+            OperationsPerIteration = 1,
+            Concurrency = 2,
+            Providers = [BenchmarkProvider.Sqlite],
+            StorageForms = [PhysicalStorageForm.SharedDocuments]
+        };
+        var runner = new BenchmarkRunner(null, () => environment);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
+            new BenchmarkRunRequest(
+                FindRepositoryRoot(),
+                configuration,
+                [BenchmarkWorkload.ConcurrentCreate],
+                output,
+                null,
+                AllowContainers: false,
+                RegressionConfirmationRun: false),
+            CancellationToken.None));
+
+        Assert.Contains("concurrent-create requires complete evidence", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Measured_run_continues_whole_samples_until_operation_and_steady_state_floors_are_met()
     {
         var clock = new ManualTimeProvider();

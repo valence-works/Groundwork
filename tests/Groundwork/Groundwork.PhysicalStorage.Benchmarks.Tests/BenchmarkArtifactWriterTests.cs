@@ -80,6 +80,23 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Raw_measurements_reject_concurrent_create_without_complete_load_evidence()
+    {
+        var layout = new ArtifactLayout(root);
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, null, 0, 0, null, null, new Dictionary<string, long>(), [100]);
+        await using var writer = new BenchmarkArtifactWriter(layout);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => writer.AppendSampleAsync(
+            new RawBenchmarkRecord(
+                new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.ConcurrentCreate),
+                sample),
+            CancellationToken.None));
+
+        Assert.Contains("concurrent-create evidence", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Raw_measurements_reject_a_compatibility_round_trip_when_target_scoped_telemetry_is_unavailable()
     {
         var layout = new ArtifactLayout(root);
@@ -278,6 +295,7 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         Assert.Equal(64, result.ProviderConfigurationDigest.Length);
         Assert.Equal(1, result.RawSampleCount);
         Assert.Equal(4, result.RawOperationLatencyCount);
+        Assert.Null(result.ConcurrentLoadEvidenceDigest);
         Assert.Equal(64, evidence.RawMeasurementsDigest.Length);
 
         var tamperedEvidence = evidence with
@@ -337,6 +355,87 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         Assert.Equal(result.WorkloadFingerprint, alternate.WorkloadFingerprint);
         Assert.Equal(result.ResultDigest, alternate.ResultDigest);
         Assert.NotEqual(result.MeasurementDigest, alternate.MeasurementDigest);
+    }
+
+    [Fact]
+    public async Task Consumer_evidence_rebuilds_the_exact_concurrent_load_digest_and_workload_version()
+    {
+        var layout = new ArtifactLayout(root);
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            Concurrency = 2,
+            Providers = [BenchmarkProvider.Sqlite],
+            StorageForms = [PhysicalStorageForm.SharedDocuments]
+        };
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.Sqlite,
+            PhysicalStorageForm.SharedDocuments,
+            BenchmarkWorkload.ConcurrentCreate);
+        var sample = new BenchmarkSample(
+            0, 2, 1_000, 40, 2, 100, 1, null, null, new Dictionary<string, long>(), [100, 200])
+        {
+            ConcurrentLoad = new ConcurrentLoadEvidence(
+                RequestedParallelism: 2,
+                WaveCount: 1,
+                FullyParallelWaveCount: 1,
+                Attempts: 2,
+                Completions: 2,
+                SuccessfulOperations: 1,
+                ConflictOperations: 1,
+                PeakInFlightProductionStoreCalls: 2)
+        }.WithObservedCommandSignal();
+        var report = new BenchmarkRunReport(
+            BenchmarkProfiles.SchemaVersion,
+            "concurrent-load-test",
+            BenchmarkRunMode.Smoke,
+            [new BenchmarkCaseResult(
+                benchmarkCase,
+                new CorrectnessGateResult(true, true, true, true, true),
+                [],
+                BenchmarkSummarizer.Summarize(benchmarkCase.Identity, [sample]),
+                [sample],
+                ObservableResults(benchmarkCase, sample.Operations))],
+            [],
+            new BaselineEligibility(false, ["fixture"]));
+        var machine = new BenchmarkMachineMetadata(
+            "test-os", "benchmark-host", "Arm64", ".NET 10", "Release", 8, true, 1_000_000_000,
+            "1.0.0", "abcdef", false, DateTimeOffset.UnixEpoch);
+        var providers = new[]
+        {
+            new BenchmarkProviderMetadata(BenchmarkProvider.Sqlite, "3.50.4", new Dictionary<string, string>())
+        };
+
+        await using (var writer = new BenchmarkArtifactWriter(layout))
+        {
+            await writer.AppendSampleAsync(new RawBenchmarkRecord(benchmarkCase, sample), CancellationToken.None);
+            await writer.WriteConsumerEvidenceAsync(
+                BenchmarkConsumerEvidenceReport.Create(report, configuration, machine, providers, layout),
+                CancellationToken.None);
+        }
+
+        var evidence = JsonSerializer.Deserialize<BenchmarkConsumerEvidenceReport>(
+            await File.ReadAllTextAsync(layout.ConsumerEvidenceJson),
+            BenchmarkJson.Options)!;
+        var result = Assert.Single(evidence.Results);
+        Assert.Equal("1.2", result.WorkloadVersion);
+        Assert.NotNull(result.ConcurrentLoadEvidenceDigest);
+        Assert.Equal(64, result.ConcurrentLoadEvidenceDigest!.Length);
+
+        var tampered = evidence with
+        {
+            Results =
+            [
+                result with { ConcurrentLoadEvidenceDigest = new string('0', 64) }
+            ]
+        };
+        Assert.Throws<InvalidOperationException>(() =>
+            BenchmarkConsumerEvidenceReport.VerifyBoundClaims(
+                report,
+                configuration,
+                machine,
+                providers,
+                layout,
+                tampered));
     }
 
     [Fact]

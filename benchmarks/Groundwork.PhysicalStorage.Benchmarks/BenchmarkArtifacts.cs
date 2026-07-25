@@ -320,6 +320,11 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(record);
         if (!record.Sample.HasValidDatabaseSignalEvidence())
             throw new InvalidOperationException("Raw measurements require valid target-scoped database-signal evidence.");
+        if (!record.Sample.HasValidConcurrentLoadEvidence(record.Case.Workload))
+        {
+            throw new InvalidOperationException(
+                "Raw measurements require complete concurrent-create evidence and forbid it for other workloads.");
+        }
         var line = JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions);
         await rawWriter.WriteLineAsync(line.AsMemory(), cancellationToken);
     }
@@ -383,6 +388,11 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             {
                 throw new InvalidOperationException(
                     $"Raw measurement in '{path}' has an invalid target-scoped database-signal invariant.");
+            }
+            if (!records[^1].Sample.HasValidConcurrentLoadEvidence(records[^1].Case.Workload))
+            {
+                throw new InvalidOperationException(
+                    $"Raw measurement in '{path}' has an invalid concurrent-load invariant.");
             }
         }
         return records;
@@ -533,10 +543,12 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(report);
         foreach (var result in report.Cases)
         {
-            if (result.Samples.Count == 0 || result.Samples.Any(sample => !sample.HasValidDatabaseSignalEvidence()))
+            if (result.Samples.Count == 0 || result.Samples.Any(sample =>
+                    !sample.HasValidDatabaseSignalEvidence() ||
+                    !sample.HasValidConcurrentLoadEvidence(result.Case.Workload)))
             {
                 throw new InvalidOperationException(
-                    $"Summary for '{result.Case.Identity}' contains invalid target-scoped database-signal evidence.");
+                    $"Summary for '{result.Case.Identity}' contains invalid target-scoped evidence.");
             }
 
             BenchmarkCaseSummary expected;

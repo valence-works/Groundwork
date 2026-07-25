@@ -168,7 +168,7 @@ database-reported version, isolation strategy, pooling behavior, and session lif
 | `mixed-compound-ordering` | Repeat equality queries with descending rank after ascending scope/status keys |
 | `insert`, `update`, `delete` | Repeat single-document mutations through the production store |
 | `unit-of-work` | Perform batched writes and one commit |
-| `concurrent-create` | Concurrent creates for one identity; exactly one must win |
+| `concurrent-create` | Repeated released-together creates for one identity; each wave must record one winner, all remaining conflicts, and an observed peak of the configured number of overlapping production-store calls |
 | `optimistic-concurrency` | Stale writes that must return concurrency conflicts |
 | `pagination-and-count` | Page and count operations with agreement asserted |
 | `backfill-migration` | Time materialization/backfill, then validate projection/query correctness outside timing |
@@ -198,7 +198,7 @@ An operation is the smallest semantically complete unit that the workload promis
 - point-read batch: the complete reused-client or reset-client batch (including reset when selected);
 - indexed/mixed query, insert, update, delete, stale write, and storage-growth: one store call;
 - unit of work: one begin/save-batch/commit transaction;
-- concurrent create: one competing create attempt;
+- concurrent create: one competing create attempt. Every retained concurrent-create sample also seals its requested parallelism, wave count, fully parallel wave count, attempts, completions, successful/conflict outcomes, and observed peak in-flight production-store calls. Tasks waiting at the release barrier are not counted as in flight; a wave that does not reach the configured peak fails rather than being inferred from configuration;
 - pagination and count: one page query or one count query;
 - backfill: one complete materialization/backfill application;
 - client restart validation: one client/factory/pool restart plus its durable-read validation batch.
@@ -384,9 +384,9 @@ non-decision smoke remained green.
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
   the 1K/100K/1M dataset matrix for the reviewed workload-bound payload profiles.
 - Capture exact-HEAD live evidence from SQLite, SQL Server, PostgreSQL, and MongoDB.
-- Exercise the target-scoped provider database-work signals under controlled live evidence for all
-  providers, then complete sustained concurrent-load evidence. The current observable client
-  signals do not by themselves close either acceptance item.
+- Exercise the target-scoped provider database-work signals and sealed concurrent-create evidence
+  under controlled live evidence for all providers. The current observable client signals do not
+  by themselves close the provider-work acceptance item.
 - Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
 - Capture actual crash/failure recovery evidence required by issue #50. Client pool reset/reopen
   validation is not crash or failure recovery evidence and does not close that acceptance work.

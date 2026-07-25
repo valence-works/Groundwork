@@ -6,7 +6,10 @@ automation:
 - `run-manifest.schema.json` describes run status and artifact locations.
 - `raw-measurement.schema.json` describes one line of `raw/measurements.jsonl`, including the
   directly timed per-operation latency observations used for percentiles and bootstraps, plus
-  target-scoped provider database-work telemetry. The telemetry captures only its source,
+  target-scoped provider database-work telemetry and workload-conditioned concurrent-load
+  evidence. Concurrent-create records retain only counts (configured parallelism, complete and
+  fully parallel waves, attempts, completions, outcomes, and peak in-flight production-store
+  calls); they never infer overlap from configuration or retain payloads or connection values. The telemetry captures only its source,
   availability, and positive counts; it never includes connection values, database names, command
   text, or provider secrets. A signal that cannot be observed is represented by `null` counts and
   an explicit `unavailable` reason, never by a zero measurement.
@@ -17,7 +20,8 @@ automation:
 - `run-group.schema.json` describes the coordinator manifest and integrity index.
 - `run-group-regression.schema.json` describes process-cluster comparison results.
 - `consumer-evidence.schema.json` describes redacted evidence joinable by workload, provider, form,
-  version, fingerprint, complete payload profile/data shape, and result digest. It is always non-promotable until the
+  version, fingerprint, complete payload profile/data shape, result digest, and (for concurrent
+  create) a reconstructed concurrent-load evidence digest. It is always non-promotable until the
   external EF oracle is joined.
 
 Batch elapsed time remains available for throughput and steady-state accounting. Latency

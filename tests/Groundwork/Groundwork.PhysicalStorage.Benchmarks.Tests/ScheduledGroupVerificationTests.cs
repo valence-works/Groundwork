@@ -49,6 +49,23 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rejects_a_resealed_concurrent_load_digest_that_does_not_match_raw_evidence()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options
+            {
+                Workload = BenchmarkWorkload.ConcurrentCreate,
+                ForgeMeasuredConcurrentLoadDigest = true
+            });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("digest claims", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Rejects_a_resealed_target_scoped_signal_change_that_is_not_bound_by_the_summary()
     {
         var fixture = await ScheduledGroupFixture.CreateAsync(
@@ -201,6 +218,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         public sealed record Options
         {
             public bool ForgeMeasuredConsumerResultDigest { get; init; }
+            public bool ForgeMeasuredConcurrentLoadDigest { get; init; }
             public bool TamperMeasuredRawDatabaseSignal { get; init; }
             public bool ForgeMeasuredUnavailableRoundTrips { get; init; }
             public bool ForgeMeasuredObservedCountMismatch { get; init; }
@@ -210,6 +228,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             public int MeasuredSampleCount { get; init; } = 30;
             public int OperationsPerSample { get; init; } = 10;
             public long ElapsedNanosecondsPerSample { get; init; } = 1_000_000_000;
+            public BenchmarkWorkload Workload { get; init; } = BenchmarkWorkload.Insert;
         }
 
         public static async Task<ScheduledGroupFixture> CreateAsync(string root, Options? options = null)
@@ -271,12 +290,12 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             };
             var shape = new BenchmarkDataShape(
                 1_000,
-                BenchmarkPayloadProfiles.For(BenchmarkWorkload.Insert),
+                BenchmarkPayloadProfiles.For(options.Workload),
                 BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
             var request = new BenchmarkRunRequest(
                 Root,
                 configuration,
-                [BenchmarkWorkload.Insert],
+                [options.Workload],
                 workerRoot,
                 null,
                 AllowContainers: false,
@@ -327,7 +346,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     new Dictionary<string, string> { ["mode"] = "fixture" })
             };
             var samples = role == BenchmarkExecutionRole.Measured
-                ? CreateSamples(options)
+                ? CreateSamples(options, options.Workload)
                 : [];
             var forgeUnavailableRoundTrips = options.ForgeMeasuredUnavailableRoundTrips &&
                                                 role == BenchmarkExecutionRole.Measured;
@@ -346,7 +365,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             var benchmarkCase = new BenchmarkCase(
                 BenchmarkProvider.Sqlite,
                 PhysicalStorageForm.PhysicalEntityTable,
-                BenchmarkWorkload.Insert);
+                options.Workload);
             var report = forgeDatabaseSignal
                 ? CreateForgedDatabaseSignalReport(samples, benchmarkCase, shape, workerRoot)
                 : CreateReport(role, samples, benchmarkCase, shape, workerRoot);
@@ -419,6 +438,16 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                             ]
                         };
                     }
+                    if (options.ForgeMeasuredConcurrentLoadDigest && independentRun == 1)
+                    {
+                        consumer = consumer with
+                        {
+                            Results =
+                            [
+                                consumer.Results[0] with { ConcurrentLoadEvidenceDigest = new string('0', 64) }
+                            ]
+                        };
+                    }
                     await writer.WriteConsumerEvidenceAsync(consumer, CancellationToken.None);
                 }
                 await writer.WriteManifestAsync(workerManifest, CancellationToken.None);
@@ -472,11 +501,18 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             });
         }
 
-        private static IReadOnlyList<BenchmarkSample> CreateSamples(Options options) =>
+        private static IReadOnlyList<BenchmarkSample> CreateSamples(
+            Options options,
+            BenchmarkWorkload workload) =>
             Enumerable.Range(0, options.MeasuredSampleCount)
-                .Select(iteration => new BenchmarkSample(
+                .Select(iteration =>
+                {
+                    var operations = workload == BenchmarkWorkload.ConcurrentCreate
+                        ? BenchmarkProfiles.Scheduled.Concurrency
+                        : options.OperationsPerSample;
+                    return new BenchmarkSample(
                     iteration,
-                    options.OperationsPerSample,
+                    operations,
                     options.ElapsedNanosecondsPerSample,
                     1_000,
                     null,
@@ -485,7 +521,21 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     null,
                     null,
                     new Dictionary<string, long>(),
-                    Enumerable.Repeat(100L, options.OperationsPerSample).ToArray()))
+                    Enumerable.Repeat(100L, operations).ToArray())
+                    {
+                        ConcurrentLoad = workload == BenchmarkWorkload.ConcurrentCreate
+                            ? new ConcurrentLoadEvidence(
+                                BenchmarkProfiles.Scheduled.Concurrency,
+                                WaveCount: 1,
+                                FullyParallelWaveCount: 1,
+                                Attempts: BenchmarkProfiles.Scheduled.Concurrency,
+                                Completions: BenchmarkProfiles.Scheduled.Concurrency,
+                                SuccessfulOperations: 1,
+                                ConflictOperations: BenchmarkProfiles.Scheduled.Concurrency - 1,
+                                PeakInFlightProductionStoreCalls: BenchmarkProfiles.Scheduled.Concurrency)
+                            : null
+                    };
+                })
                 .ToArray();
 
         private static IReadOnlyList<BenchmarkSample> TamperFirstSignal(IReadOnlyList<BenchmarkSample> samples) =>

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Groundwork.Core.PhysicalStorage;
 
 namespace Groundwork.PhysicalStorage.Benchmarks;
@@ -22,7 +23,11 @@ public sealed record BenchmarkConsumerEvidenceResult(
     int RawOperationLatencyCount,
     string RawSamplesDigest,
     IReadOnlyList<string> NativePlanArtifacts,
-    string NativePlanDigest);
+    string NativePlanDigest)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? ConcurrentLoadEvidenceDigest { get; init; }
+}
 
 public sealed record BenchmarkConsumerEvidenceReport(
     string SchemaVersion,
@@ -98,7 +103,7 @@ public sealed record BenchmarkConsumerEvidenceReport(
             {
                 var provider = providers.Single(metadata => metadata.Provider == result.Case.Provider);
                 var workloadIdentity = WorkloadIdentity(result.Case.Workload);
-                var workloadVersion = "1.1";
+                var workloadVersion = WorkloadVersion(result.Case.Workload);
                 var fingerprint = Digest(new
                 {
                     workloadIdentity,
@@ -114,6 +119,10 @@ public sealed record BenchmarkConsumerEvidenceReport(
                     configuration.Concurrency
                 });
                 var rawSamplesDigest = Digest(result.Samples);
+                var concurrentLoadEvidenceDigest = ConcurrentLoadEvidenceDigest(
+                    result.Case.Workload,
+                    result.Samples,
+                    configuration.Concurrency);
                 var observableResultDigest = RequireObservableResultDigest(result);
                 var nativePlanArtifacts = result.PlanArtifacts
                     .SelectMany(artifact => new[] { artifact, $"{artifact}.assertions.json" })
@@ -147,7 +156,10 @@ public sealed record BenchmarkConsumerEvidenceReport(
                     result.Samples.Sum(sample => sample.OperationLatencyNanoseconds.Count),
                     rawSamplesDigest,
                     nativePlanArtifacts,
-                    nativePlanDigest);
+                    nativePlanDigest)
+                {
+                    ConcurrentLoadEvidenceDigest = concurrentLoadEvidenceDigest
+                };
             })
             .ToArray();
 
@@ -232,6 +244,33 @@ public sealed record BenchmarkConsumerEvidenceReport(
         }
     }
 
+    internal static string? ConcurrentLoadEvidenceDigest(
+        BenchmarkWorkload workload,
+        IReadOnlyList<BenchmarkSample> samples,
+        int configuredParallelism)
+    {
+        var isConcurrentCreate = workload == BenchmarkWorkload.ConcurrentCreate;
+        if (samples.Any(sample =>
+                !sample.HasValidConcurrentLoadEvidence(
+                    workload,
+                    configuredParallelism)))
+        {
+            throw new InvalidOperationException(
+                "Consumer evidence has invalid concurrent-load evidence.");
+        }
+
+        return isConcurrentCreate
+            ? Digest(samples.Select(sample => sample.ConcurrentLoad).ToArray())
+            : null;
+    }
+
+    internal static bool FixedTimeEquals(string? expected, string? actual) =>
+        expected is not null && actual is not null &&
+        expected.Length == actual.Length &&
+        CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(expected),
+            Encoding.UTF8.GetBytes(actual));
+
     private static string DigestFile(string path)
     {
         using var stream = File.OpenRead(path);
@@ -296,4 +335,10 @@ public sealed record BenchmarkConsumerEvidenceReport(
 
     internal static string WorkloadIdentity(BenchmarkWorkload workload) =>
         $"groundwork.physical-storage/{Kebab(workload.ToString())}";
+
+    internal static string WorkloadVersion(BenchmarkWorkload workload) => workload switch
+    {
+        BenchmarkWorkload.ConcurrentCreate => "1.2",
+        _ => "1.1"
+    };
 }

@@ -450,12 +450,40 @@ public static class BenchmarkScheduledGroupVerifier
         if (consumerResult.ProviderIdentity != BenchmarkConsumerEvidenceReport.ProviderIdentity(tuple.Provider) ||
             consumerResult.StorageForm != tuple.StorageForm ||
             consumerResult.WorkloadIdentity != BenchmarkConsumerEvidenceReport.WorkloadIdentity(tuple.Workload) ||
+            consumerResult.WorkloadVersion != BenchmarkConsumerEvidenceReport.WorkloadVersion(tuple.Workload) ||
             consumerResult.DataShape != tuple.DataShape ||
             consumerResult.IndependentRun != independentRun ||
             consumerResult.RawSampleCount != baseline.Records.Count ||
-            consumerResult.RawOperationLatencyCount != baseline.Records.Sum(record => record.Sample.OperationLatencyNanoseconds.Count))
+            consumerResult.RawOperationLatencyCount != baseline.Records.Sum(record => record.Sample.OperationLatencyNanoseconds.Count) ||
+            !HasExpectedConcurrentLoadDigest(
+                tuple.Workload,
+                baseline.Records,
+                baseline.Configuration.Concurrency,
+                consumerResult.ConcurrentLoadEvidenceDigest))
         {
             throw new InvalidOperationException("Measured scheduled worker consumer evidence does not match its exact tuple and raw sample inventory.");
+        }
+    }
+
+    private static bool HasExpectedConcurrentLoadDigest(
+        BenchmarkWorkload workload,
+        IReadOnlyList<RawBenchmarkRecord> records,
+        int configuredParallelism,
+        string? digest)
+    {
+        try
+        {
+            var expected = BenchmarkConsumerEvidenceReport.ConcurrentLoadEvidenceDigest(
+                workload,
+                records.Select(record => record.Sample).ToArray(),
+                configuredParallelism);
+            return expected is null
+                ? digest is null
+                : BenchmarkConsumerEvidenceReport.FixedTimeEquals(expected, digest);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
         }
     }
 

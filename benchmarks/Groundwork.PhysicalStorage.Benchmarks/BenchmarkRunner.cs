@@ -245,6 +245,10 @@ public sealed class BenchmarkRunner
                                 request.Configuration.Concurrency,
                                 cancellationToken);
                             ValidateExecution(execution, benchmarkCase);
+                            ValidateConcurrentLoadEvidence(
+                                execution,
+                                benchmarkCase,
+                                request.Configuration.Concurrency);
                             observableResultVector = RequireStableObservableResult(
                                 benchmarkCase,
                                 observableResultVector,
@@ -277,7 +281,8 @@ public sealed class BenchmarkRunner
                                 Merge(execution.ProviderWork, signalSnapshot.ToProviderWork()),
                                 execution.OperationLatencyNanoseconds)
                             {
-                                DatabaseSignal = signalSnapshot.Evidence
+                                DatabaseSignal = signalSnapshot.Evidence,
+                                ConcurrentLoad = execution.ConcurrentLoad
                             };
                             samples.Add(sample);
                             measuredOperations += sample.Operations;
@@ -404,6 +409,30 @@ public sealed class BenchmarkRunner
         {
             throw new InvalidOperationException(
                 $"[{benchmarkCase.Identity}] target must return one positive raw latency observation per operation.");
+        }
+    }
+
+    private static void ValidateConcurrentLoadEvidence(
+        WorkloadExecution execution,
+        BenchmarkCase benchmarkCase,
+        int configuredParallelism)
+    {
+        if (benchmarkCase.Workload != BenchmarkWorkload.ConcurrentCreate)
+        {
+            if (execution.ConcurrentLoad is not null)
+            {
+                throw new InvalidOperationException(
+                    $"[{benchmarkCase.Identity}] only concurrent-create may return concurrent-load evidence.");
+            }
+            return;
+        }
+
+        if (execution.ConcurrentLoad is null ||
+            !execution.ConcurrentLoad.MeetsConfiguredParallelism(configuredParallelism))
+        {
+            throw new InvalidOperationException(
+                $"[{benchmarkCase.Identity}] concurrent-create requires complete evidence with an observed " +
+                "peak equal to configured parallelism.");
         }
     }
 
