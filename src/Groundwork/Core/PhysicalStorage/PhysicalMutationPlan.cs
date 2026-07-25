@@ -265,6 +265,16 @@ public static class PhysicalMutationPlanCompiler
         ExecutableStorageRoute route,
         List<GroundworkDiagnostic> diagnostics)
     {
+        if (PhysicalDocumentFieldPaths.IsEnvelope(assignment.Path))
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MUTATION-005",
+                $"Assignment path '{assignment.Path}' must resolve to document content; " +
+                "envelope state is immutable mutation identity.",
+                $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
+            return null;
+        }
+
         var projection = route.ProjectedColumns.SingleOrDefault(candidate =>
             string.Equals(candidate.Definition.Path, assignment.Path, StringComparison.Ordinal));
         if (projection is null)

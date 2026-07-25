@@ -2,6 +2,7 @@ using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Queries;
 using System.Collections.Frozen;
+using System.Text.Json.Serialization;
 
 namespace Groundwork.Core.PhysicalStorage;
 
@@ -129,6 +130,10 @@ public enum BoundedMutationActionKind
 }
 
 /// <summary>A fixed mutation effect selected by manifest code rather than runtime callers.</summary>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "$action")]
+[JsonDerivedType(typeof(BoundedDeleteMutationAction), "delete")]
+[JsonDerivedType(typeof(BoundedAssignMutationAction), "assign")]
+[JsonDerivedType(typeof(BoundedTransitionMutationAction), "transition")]
 public abstract class BoundedMutationAction : IEquatable<BoundedMutationAction>
 {
     protected BoundedMutationAction(BoundedMutationActionKind kind) => Kind = kind;

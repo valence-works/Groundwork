@@ -53,11 +53,14 @@ transactional diagnostic-record provider.
   without repeating provider admission; the handle must outlive those stores. The apply handle's
   `SchemaApplication` result reports whether admission applied work or followed the restart-safe
   `NoChanges` path against matching durable state; physical store constructors remain internal.
-- Executes named bounded transitions and deletes through set-based `UpdateMany`/`DeleteMany`
-  operations. Provider-owned, route-scoped typed mutation mirrors and deterministic indexes exist
-  on both primary and linked collections. Additive per-mutation fence definitions and deduplicated
-  per-logical-index selector definitions flow through the leased physical-schema desired-state plan,
-  durable operation ledger, applied snapshot, validation, and CLI. Selector backfill is restart-safe,
+- Executes named bounded deletes, finite-source transitions, and manifest-fixed assignments through
+  set-based `DeleteMany`/`UpdateMany` operations. An assignment uses only its admitted selector,
+  overwrites every selected scalar target (including already-target, null, missing, and
+  extension-defined values), and records MongoDB's matched—not modified—count for durable replay.
+  Provider-owned, route-scoped typed mutation mirrors and deterministic indexes exist on both primary
+  and linked collections. Additive per-mutation fence definitions and deduplicated per-logical-index
+  selector definitions flow through the leased physical-schema desired-state plan, durable operation
+  ledger, applied snapshot, validation, and CLI. Selector backfill is restart-safe,
   incarnation-fenced, and runs once for each physical selector rather than once per mutation. Runtime
   writes carry immutable-binding fence values enforced by strict collection validators, so stale
   hosts cannot create selector-invisible documents during publication or rolling coexistence.

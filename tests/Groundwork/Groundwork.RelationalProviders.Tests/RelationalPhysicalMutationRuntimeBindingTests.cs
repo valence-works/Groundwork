@@ -154,14 +154,27 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
     }
 
     [Theory]
-    [InlineData("sqlserver")]
-    [InlineData("postgresql")]
-    public void Provider_runtime_fingerprint_rejects_an_altered_assignment_target_before_io(string provider)
+    [InlineData("sqlserver", "target")]
+    [InlineData("sqlserver", "path")]
+    [InlineData("sqlserver", "kind")]
+    [InlineData("postgresql", "target")]
+    [InlineData("postgresql", "path")]
+    [InlineData("postgresql", "kind")]
+    public void Provider_runtime_fingerprint_rejects_altered_assignment_semantics_before_io(
+        string provider,
+        string drift)
     {
         var fixture = Create(provider, includeAssignment: true);
         var manifest = fixture.Model.Manifest;
         var unit = manifest.StorageUnits.Single();
         var storage = unit.PhysicalStorage!;
+        var alteredAction = drift switch
+        {
+            "target" => BoundedMutationAction.Assign("priority", "41"),
+            "path" => BoundedMutationAction.Assign("category", "42"),
+            "kind" => BoundedMutationAction.Delete(),
+            _ => throw new ArgumentOutOfRangeException(nameof(drift), drift, null)
+        };
         var alteredStorage = new StorageUnitPhysicalStorage(
             storage.ProvisioningMode,
             storage.Policy,
@@ -172,7 +185,7 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
                 ? new BoundedMutationDeclaration(
                     mutation.Identity,
                     mutation.PredicateQueryIdentity,
-                    BoundedMutationAction.Assign("priority", "41"))
+                    alteredAction)
                 : mutation).ToArray());
         var alteredManifest = manifest with
         {
@@ -220,6 +233,20 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
         Assert.Equal(0, fixture.ConnectionFactoryCalls());
     }
 
+    [Theory]
+    [InlineData("sqlserver")]
+    [InlineData("postgresql")]
+    public void Provider_runtime_rejects_an_invalid_fixed_assignment_value_before_io(string provider)
+    {
+        var fixture = Create(provider, includeAssignment: true, assignmentTarget: "not-a-number");
+
+        Assert.Throws<InvalidDataException>(() => fixture.CreateRuntime(
+            fixture.Model.Manifest,
+            fixture.Model.Target.Routes.Single(),
+            fixture.Provider));
+        Assert.Equal(0, fixture.ConnectionFactoryCalls());
+    }
+
     public static IEnumerable<object[]> InvalidTransitionValues()
     {
         foreach (var provider in new[] { "sqlserver", "postgresql" })
@@ -244,7 +271,8 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
         string? transitionField = null,
         string? priorityTransitionSource = null,
         string? priorityTransitionTarget = null,
-        bool includeAssignment = false)
+        bool includeAssignment = false,
+        string assignmentTarget = "42")
     {
         var identity = provider switch
         {
@@ -264,7 +292,9 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
             priorityScale: includeAssignment ? null : 1,
             normalizer: normalizer,
             mutationOptions: includeAssignment
-                ? new RelationalMutationScenarioOptions(IncludePriorityAssignment: true)
+                ? new RelationalMutationScenarioOptions(
+                    IncludePriorityAssignment: true,
+                    PriorityAssignmentTarget: assignmentTarget)
                 : new RelationalMutationScenarioOptions(
                     IncludeCategoryTransition: transitionField is null,
                     IncludeTypedTransitions: transitionField is not null,

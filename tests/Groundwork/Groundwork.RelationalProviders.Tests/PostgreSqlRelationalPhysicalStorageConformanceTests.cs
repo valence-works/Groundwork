@@ -505,6 +505,14 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         RelationalBoundedMutationServerAssertions.AssignmentUpdatesEveryRouteSelectedDocumentAndReplaysExactCountAsync(MutationHarness());
 
     [Fact]
+    public Task Concurrent_bounded_assignment_retry_completes_once_and_replays_the_exact_count() =>
+        RelationalBoundedMutationServerAssertions.ConcurrentAssignmentRetryReplaysExactResultAsync(MutationHarness());
+
+    [Fact]
+    public Task Concurrent_distinct_assignments_retain_the_exact_matched_count() =>
+        RelationalBoundedMutationServerAssertions.ConcurrentDistinctAssignmentsRetainMatchedCountsAsync(MutationHarness());
+
+    [Fact]
     public Task Concurrent_bounded_retry_completes_once_and_replays_the_exact_count() =>
         RelationalBoundedMutationServerAssertions.ConcurrentRetryReplaysExactResultAsync(MutationHarness());
 
@@ -723,15 +731,23 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                 ])));
     }
 
-    [Fact]
-    public async Task Bounded_mutation_explains_the_exact_execution_stages_with_the_declared_physical_index()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Bounded_mutation_explains_the_exact_execution_stages_with_the_declared_physical_index(
+        bool assignment)
     {
         var model = RelationalPhysicalStorageTestModels.Create(
             PhysicalStorageForm.PhysicalEntityTable,
             PostgreSqlGroundworkCapabilities.Provider,
-            includePriority: false,
+            includePriority: assignment,
+            instance: Guid.NewGuid().ToString("N")[..8],
             normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
-            mutationOptions: new(IncludeCategoryTransition: true));
+            // Keep assignment evidence bound to its declared source index, not a covering compound alternative.
+            includeCategoryPriorityQuery: !assignment,
+            mutationOptions: assignment
+                ? new(IncludePriorityAssignment: true)
+                : new(IncludeCategoryTransition: true));
         await PhysicalSchemaApplication.ApplyAsync(
             model.Target,
             new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString()));
@@ -739,9 +755,19 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         var store = new PostgreSqlPhysicalDocumentStore(
             container.GetConnectionString(), model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "plan-target", "1", "{\"category\":\"pending\"}"))).Status);
+            "configurationDocument",
+            "plan-target",
+            "1",
+            assignment
+                ? "{\"category\":\"assignment-evidence\",\"priority\":7}"
+                : "{\"category\":\"pending\"}"))).Status);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "plan-noise", "1", "{\"category\":\"tools\"}"))).Status);
+            "configurationDocument",
+            "plan-noise",
+            "1",
+            assignment
+                ? "{\"category\":\"tools\",\"priority\":1}"
+                : "{\"category\":\"tools\"}"))).Status);
         await SeedPlanNoiseAsync(route);
         await AnalyzeRouteAsync(route);
         var mutationContext = new RelationalPhysicalMutationRuntimeContext(
@@ -751,10 +777,18 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             model.Target.Provider,
             PostgreSqlGroundworkCapabilities.Provider.Name,
             "postgresql");
-        var request = new DocumentMutation("configurationDocument", "revoke-pending", "explain");
+        var request = assignment
+            ? new DocumentMutation(
+                "configurationDocument",
+                "assign-priority",
+                "assignment-explain",
+                [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "assignment-evidence"))])
+            : new DocumentMutation("configurationDocument", "revoke-pending", "explain");
         var evidence = await PostgreSqlPhysicalMutationRuntime
             .Create(store, model.Manifest, route, model.Target.Provider)
             .ExplainAsync(request);
+        if (assignment)
+            Assert.IsType<PhysicalAssignMutationAction>(evidence.Plan.Action);
         var executed = new List<(string Identity, string CommandText, long? PreparedRestrictionRowCount)>();
         var execution = RelationalPhysicalMutationRuntime.CreateWithSelectionObserver(
             mutationContext,
@@ -768,6 +802,13 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         var result = await execution.ExecuteAsync(request);
         Assert.Equal(BoundedMutationStatus.Completed, result.Status);
         Assert.Equal(1, result.AffectedCount);
+        if (assignment)
+        {
+            var document = await store.LoadAsync("configurationDocument", "plan-target");
+            Assert.NotNull(document);
+            using var json = JsonDocument.Parse(document.ContentJson);
+            Assert.Equal(42, json.RootElement.GetProperty("priority").GetInt32());
+        }
         Assert.Equal(
             evidence.Commands.Select(command => (
                 command.Identity,

@@ -8,6 +8,7 @@ using Groundwork.Core.Transactions;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.Documents.UnitOfWork;
+using System.Text.Json;
 using Xunit;
 
 namespace Groundwork.Tests;
@@ -1307,6 +1308,18 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
+    public void AssignmentDeclarationRoundTripsThroughThePolymorphicManifestContract()
+    {
+        BoundedMutationAction assignment = BoundedMutationAction.Assign("status", "revoked");
+
+        var json = JsonSerializer.Serialize(assignment);
+        var roundTripped = JsonSerializer.Deserialize<BoundedMutationAction>(json);
+
+        Assert.Equal(assignment, roundTripped);
+        Assert.Contains("\"$action\":\"assign\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AssignmentIsRejectedBeforeProviderIoWhenTheHandlerDoesNotAdvertiseIt()
     {
         var fixture = CreateAssignmentFixture();
@@ -1353,6 +1366,47 @@ public sealed class PhysicalQueryPlanCompilerTests
             diagnostic.Code == (includeTarget ? "GW-MUTATION-007" : "GW-MUTATION-009"));
     }
 
+    [Theory]
+    [InlineData(PortablePhysicalType.Binary)]
+    [InlineData(PortablePhysicalType.Json)]
+    public void NamedAssignmentRejectsUnsupportedProjectedTypes(PortablePhysicalType targetType)
+    {
+        var fixture = CreateAssignmentFixture(targetType: targetType);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-MUTATION-009" &&
+            diagnostic.Message.Contains("unsupported", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData(PhysicalDocumentFieldPaths.Id)]
+    [InlineData(PhysicalDocumentFieldPaths.DocumentKind)]
+    [InlineData(PhysicalDocumentFieldPaths.StorageScope)]
+    [InlineData(PhysicalDocumentFieldPaths.Version)]
+    [InlineData(PhysicalDocumentFieldPaths.SchemaVersion)]
+    public void NamedAssignmentRejectsEnvelopePathsEvenWhenAProjectionSharesThePath(string targetPath)
+    {
+        var fixture = CreateAssignmentFixture(targetPath: targetPath);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-MUTATION-005" &&
+            diagnostic.Message.Contains("content", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public void AssignmentRequestFingerprintBindsTheManifestFixedTargetValue()
     {
@@ -1375,6 +1429,49 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.NotEqual(
             BoundedMutationRequestFingerprint.Create(request, revokedPlan, "tenant-a"),
             BoundedMutationRequestFingerprint.Create(request, disabledPlan, "tenant-a"));
+    }
+
+    [Fact]
+    public void MutationRequestFingerprintDistinguishesAssignmentTransitionAndDelete()
+    {
+        var fixture = CreateAssignmentFixture();
+        var actions = new BoundedMutationAction[]
+        {
+            BoundedMutationAction.Assign("status", "revoked"),
+            BoundedMutationAction.Transition("stimulusType", ["http"], "revoked"),
+            BoundedMutationAction.Delete()
+        };
+        var plans = actions.Select(action =>
+        {
+            var storage = new StorageUnitPhysicalStorage(
+                fixture.Storage.ProvisioningMode,
+                fixture.Storage.Policy,
+                fixture.Storage.LogicalIndexes,
+                fixture.Storage.BoundedQueries,
+                fixture.Storage.NameOverrides,
+                boundedMutations:
+                [
+                    new BoundedMutationDeclaration(
+                        "mutate",
+                        "list-by-stimulus-type",
+                        action)
+                ]);
+            return Assert.Single(PhysicalMutationPlanCompiler.Compile(
+                fixture.Route,
+                storage,
+                Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)).Plans);
+        }).ToArray();
+        var request = new DocumentMutation(
+            "workflowTriggerBinding",
+            "mutate",
+            "operation-a",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("stimulusType", "http"))]);
+
+        var fingerprints = plans
+            .Select(plan => BoundedMutationRequestFingerprint.Create(request, plan, "tenant-a"))
+            .ToArray();
+
+        Assert.Equal(fingerprints.Length, fingerprints.Distinct(StringComparer.Ordinal).Count());
     }
 
     [Theory]
@@ -3567,7 +3664,9 @@ public sealed class PhysicalQueryPlanCompilerTests
     private static PlanningFixture CreateAssignmentFixture(
         bool includeTarget = true,
         ProjectionCardinality targetCardinality = ProjectionCardinality.Scalar,
-        string targetValue = "revoked")
+        string targetValue = "revoked",
+        string targetPath = "status",
+        PortablePhysicalType targetType = PortablePhysicalType.String)
     {
         var logicalIndex = StimulusTypeIndex();
         var query = Query(BoundedQueryExecutionClass.ScaleBearing);
@@ -3578,9 +3677,9 @@ public sealed class PhysicalQueryPlanCompilerTests
         if (includeTarget)
         {
             projections.Add(new ProjectedColumnDefinition(
-                "status",
-                "status",
-                PortablePhysicalType.String,
+                "assignmentTarget",
+                targetPath,
+                targetType,
                 IsNullable: targetCardinality == ProjectionCardinality.CollectionElements,
                 Cardinality: targetCardinality,
                 MaxCollectionElements: targetCardinality == ProjectionCardinality.CollectionElements ? 16 : null));
@@ -3607,7 +3706,7 @@ public sealed class PhysicalQueryPlanCompilerTests
                 new BoundedMutationDeclaration(
                     "assign-status",
                     query.Identity,
-                    BoundedMutationAction.Assign("status", targetValue))
+                    BoundedMutationAction.Assign(targetPath, targetValue))
             ]);
         return Resolve(storage, null);
     }

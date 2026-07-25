@@ -17,6 +17,7 @@ internal sealed record RelationalMutationScenarioOptions(
     bool IncludeRangeDelete = false,
     bool IncludeTypedTransitions = false,
     bool IncludePriorityAssignment = false,
+    string PriorityAssignmentTarget = "42",
     RelationalTypedTransitionTestOptions? TypedTransitions = null);
 
 internal static class RelationalPhysicalStorageTestModels
@@ -47,10 +48,18 @@ internal static class RelationalPhysicalStorageTestModels
         PortablePhysicalType collectionType = PortablePhysicalType.String,
         IndexValueKind collectionLogicalValueKind = IndexValueKind.String,
         int? collectionLength = 128,
-        string? collectionCollation = "ordinal")
+        string? collectionCollation = "ordinal",
+        bool includeCategoryPriorityQuery = true)
     {
         mutationOptions ??= new RelationalMutationScenarioOptions();
         var typedTransitions = mutationOptions.TypedTransitions ?? new RelationalTypedTransitionTestOptions();
+        if (!includeCategoryPriorityQuery &&
+            (includeLatestPerCategory || mutationOptions.IncludeRangeDelete))
+        {
+            throw new ArgumentException(
+                "Latest-per-category and range-delete scenarios require the category-priority query.",
+                nameof(includeCategoryPriorityQuery));
+        }
         var template = RelationalTestManifests.MetadataManifest();
         instance ??= Guid.NewGuid().ToString("N")[..8];
         var columns = new List<ProjectedColumnDefinition>
@@ -100,12 +109,15 @@ internal static class RelationalPhysicalStorageTestModels
                 priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
             priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("priority", priorityIndexColumns.Count));
             indexes.Add(new PhysicalIndexDefinition("by-priority", priorityIndexColumns));
-            var compoundColumns = new List<PhysicalIndexColumnDefinition>();
-            if (scoped)
-                compoundColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
-            compoundColumns.Add(new PhysicalIndexColumnDefinition("category", compoundColumns.Count));
-            compoundColumns.Add(new PhysicalIndexColumnDefinition("priority", compoundColumns.Count));
-            indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns));
+            if (includeCategoryPriorityQuery)
+            {
+                var compoundColumns = new List<PhysicalIndexColumnDefinition>();
+                if (scoped)
+                    compoundColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
+                compoundColumns.Add(new PhysicalIndexColumnDefinition("category", compoundColumns.Count));
+                compoundColumns.Add(new PhysicalIndexColumnDefinition("priority", compoundColumns.Count));
+                indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns));
+            }
         }
         if (mutationOptions.IncludeTypedTransitions)
         {
@@ -166,7 +178,7 @@ internal static class RelationalPhysicalStorageTestModels
                 BoundedQueryExecutionClass.ScaleBearing,
                 supportsTotalCount: true));
         }
-        if (includePriority)
+        if (includePriority && includeCategoryPriorityQuery)
         {
             var compound = new LogicalIndexDeclaration(
                 "by-category-priority",
@@ -330,7 +342,7 @@ internal static class RelationalPhysicalStorageTestModels
             boundedMutations.Add(new BoundedMutationDeclaration(
                 "assign-priority",
                 "list-by-category",
-                BoundedMutationAction.Assign("priority", "42")));
+                BoundedMutationAction.Assign("priority", mutationOptions.PriorityAssignmentTarget)));
         }
 
         var definition = dedicatedWithoutLinked
