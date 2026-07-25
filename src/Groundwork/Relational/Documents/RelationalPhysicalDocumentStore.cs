@@ -405,8 +405,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         this.physicalSchemaProvider = physicalSchemaProvider ?? dialect.PhysicalSchemaProvider;
         PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
             this.manifest,
-            this.physicalSchemaProvider ?? new ProviderIdentity("relational", "unadvertised"),
-            supportsRelationshipMaterialization: false);
+            this.physicalSchemaProvider ?? new ProviderIdentity("relational", "unadvertised"));
         this.createMutationTransaction = createMutationTransaction ??
             (transaction => new RelationalPhysicalMutationTransaction(transaction));
         Access = access ?? throw new ArgumentNullException(nameof(access));

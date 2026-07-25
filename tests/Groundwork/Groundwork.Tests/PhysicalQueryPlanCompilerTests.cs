@@ -1565,7 +1565,7 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void Provider_admission_rejects_relationship_manifests_until_materialization_is_certified()
+    public void Provider_admission_rejects_relationship_manifests_without_a_public_preview_override()
     {
         var fixture = CreateRelationshipFixture(relatedTarget: false, includeMutation: false);
         var provider = new ProviderIdentity("provider-under-test", "1.0");
@@ -1573,15 +1573,16 @@ public sealed class PhysicalQueryPlanCompilerTests
         var exception = Assert.Throws<PhysicalRelationshipProviderNotSupportedException>(() =>
             PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
                 fixture.Manifest,
-                provider,
-                supportsRelationshipMaterialization: false));
+                provider));
 
         Assert.Contains("GW-RELATIONSHIP-012", exception.Message);
         Assert.Equal(["token-authorization"], exception.RelationshipIdentities);
-        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
-            fixture.Manifest,
-            provider,
-            supportsRelationshipMaterialization: true);
+        Assert.Equal(
+            2,
+            typeof(PhysicalRelationshipProviderAdmission)
+                .GetMethod(nameof(PhysicalRelationshipProviderAdmission.RequireMaterializationSupport))!
+                .GetParameters()
+                .Length);
     }
 
     [Fact]
@@ -1594,8 +1595,7 @@ public sealed class PhysicalQueryPlanCompilerTests
         var exception = Assert.Throws<PhysicalRelationshipProviderNotSupportedException>(() =>
             PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
                 guardOnly,
-                provider,
-                supportsRelationshipMaterialization: false));
+                provider));
 
         Assert.Equal(["token-authorization"], exception.RelationshipIdentities);
     }

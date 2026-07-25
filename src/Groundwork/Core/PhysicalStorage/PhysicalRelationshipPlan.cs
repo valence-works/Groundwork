@@ -277,15 +277,14 @@ public sealed class PhysicalRelationshipProviderNotSupportedException : NotSuppo
 
 /// <summary>
 /// Temporary fail-closed boundary for provider runtimes that have not implemented the admitted
-/// relationship plan. Providers must not perform schema or document I/O until they advertise and
-/// certify the generated reference materialization and target-key fence.
+/// relationship plan. Providers must not perform schema or document I/O until the four-provider
+/// certification gate exists. There is deliberately no public preview-admission override.
 /// </summary>
 public static class PhysicalRelationshipProviderAdmission
 {
     public static void RequireMaterializationSupport(
         StorageManifest manifest,
-        ProviderIdentity provider,
-        bool supportsRelationshipMaterialization)
+        ProviderIdentity provider)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(provider);
@@ -298,7 +297,7 @@ public static class PhysicalRelationshipProviderAdmission
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToArray();
-        if (supportsRelationshipMaterialization || relationshipIdentities.Length == 0)
+        if (relationshipIdentities.Length == 0)
             return;
         throw new PhysicalRelationshipProviderNotSupportedException(
             provider,

@@ -32,8 +32,7 @@ public sealed class MaterializationPlanner
         {
             PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
                 manifest,
-                materializationCapabilities.Provider,
-                supportsRelationshipMaterialization: false);
+                materializationCapabilities.Provider);
         }
         catch (PhysicalRelationshipProviderNotSupportedException exception)
         {

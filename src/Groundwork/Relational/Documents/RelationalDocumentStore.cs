@@ -66,8 +66,7 @@ public class RelationalDocumentStore : IDocumentStore
     private static void RequireRelationshipMaterializationSupport(StorageManifest manifest) =>
         PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
             manifest,
-            new ProviderIdentity("relational", "unadvertised"),
-            supportsRelationshipMaterialization: false);
+            new ProviderIdentity("relational", "unadvertised"));
 
     public async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
     {
