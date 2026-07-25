@@ -514,6 +514,7 @@ public static class PhysicalStorageResolver
                     query.PagingSupport,
                     query.SupportsDisjunction,
                     query.SupportsTotalCount,
+                    query.PredicateBindingMode,
                     Array.AsReadOnly(query.PredicateFields.ToArray()),
                     Array.AsReadOnly(query.ResidualPredicateFields.ToArray()),
                     Array.AsReadOnly(query.ResultOperations.Order().ToArray()),

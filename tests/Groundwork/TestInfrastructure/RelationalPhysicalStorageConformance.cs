@@ -1,4 +1,9 @@
+using Groundwork.Core.Capabilities;
+using Groundwork.Core.Indexing;
+using Groundwork.Core.Intents;
+using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.Queries;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Scoping;
 using Groundwork.Documents.Scoping;
@@ -22,6 +27,8 @@ public abstract class RelationalPhysicalStorageConformance
     protected abstract Task<RelationalScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form);
 
     protected abstract Task<RelationalPhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form);
+
+    protected abstract Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync();
 
     [Theory]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
@@ -175,6 +182,117 @@ public abstract class RelationalPhysicalStorageConformance
             await fixture.AcquireApplicationLockAsync(cancellation.Token));
     }
 
+    [Fact]
+    public async Task Explicitly_unfiltered_global_id_route_executes_offset_page_and_count_on_the_comparison_key_index()
+    {
+        await using var fixture = await CreateUnfilteredGlobalIdQueryAsync();
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("c", "ignored", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("a", "ignored", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("b", "ignored", 0))).Status);
+
+        var pageQuery = new DocumentQuery(
+            "configurationDocument",
+            "list-all-by-id",
+            [],
+            [new DocumentQueryOrder(PhysicalDocumentFieldPaths.Id)],
+            skip: 1,
+            take: 1);
+        var countQuery = new DocumentQuery(
+            pageQuery.DocumentKind,
+            pageQuery.QueryIdentity,
+            [],
+            pageQuery.Order,
+            resultOperation: BoundedQueryResultOperation.Count);
+
+        var page = await fixture.Queries.QueryAsync(pageQuery);
+        var count = await fixture.Queries.CountAsync(countQuery);
+        var explanation = await Assert.IsAssignableFrom<IPhysicalDocumentQueryExplainer>(fixture.Queries)
+            .ExplainAsync(pageQuery);
+
+        Assert.Equal(3, page.TotalCount);
+        Assert.Equal("b", Assert.Single(page.Documents).Id);
+        Assert.Equal(3, count);
+        Assert.Empty(explanation.Plan.Predicates);
+        Assert.Equal(PhysicalQueryAccessKind.PrimaryEnvelope, explanation.Plan.AccessKind);
+        Assert.Equal(fixture.Route.Indexes.Single().Name, explanation.Plan.IndexName);
+        Assert.Equal(
+            fixture.Route.Envelope.Identity.ComparisonKey.Identifier,
+            Assert.Single(explanation.Plan.Order).Field.Identifier);
+        Assert.Equal(
+            [PhysicalDocumentQueryCommandKind.Count, PhysicalDocumentQueryCommandKind.Page],
+            explanation.Commands.Select(command => command.Kind));
+        Assert.All(explanation.Commands, command => Assert.NotEqual(0, command.ProviderAppliedMaximumRows));
+    }
+
+    protected static (StorageManifest Manifest, PhysicalSchemaTarget Target) CreateUnfilteredGlobalIdQueryModel(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        string instance)
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-id",
+            [new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all-by-id",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true,
+            sortFields: [new BoundedQuerySortField(PhysicalDocumentFieldPaths.Id, PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "global_documents",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [new PhysicalIndexColumnDefinition("id_comparison_key", 0)])
+            ]);
+        var unit = new StorageUnit(
+            new StorageUnitIdentity("configurationDocument"),
+            "Configuration document",
+            StorageIntent.PortableDocument(),
+            LifecyclePolicy.Mutable,
+            IdentityPolicy.StringId(),
+            TenancyPolicy.Global,
+            ConcurrencyPolicy.Optimistic(),
+            SerializationPolicy.Json(),
+            [],
+            [],
+            PhysicalizationPolicy.Portable)
+        {
+            PhysicalStorage = new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Explicit(definition),
+                [index],
+                [query])
+        };
+        var manifest = new StorageManifest(
+            new StorageManifestIdentity($"unfiltered-global-id.{instance}"),
+            new StorageManifestOwner("tests"),
+            new StorageManifestVersion("1"),
+            [unit],
+            new HashSet<string>(),
+            []);
+        var resolution = PhysicalStorageResolver.Resolve(
+            manifest,
+            new DelegatePhysicalNamePolicy(context => $"gw_{instance}_{context.FeatureDefaultLogicalName}"),
+            normalizer);
+        if (!resolution.IsValid)
+            throw new InvalidOperationException(string.Join("; ", resolution.Diagnostics.Select(x => x.Message)));
+        var routes = ExecutableStorageRouteCompiler.Compile(resolution.Definitions);
+        if (!routes.IsValid)
+            throw new InvalidOperationException(string.Join("; ", routes.Diagnostics.Select(x => x.Message)));
+
+        return (manifest, new PhysicalSchemaTarget(manifest.Identity, manifest.Version, provider, routes.Routes));
+    }
+
     private static SaveDocumentRequest Save(string id, string category, long expectedVersion) =>
         new("configurationDocument", id, "1", $"{{\"category\":\"{category}\",\"priority\":1}}", expectedVersion);
 }
@@ -212,5 +330,17 @@ public sealed class RelationalPhysicalStorageEvolutionFixture(
     public Func<Task<RelationalPhysicalStorageFixture>> ApplyAdditiveAsync { get; } = applyAdditiveAsync;
     public Func<Task<PhysicalSchemaApplicationOutcome>> RestartAsync { get; } = restartAsync;
     public Func<CancellationToken, ValueTask<IAsyncDisposable>> AcquireApplicationLockAsync { get; } = acquireApplicationLockAsync;
+    public ValueTask DisposeAsync() => disposeAsync();
+}
+
+public sealed class RelationalUnfilteredGlobalQueryFixture(
+    IDocumentStore documents,
+    IBoundedDocumentStore queries,
+    ExecutableStorageRoute route,
+    Func<ValueTask> disposeAsync) : IAsyncDisposable
+{
+    public IDocumentStore Documents { get; } = documents;
+    public IBoundedDocumentStore Queries { get; } = queries;
+    public ExecutableStorageRoute Route { get; } = route;
     public ValueTask DisposeAsync() => disposeAsync();
 }

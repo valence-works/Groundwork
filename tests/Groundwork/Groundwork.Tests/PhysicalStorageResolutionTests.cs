@@ -1235,6 +1235,133 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
+    public void Explicit_empty_predicate_fields_are_distinct_from_the_omitted_legacy_binding()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-id",
+            [new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var omitted = new BoundedQueryDeclaration(
+            "list-by-id",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField(PhysicalDocumentFieldPaths.Id, PhysicalSortDirection.Ascending)]);
+        var unfiltered = new BoundedQueryDeclaration(
+            omitted.Identity,
+            omitted.IndexIdentity,
+            omitted.Operations,
+            omitted.SortSupport,
+            omitted.PagingSupport,
+            omitted.ExecutionClass,
+            omitted.SupportsDisjunction,
+            omitted.SupportsTotalCount,
+            omitted.SortFields,
+            predicateFields: []);
+
+        Assert.Equal(BoundedQueryPredicateBindingMode.ImplicitFirstLogicalIndexField, omitted.PredicateBindingMode);
+        Assert.Equal(BoundedQueryPredicateBindingMode.DeclaredFields, unfiltered.PredicateBindingMode);
+        Assert.Empty(unfiltered.PredicateFields);
+        Assert.NotEqual(omitted, unfiltered);
+        Assert.Equal(2, new HashSet<BoundedQueryDeclaration> { omitted, unfiltered }.Count);
+    }
+
+    [Fact]
+    public void Explicit_empty_predicate_fields_change_the_scale_bearing_definition_fingerprint()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-by-category",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "configurationDocument",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [new PhysicalIndexColumnDefinition("category", 0)])
+            ]);
+        var omitted = WithPhysicalStorage(
+            SampleManifests.MetadataManifest() with
+            {
+                StorageUnits = [SampleManifests.MetadataManifest().StorageUnits.Single() with { Tenancy = TenancyPolicy.Global }]
+            },
+            new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Explicit(definition),
+                [index],
+                [query]));
+        var declaredEmpty = omitted with
+        {
+            StorageUnits =
+            [
+                omitted.StorageUnits.Single() with
+                {
+                    PhysicalStorage = new StorageUnitPhysicalStorage(
+                        StorageUnitProvisioningMode.Declared,
+                        PhysicalStoragePolicy.Explicit(definition),
+                        [index],
+                        [new BoundedQueryDeclaration(
+                            query.Identity,
+                            query.IndexIdentity,
+                            query.Operations,
+                            query.SortSupport,
+                            query.PagingSupport,
+                            query.ExecutionClass,
+                            query.SupportsDisjunction,
+                            query.SupportsTotalCount,
+                            query.SortFields,
+                            predicateFields: [])])
+                }
+            ]
+        };
+
+        var omittedResolved = PhysicalStorageResolver.Resolve(
+            omitted,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+        var declaredEmptyResolved = PhysicalStorageResolver.Resolve(
+            declaredEmpty,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.True(omittedResolved.IsValid, string.Join("; ", omittedResolved.Diagnostics.Select(x => x.Message)));
+        Assert.True(declaredEmptyResolved.IsValid, string.Join("; ", declaredEmptyResolved.Diagnostics.Select(x => x.Message)));
+        Assert.NotEqual(
+            Assert.Single(omittedResolved.Definitions).Fingerprint,
+            Assert.Single(declaredEmptyResolved.Definitions).Fingerprint);
+        Assert.Contains(
+            "\"predicateBindingMode\":\"DeclaredFields\"",
+            PhysicalStorageDefinitionSerializer.Serialize(Assert.Single(declaredEmptyResolved.Definitions)),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Omitted_identity_predicate_keeps_the_exact_lookup_and_comparison_key_requirement()
+    {
+        var result = ResolveExplicitIdentityIndex(
+            [PortableQueryOperation.Equal],
+            ["id_comparison_key"]);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-025");
+    }
+
+    [Fact]
     public void DefaultScaleBearingResolutionProjectsResidualPathsWithoutAddingThemToTheIndexKey()
     {
         var index = new LogicalIndexDeclaration(

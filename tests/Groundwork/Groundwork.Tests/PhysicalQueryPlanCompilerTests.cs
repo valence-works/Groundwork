@@ -236,7 +236,9 @@ public sealed class PhysicalQueryPlanCompilerTests
             ordinary.SupportsDisjunction,
             ordinary.SupportsTotalCount,
             ordinary.SortFields,
-            ordinary.PredicateFields,
+            ordinary.PredicateBindingMode == BoundedQueryPredicateBindingMode.ImplicitFirstLogicalIndexField
+                ? null
+                : ordinary.PredicateFields,
             ordinary.ResultOperations,
             ordinary.LatestPerKeyPath);
         var storage = new StorageUnitPhysicalStorage(
@@ -652,6 +654,53 @@ public sealed class PhysicalQueryPlanCompilerTests
             Capabilities(PhysicalQuerySourceKind.PrimaryCanonicalJson)));
 
         Assert.Equal("id", Assert.Single(plan.Order, order => order.IsIdentityTieBreak).Path);
+    }
+
+    [Fact]
+    public void Explicit_empty_predicate_fields_plan_an_unfiltered_global_id_ordered_offset_count_route()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-id",
+            [new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-by-id",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true,
+            sortFields: [new BoundedQuerySortField(PhysicalDocumentFieldPaths.Id, PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "global_documents",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [new PhysicalIndexColumnDefinition("id_comparison_key", 0)])
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [index],
+            [query]);
+        var fixture = Resolve(storage, binding: null, tenancy: TenancyPolicy.Global);
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryEnvelope)));
+
+        Assert.Empty(plan.Predicates);
+        Assert.Equal(PhysicalQueryAccessKind.PrimaryEnvelope, plan.AccessKind);
+        Assert.Equal("id_comparison_key", Assert.Single(plan.Order).Field.Identifier);
+        Assert.Equal(Assert.Single(fixture.Route.Indexes).Name, plan.IndexName);
+        Assert.Contains(BoundedQueryResultOperation.Count, plan.ResultOperations);
     }
 
     [Fact]
@@ -2791,7 +2840,9 @@ public sealed class PhysicalQueryPlanCompilerTests
             routedQuery.SupportsDisjunction,
             routedQuery.SupportsTotalCount,
             routedQuery.SortFields,
-            routedQuery.PredicateFields,
+            routedQuery.PredicateBindingMode == BoundedQueryPredicateBindingMode.ImplicitFirstLogicalIndexField
+                ? null
+                : routedQuery.PredicateFields,
             routedQuery.ResultOperations,
             routedQuery.LatestPerKeyPath);
         var staleStorage = new StorageUnitPhysicalStorage(

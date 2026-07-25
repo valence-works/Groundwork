@@ -53,13 +53,14 @@ A logical index supplies one default `IndexValueKind`. `IndexField.ValueKind` ma
 default for a field in a heterogeneous compound index, making differences such as keyword identity
 plus date-time ordering explicit rather than inferring semantics from provider storage.
 
-For compatibility, a declaration without explicit predicate fields filters the first path in its
-logical index. New compound declarations should always list their predicate fields. An equality
-predicate prefix may be followed by a sort suffix; requested directions must match the physical
-index either forward or fully reversed. Runtime requests using that suffix must provide exactly one
-standalone equality comparison for every skipped prefix field; an absent prefix or an equality inside
-a disjunction is rejected before dispatch. Every ordered plan appends the document identity as an
-ascending total-order tie-breaker.
+For compatibility, omitting `predicateFields` filters the first path in the logical index. Passing
+an explicit empty `predicateFields: []` is different: it declares a truly unfiltered bounded route.
+New compound declarations should always list their predicate fields. An equality predicate prefix
+may be followed by a sort suffix; requested directions must match the physical index either forward
+or fully reversed. Runtime requests using that suffix must provide exactly one standalone equality
+comparison for every skipped prefix field; an absent prefix or an equality inside a disjunction is
+rejected before dispatch. Every ordered plan appends the document identity as an ascending
+total-order tie-breaker.
 
 `BoundedQueryResidualPredicateField` declares an optional server-side filter without independently
 adding its path to the logical or physical index key or contributing predicate-prefix evidence.

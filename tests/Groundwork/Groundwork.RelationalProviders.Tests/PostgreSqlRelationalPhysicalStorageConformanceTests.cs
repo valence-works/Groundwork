@@ -1234,6 +1234,29 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             dedicatedWithoutLinked: dedicatedWithoutLinked,
             normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames));
 
+    protected override async Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
+    {
+        var model = CreateUnfilteredGlobalIdQueryModel(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            Guid.NewGuid().ToString("N")[..8]);
+        var connectionString = container.GetConnectionString();
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new PostgreSqlPhysicalSchemaExecutor(connectionString));
+        var route = model.Target.Routes.Single();
+        var store = new PostgreSqlPhysicalDocumentStore(
+            connectionString,
+            model.Manifest,
+            model.Target.Routes,
+            DocumentStoreAccess.Global);
+        return new RelationalUnfilteredGlobalQueryFixture(
+            store,
+            PostgreSqlPhysicalQueryRuntime.Create(store, model.Manifest, route, model.Target.Provider),
+            route,
+            () => ValueTask.CompletedTask);
+    }
+
     protected override async Task<RelationalServerIdentityFixture> CreateIdentityAsync(
         PhysicalStorageForm form,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal)
