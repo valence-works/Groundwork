@@ -113,12 +113,13 @@ public readonly record struct DiagnosticRequestFingerprint
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(definition);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        Append(hash, "diagnostic-group-query-v1");
+        Append(hash, "diagnostic-group-query-v2");
         Append(hash, query.Scope.TenantId);
         Append(hash, query.Scope.ScopeId);
         Append(hash, query.Stream.Value);
         Append(hash, query.Profile);
         Append(hash, query.Take);
+        Append(hash, query.InputRecordLimit);
         Append(hash, query.Order is null ? 0 : 1);
         Append(hash, query.Order?.Alias ?? "");
         Append(hash, query.Order is null ? 0 : (int)query.Order.Direction);
