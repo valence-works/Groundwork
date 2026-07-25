@@ -52,6 +52,37 @@ WORKLOADS = (
     "clientRestartValidation",
     "storageGrowth",
 )
+PAYLOAD_TEMPLATE = (
+    '{"status":"{status}","rank":{rank},"category":"{category}",'
+    '"padding":{padding:null-or-fixed-x-utf8-bytes}}'
+)
+PAYLOAD_TEMPLATE_DIGEST = hashlib.sha256(PAYLOAD_TEMPLATE.encode("utf-8")).hexdigest()
+
+
+def payload_profile_for(workload: str) -> dict[str, object]:
+    """Return the closed reviewed profile bound to one workload.
+
+    Profiles deliberately do not multiply the matrix: ordinary writes retain the
+    established 0-byte shape and storageGrowth has an explicit 1 KiB shape.
+    """
+    storage_growth = workload == "storageGrowth"
+    return {
+        "id": "storage-growth-1k-v1" if storage_growth else "ordinary-json-v1",
+        "version": "v1",
+        "canonicalTemplate": PAYLOAD_TEMPLATE,
+        "canonicalTemplateDigest": PAYLOAD_TEMPLATE_DIGEST,
+        "paddingBytes": 1024 if storage_growth else 0,
+        "entropy": "deterministicFixedCharacter",
+        "contentShape": (
+            "json/object/status-rank-category-padding-fixed-x-utf8"
+            if storage_growth
+            else "json/object/status-rank-category-padding-null"
+        ),
+        "applicableWorkloads": ["storageGrowth"] if storage_growth else [
+            item for item in WORKLOADS if item != "storageGrowth"
+        ],
+        "reviewed": True,
+    }
 
 
 @dataclass(frozen=True)
@@ -264,7 +295,8 @@ def verify(
         raise SystemExit(f"scheduled shard set mismatch; missing={missing}, extra={extra}")
 
     expected_workers = {
-        (provider.request_token, FORMS[form], dataset, selectivity, workload, role, independent_run)
+        (provider.request_token, FORMS[form], dataset, selectivity, workload,
+         payload_profile_for(workload)["id"], role, independent_run)
         for provider, form, dataset, workload in itertools.product(
             matrix.providers, matrix.forms, matrix.datasets, matrix.workloads)
         for selectivity in matrix.selectivity_basis_points
@@ -322,12 +354,18 @@ def verify(
             workload = request["workloads"][0]
             role = invocation["role"]
             independent_run = invocation["independentRun"]
+            expected_profile = payload_profile_for(workload)
+            if shape.get("payloadProfile") != expected_profile:
+                raise SystemExit(f"{artifact_name} has an unreviewed or mismatched payload profile for {workload}")
+            if shape.get("payloadPaddingBytes") != expected_profile["paddingBytes"]:
+                raise SystemExit(f"{artifact_name} payload padding does not match its declared profile")
             worker = (
                 request["configuration"]["providers"][0],
                 request["configuration"]["storageForms"][0],
                 shape["datasetSize"],
                 shape["querySelectivityBasisPoints"],
                 workload,
+                expected_profile["id"],
                 role,
                 independent_run,
             )
@@ -337,8 +375,7 @@ def verify(
 
             if worker[0] != provider.request_token or worker[1] != FORMS[form] or worker[2] != dataset:
                 raise SystemExit(f"{artifact_name} contains out-of-shard worker {worker}")
-            if (shape["payloadPaddingBytes"] != 0 or
-                    shape["querySelectivityBasisPoints"] not in matrix.selectivity_basis_points):
+            if shape["querySelectivityBasisPoints"] not in matrix.selectivity_basis_points:
                 raise SystemExit(f"{artifact_name} contains an unexpected data shape")
 
             if role == "measured":
@@ -379,7 +416,7 @@ def verify(
                     raise SystemExit(f"{artifact_name} has an invalid result digest")
                 digest_key = (
                     shape["datasetSize"],
-                    shape["payloadPaddingBytes"],
+                    expected_profile["id"],
                     shape["querySelectivityBasisPoints"],
                     workload,
                 )

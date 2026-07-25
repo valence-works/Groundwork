@@ -66,6 +66,9 @@ public sealed class BenchmarkWorkflowContractTests
             BenchmarkProfiles.ScheduledDimensions.QuerySelectivityBasisPoints);
         Assert.Contains(workflow, line => line.Contains("--selectivity-bps 1000,5000", StringComparison.Ordinal));
         Assert.Contains("      max-parallel: 36", workflow);
+        Assert.Contains(workflow, line => line.Contains(
+            "--payload-profiles ordinary-json-v1,storage-growth-1k-v1", StringComparison.Ordinal));
+        Assert.DoesNotContain(workflow, line => line.Contains("--payload-padding-bytes 0", StringComparison.Ordinal));
         Assert.Equal(360, JobTimeout(workflow, "scheduled-contracts") +
                           JobTimeout(workflow, "scheduled-shard") +
                           JobTimeout(workflow, "verify-and-aggregate"));
@@ -222,7 +225,7 @@ public sealed class BenchmarkWorkflowContractTests
         Assert.Contains("--providers sqlite", workflow, StringComparison.Ordinal);
         Assert.Contains("--forms shared", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "--workloads reused-client-point-read-batch,indexed-query,insert,optimistic-concurrency,pagination-and-count",
+            "--workloads reused-client-point-read-batch,indexed-query,insert,optimistic-concurrency,pagination-and-count,storage-growth",
             workflow,
             StringComparison.Ordinal);
         Assert.DoesNotContain("--providers all", workflow, StringComparison.Ordinal);
@@ -366,7 +369,13 @@ public sealed class BenchmarkWorkflowContractTests
             request = new
             {
                 configuration = new { providers = new[] { requestToken }, storageForms = new[] { "sharedDocuments" } },
-                dataShape = new { datasetSize = 1000, payloadPaddingBytes = 0, querySelectivityBasisPoints = 1000 },
+                dataShape = new
+                {
+                    datasetSize = 1000,
+                    payloadProfile = BenchmarkPayloadProfiles.For(BenchmarkWorkload.ClientResetPointReadBatch),
+                    payloadPaddingBytes = 0,
+                    querySelectivityBasisPoints = 1000
+                },
                 workloads = new[] { "clientResetPointReadBatch" }
             },
             role,
@@ -394,7 +403,13 @@ public sealed class BenchmarkWorkflowContractTests
                         workloadIdentity = "groundwork.physical-storage/client-reset-point-read-batch",
                         providerIdentity = ProviderIdentity(artifactToken),
                         storageForm = "sharedDocuments",
-                        dataShape = new { datasetSize = 1000, payloadPaddingBytes = 0, querySelectivityBasisPoints = 1000 },
+                        dataShape = new
+                        {
+                            datasetSize = 1000,
+                            payloadProfile = BenchmarkPayloadProfiles.For(BenchmarkWorkload.ClientResetPointReadBatch),
+                            payloadPaddingBytes = 0,
+                            querySelectivityBasisPoints = 1000
+                        },
                         independentRun,
                         rawSampleCount = 1,
                         rawOperationLatencyCount = 1,
@@ -427,7 +442,7 @@ public sealed class BenchmarkWorkflowContractTests
     };
 
     private static void WriteJson(string path, object value) =>
-        File.WriteAllText(path, JsonSerializer.Serialize(value));
+        File.WriteAllText(path, JsonSerializer.Serialize(value, BenchmarkJson.CompactOptions));
 
     private sealed record VerifierCommandResult(int ExitCode, string Output);
 

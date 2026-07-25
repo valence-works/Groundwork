@@ -89,9 +89,7 @@ public interface IPhysicalStorageBenchmarkTarget : IAsyncDisposable
     IReadOnlyDictionary<string, string> ProviderConfiguration { get; }
 
     Task InitializeAsync(CancellationToken cancellationToken);
-    Task SeedAsync(int seed, int count, CancellationToken cancellationToken);
-    Task SeedAsync(int seed, BenchmarkDataShape shape, CancellationToken cancellationToken) =>
-        SeedAsync(seed, shape.DatasetSize, cancellationToken);
+    Task SeedAsync(int seed, BenchmarkDataShape shape, CancellationToken cancellationToken);
     Task<CorrectnessGateResult> RunCorrectnessGateAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<NativePlanEvidence>> CaptureNativePlansAsync(
         IReadOnlyList<BenchmarkPlanRequest> requests,

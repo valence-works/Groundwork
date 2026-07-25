@@ -15,16 +15,19 @@ public sealed class BenchmarkRunProtocolTests
                 Providers = [BenchmarkProvider.Sqlite],
                 StorageForms = [PhysicalStorageForm.PhysicalEntityTable]
             },
-            [BenchmarkWorkload.IndexedQuery],
+            [BenchmarkWorkload.IndexedQuery, BenchmarkWorkload.StorageGrowth],
             null,
             null,
             AllowContainers: false,
             RegressionConfirmationRun: false,
             new BenchmarkMatrixDimensions(
                 BenchmarkProfiles.RatifiedDatasetSizes,
-                PayloadPaddingBytes: [0, 1_024],
+                PayloadPaddingBytes: [0],
                 QuerySelectivityBasisPoints: [1_000, 5_000],
-                IndependentRuns: BenchmarkProfiles.ScheduledDimensions.IndependentRuns));
+                IndependentRuns: BenchmarkProfiles.ScheduledDimensions.IndependentRuns)
+            {
+                PayloadProfileIds = BenchmarkPayloadProfiles.DefaultReviewedIds
+            });
 
         var invocations = BenchmarkRunProtocol.CreateInvocations(request, "group-a");
 
@@ -73,6 +76,15 @@ public sealed class BenchmarkRunProtocolTests
         Assert.Equal(
             BenchmarkProfiles.RatifiedDatasetSizes,
             invocations.Select(invocation => invocation.Request.DataShape!.DatasetSize).Distinct());
+        Assert.All(invocations, invocation =>
+        {
+            var workload = Assert.Single(invocation.Request.Workloads);
+            var profile = invocation.Request.DataShape!.PayloadProfile;
+            Assert.True(profile.AppliesTo(workload));
+            Assert.Equal(
+                workload == BenchmarkWorkload.StorageGrowth ? 1_024 : 0,
+                invocation.Request.DataShape.PayloadPaddingBytes);
+        });
     }
 
     [Fact]
@@ -81,6 +93,56 @@ public sealed class BenchmarkRunProtocolTests
         Assert.Throws<InvalidOperationException>(() => new BenchmarkDataShape(1_000, -1, 5_000).Validate());
         Assert.Throws<InvalidOperationException>(() => new BenchmarkDataShape(1_000, 0, 0).Validate());
         Assert.Throws<InvalidOperationException>(() => new BenchmarkDataShape(1_000, 0, 10_000).Validate());
+    }
+
+    [Fact]
+    public void Scheduled_workers_reject_a_tampered_or_unreviewed_payload_profile()
+    {
+        var profile = BenchmarkPayloadProfiles.For(BenchmarkWorkload.IndexedQuery) with
+        {
+            PaddingBytes = 1_024
+        };
+        var request = new BenchmarkRunRequest(
+            Environment.CurrentDirectory,
+            BenchmarkProfiles.Scheduled with
+            {
+                Providers = [BenchmarkProvider.Sqlite],
+                StorageForms = [PhysicalStorageForm.SharedDocuments]
+            },
+            [BenchmarkWorkload.IndexedQuery],
+            "artifacts/worker",
+            null,
+            AllowContainers: false,
+            RegressionConfirmationRun: false,
+            DataShape: new BenchmarkDataShape(1_000, profile, 1_000),
+            IndependentRun: 1,
+            Role: BenchmarkExecutionRole.Measured);
+
+        var configuration = request.Configuration with { DataShape = request.DataShape };
+        var exception = Assert.Throws<InvalidOperationException>(() => configuration.Validate());
+
+        Assert.Contains("payload profile", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Worker_rejects_a_reviewed_profile_bound_to_a_different_workload()
+    {
+        var measured = MeasuredInvocation();
+        var invocation = measured with
+        {
+            Request = measured.Request with
+            {
+                DataShape = new BenchmarkDataShape(
+                    250,
+                    BenchmarkPayloadProfiles.For(BenchmarkWorkload.StorageGrowth),
+                    5_000)
+            }
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            BenchmarkRunProtocol.ValidateInvocation(invocation));
+
+        Assert.Contains("does not apply", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

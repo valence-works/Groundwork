@@ -6,7 +6,7 @@ public static class Issue50EvidenceRequirements
 {
     public static IReadOnlyList<string> Remaining { get; } =
     [
-        "The required 1K/100K/1M matrix for the reviewed payload profile and the ratified 10% indexed-query acceptance and 50% scan-characterization selectivity shapes has not been executed.",
+        "The required 1K/100K/1M matrix for the reviewed payload profiles and the ratified 10% indexed-query acceptance and 50% scan-characterization selectivity shapes has not been executed.",
         "exact-HEAD live evidence from all four providers (SQLite, SQL Server, PostgreSQL, and MongoDB) is incomplete.",
         "Target-scoped provider database-work signals, sustained concurrent-load evidence, and actual bounded recovery evidence are incomplete.",
         "The approved immutable-baseline publication and comparison workflow is incomplete."

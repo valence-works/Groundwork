@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Sqlite;
@@ -119,6 +121,67 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         Assert.Equal(5, execution.LogicalMutations);
     }
 
+    [Fact]
+    public async Task Storage_growth_consumes_the_declared_profile_instead_of_a_hidden_1KiB_override()
+    {
+        var reviewedInstance = Guid.NewGuid().ToString("N")[..8];
+        var reviewedProfile = BenchmarkPayloadProfiles.For(BenchmarkWorkload.StorageGrowth);
+        await using var reviewed = new SqliteBenchmarkTarget(
+            PhysicalStorageForm.SharedDocuments,
+            reviewedInstance,
+            scratch,
+            5);
+        await reviewed.InitializeAsync(CancellationToken.None);
+        await reviewed.SeedAsync(
+            BenchmarkProfiles.ReproducibleSeed,
+            new BenchmarkDataShape(
+                25,
+                reviewedProfile,
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints),
+            CancellationToken.None);
+        var reviewedExecution = await reviewed.ExecuteAsync(
+            BenchmarkWorkload.StorageGrowth,
+            iteration: 0,
+            operations: 1,
+            concurrency: 1,
+            CancellationToken.None);
+        var returnedPayload = Assert.Single(
+            Assert.IsType<BenchmarkObservableResultVector>(reviewedExecution.ObservableResultVector).Results).Payload;
+        Assert.NotNull(returnedPayload);
+        var returnedPadding = AssertPaddingBytes(returnedPayload, reviewedProfile.PaddingBytes);
+
+        var persistedPadding = await ReadStorageGrowthPaddingAsync(
+            DatabasePath(reviewedInstance, PhysicalStorageForm.SharedDocuments),
+            PhysicalStorageForm.SharedDocuments,
+            reviewedInstance);
+        Assert.Equal(reviewedProfile.PaddingBytes, persistedPadding.Utf8ByteCount);
+        Assert.Equal(returnedPadding, persistedPadding.Value);
+        Assert.Equal(reviewedProfile.PaddingBytes, Encoding.UTF8.GetByteCount(persistedPadding.Value));
+
+        await using var legacy = new SqliteBenchmarkTarget(
+            PhysicalStorageForm.SharedDocuments,
+            Guid.NewGuid().ToString("N")[..8],
+            scratch,
+            5);
+        await legacy.InitializeAsync(CancellationToken.None);
+        await legacy.SeedAsync(
+            BenchmarkProfiles.ReproducibleSeed,
+            new BenchmarkDataShape(
+                25,
+                BenchmarkPayloadProfiles.CreateLegacyPadding(0),
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints),
+            CancellationToken.None);
+        var legacyExecution = await legacy.ExecuteAsync(
+            BenchmarkWorkload.StorageGrowth,
+            iteration: 0,
+            operations: 1,
+            concurrency: 1,
+            CancellationToken.None);
+
+        Assert.True(reviewedExecution.LogicalPayloadBytes >= 1_024);
+        Assert.True(legacyExecution.LogicalPayloadBytes < 1_024);
+    }
+
     public ValueTask DisposeAsync()
     {
         if (Directory.Exists(scratch))
@@ -161,4 +224,48 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
             """;
         await command.ExecuteNonQueryAsync();
     }
+
+    private static string AssertPaddingBytes(string payload, int expectedBytes)
+    {
+        using var document = JsonDocument.Parse(payload);
+        var padding = document.RootElement.GetProperty("padding").GetString() ??
+                      throw new InvalidOperationException("The benchmark payload has no padding value.");
+        Assert.Equal(new string('x', expectedBytes), padding);
+        Assert.Equal(expectedBytes, Encoding.UTF8.GetByteCount(padding));
+        return padding;
+    }
+
+    private static async Task<PersistedPadding> ReadStorageGrowthPaddingAsync(
+        string databasePath,
+        PhysicalStorageForm form,
+        string instance)
+    {
+        var model = BenchmarkModelFactory.CompileRelational(
+            form,
+            instance,
+            SqliteGroundworkCapabilities.Provider,
+            SqliteGroundworkCapabilities.PhysicalNames);
+        var table = Quote(model.Route.PrimaryStorage.Name.Identifier);
+        var canonicalJson = Quote(model.Route.Envelope.CanonicalJson.Identifier);
+        await using var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder { DataSource = databasePath }.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT json_extract({canonicalJson}, '$.padding'),
+                   length(CAST(json_extract({canonicalJson}, '$.padding') AS BLOB))
+            FROM {table}
+            WHERE json_extract({canonicalJson}, '$.category') = 'write';
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync(), "The storage-growth write was not persisted.");
+        var padding = new PersistedPadding(reader.GetString(0), reader.GetInt64(1));
+        Assert.False(await reader.ReadAsync(), "Expected exactly one persisted storage-growth write.");
+        return padding;
+    }
+
+    private static string Quote(string identifier) =>
+        $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+    private sealed record PersistedPadding(string Value, long Utf8ByteCount);
 }

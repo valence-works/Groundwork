@@ -30,7 +30,7 @@ public sealed class BenchmarkRunGroupTests : IDisposable
         var evaluation = Assert.Single(report.Evaluations);
         Assert.True(evaluation.IsComparable);
         Assert.Equal(
-            "Sqlite/PhysicalEntityTable/IndexedQuery/n1000-payload0-selectivity5000bp",
+            "Sqlite/PhysicalEntityTable/IndexedQuery/n1000-profileordinary-json-v1-selectivity5000bp",
             evaluation.CaseIdentity);
         Assert.Equal(3, report.MinimumIndependentRuns);
     }
@@ -55,7 +55,10 @@ public sealed class BenchmarkRunGroupTests : IDisposable
             baselineRoot,
             AllowContainers: false,
             RegressionConfirmationRun: true,
-            new BenchmarkMatrixDimensions([1_000], [0], [5_000], 3));
+            new BenchmarkMatrixDimensions([1_000], [0], [5_000], 3)
+            {
+                PayloadProfileIds = BenchmarkPayloadProfiles.DefaultReviewedIds
+            });
         var coordinator = new BenchmarkSubprocessCoordinator(
             progress: null,
             async (requestPath, responsePath, cancellationToken) =>
@@ -254,7 +257,11 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                     Providers = [BenchmarkProvider.Sqlite],
                     StorageForms = [PhysicalStorageForm.PhysicalEntityTable]
                 };
-                var shape = new BenchmarkDataShape(1_000, 0, 5_000);
+                var shape = new BenchmarkDataShape(
+                    1_000,
+                    BenchmarkPayloadProfiles.For(workload),
+                    5_000);
+                configuration = configuration with { DataShape = shape };
                 await WriteJsonAsync(configurationPath, configuration);
                 await WriteJsonAsync(machinePath, Machine(commit, treeDigest));
                 await WriteJsonAsync(providersPath, new[]
@@ -394,7 +401,7 @@ public sealed class BenchmarkRunGroupTests : IDisposable
         await File.WriteAllTextAsync(elsaPath, "{}", cancellationToken);
         await WriteJsonAsync(
             Path.Combine(runRoot, "metadata", "configuration.json"),
-            invocation.Request.Configuration);
+            invocation.Request.Configuration with { DataShape = invocation.Request.DataShape });
         await WriteJsonAsync(
             Path.Combine(runRoot, "metadata", "machine.json"),
             Machine(invocation.ExpectedGitCommit, invocation.ExpectedGitTreeDigest));

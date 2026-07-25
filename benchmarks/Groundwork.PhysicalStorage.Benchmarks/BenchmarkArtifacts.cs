@@ -177,7 +177,63 @@ public static class BenchmarkJson
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
         };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        options.Converters.Add(new BenchmarkDataShapeJsonConverter());
         return options;
+    }
+}
+
+/// <summary>
+/// Keeps v1 data-shape JSON explicit while preserving the smoke-only legacy
+/// padding constructor for source compatibility. System.Text.Json otherwise sees
+/// two public constructors and refuses to hydrate worker evidence.
+/// </summary>
+public sealed class BenchmarkDataShapeJsonConverter : JsonConverter<BenchmarkDataShape>
+{
+    private static readonly HashSet<string> Allowed =
+    [
+        "datasetSize",
+        "payloadProfile",
+        "payloadPaddingBytes",
+        "querySelectivityBasisPoints",
+        "identity"
+    ];
+
+    public override BenchmarkDataShape Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(property => !Allowed.Contains(property.Name)))
+            throw new JsonException("Benchmark data shape contains an unknown member.");
+        if (!root.TryGetProperty("datasetSize", out var dataset) ||
+            !root.TryGetProperty("payloadProfile", out var payload) ||
+            !root.TryGetProperty("payloadPaddingBytes", out var padding) ||
+            !root.TryGetProperty("querySelectivityBasisPoints", out var selectivity) ||
+            !root.TryGetProperty("identity", out var identity))
+        {
+            throw new JsonException("Benchmark data shape is incomplete.");
+        }
+        var profile = payload.Deserialize<BenchmarkPayloadProfile>(options) ??
+                      throw new JsonException("Benchmark data shape has no payload profile.");
+        var shape = new BenchmarkDataShape(dataset.GetInt32(), profile, selectivity.GetInt32());
+        if (padding.GetInt32() != shape.PayloadPaddingBytes ||
+            !string.Equals(identity.GetString(), shape.Identity, StringComparison.Ordinal))
+        {
+            throw new JsonException("Benchmark data shape does not match its payload profile.");
+        }
+        shape.Validate();
+        return shape;
+    }
+
+    public override void Write(Utf8JsonWriter writer, BenchmarkDataShape value, JsonSerializerOptions options)
+    {
+        writer.WriteStartObject();
+        writer.WriteNumber("datasetSize", value.DatasetSize);
+        writer.WritePropertyName("payloadProfile");
+        JsonSerializer.Serialize(writer, value.PayloadProfile, options);
+        writer.WriteNumber("payloadPaddingBytes", value.PayloadPaddingBytes);
+        writer.WriteNumber("querySelectivityBasisPoints", value.QuerySelectivityBasisPoints);
+        writer.WriteString("identity", value.Identity);
+        writer.WriteEndObject();
     }
 }
 

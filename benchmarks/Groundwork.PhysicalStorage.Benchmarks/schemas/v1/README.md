@@ -13,7 +13,7 @@ automation:
 - `run-group.schema.json` describes the coordinator manifest and integrity index.
 - `run-group-regression.schema.json` describes process-cluster comparison results.
 - `consumer-evidence.schema.json` describes redacted evidence joinable by workload, provider, form,
-  version, fingerprint, data shape, and result digest. It is always non-promotable until the
+  version, fingerprint, complete payload profile/data shape, and result digest. It is always non-promotable until the
   external EF oracle is joined.
 
 Batch elapsed time remains available for throughput and steady-state accounting. Latency

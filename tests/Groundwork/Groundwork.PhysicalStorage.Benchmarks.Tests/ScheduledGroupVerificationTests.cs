@@ -215,7 +215,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             };
             var shape = new BenchmarkDataShape(
                 1_000,
-                0,
+                BenchmarkPayloadProfiles.For(BenchmarkWorkload.Insert),
                 BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
             var request = new BenchmarkRunRequest(
                 Root,

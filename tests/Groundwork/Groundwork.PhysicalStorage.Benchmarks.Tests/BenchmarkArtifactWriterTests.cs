@@ -91,7 +91,10 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
                 ObservableResults(benchmarkCase, sample.Operations))],
             [],
             new BaselineEligibility(false, ["The Elsa EF oracle has not been joined."]),
-            new BenchmarkDataShape(100_000, 1_024, 1_000));
+            new BenchmarkDataShape(
+                100_000,
+                BenchmarkPayloadProfiles.For(BenchmarkWorkload.IndexedQuery),
+                1_000));
         var machine = new BenchmarkMachineMetadata(
             "test-os", "benchmark-host", "Arm64", ".NET 10", "Release", 8, true, 1_000_000_000,
             "1.0.0", "abcdef", false, DateTimeOffset.UnixEpoch);
@@ -123,7 +126,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         Assert.Equal("direct-operation-latency/v1", result.MeasurementProtocol);
         Assert.Equal("groundwork.sqlite", result.ProviderIdentity);
         Assert.Equal(100_000, result.DataShape.DatasetSize);
-        Assert.Equal(1_024, result.DataShape.PayloadPaddingBytes);
+        Assert.Equal(0, result.DataShape.PayloadPaddingBytes);
+        Assert.Equal(BenchmarkPayloadProfiles.OrdinaryJsonV1, result.DataShape.PayloadProfile.Id);
         Assert.Equal(1_000, result.DataShape.QuerySelectivityBasisPoints);
         Assert.Equal(64, result.WorkloadFingerprint.Length);
         Assert.Equal(64, result.ResultDigest.Length);
@@ -132,6 +136,31 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         Assert.Equal(1, result.RawSampleCount);
         Assert.Equal(4, result.RawOperationLatencyCount);
         Assert.Equal(64, evidence.RawMeasurementsDigest.Length);
+
+        var tamperedEvidence = evidence with
+        {
+            Results =
+            [
+                result with
+                {
+                    DataShape = result.DataShape with
+                    {
+                        PayloadProfile = result.DataShape.PayloadProfile with
+                        {
+                            CanonicalTemplateDigest = new string('0', 64)
+                        }
+                    }
+                }
+            ]
+        };
+        Assert.Throws<InvalidOperationException>(() =>
+            BenchmarkConsumerEvidenceReport.VerifyBoundClaims(
+                report,
+                BenchmarkProfiles.Scheduled,
+                machine,
+                providers,
+                layout,
+                tamperedEvidence));
 
         var alternateCase = benchmarkCase with
         {

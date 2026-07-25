@@ -18,7 +18,8 @@ public static class BenchmarkCommandLine
           --forms <list>                  shared,dedicated,entity or all
           --workloads <list>              Kebab-case workload names or all
           --dataset-sizes <list>          Dataset cardinalities (scheduled default: 1000,100000,1000000)
-          --payload-padding-bytes <list>  Explicit payload-padding dimension
+          --payload-profiles <list>       Reviewed payload-profile IDs (scheduled evidence)
+          --payload-padding-bytes <list>  Legacy raw padding for non-promotable smoke only
           --selectivity-bps <list>        Query selectivity in basis points (1..9999)
           --independent-runs <count>       Measured worker repetitions (smoke: 1, scheduled: 3)
           --output <directory>            Artifact run directory
@@ -45,6 +46,7 @@ public static class BenchmarkCommandLine
         string? forms = null;
         string? workloads = null;
         string? datasetSizes = null;
+        string? payloadProfiles = null;
         string? payloadPaddingBytes = null;
         string? selectivityBasisPoints = null;
         string? independentRuns = null;
@@ -71,6 +73,9 @@ public static class BenchmarkCommandLine
                     break;
                 case "--dataset-sizes":
                     datasetSizes = Value(args, ref index, argument);
+                    break;
+                case "--payload-profiles":
+                    payloadProfiles = Value(args, ref index, argument);
                     break;
                 case "--payload-padding-bytes":
                     payloadPaddingBytes = Value(args, ref index, argument);
@@ -116,11 +121,23 @@ public static class BenchmarkCommandLine
         var defaultDimensions = configuration.Mode == BenchmarkRunMode.Scheduled
             ? BenchmarkProfiles.ScheduledDimensions
             : BenchmarkProfiles.SmokeDimensions;
+        if (payloadProfiles is not null && payloadPaddingBytes is not null)
+            throw new ArgumentException("Select reviewed --payload-profiles or legacy --payload-padding-bytes, not both.");
+        if (configuration.Mode == BenchmarkRunMode.Scheduled && payloadPaddingBytes is not null)
+        {
+            throw new ArgumentException(
+                "Scheduled evidence requires reviewed --payload-profiles; raw --payload-padding-bytes is smoke-only.");
+        }
         var dimensions = new BenchmarkMatrixDimensions(
             ParseIntegers(datasetSizes, defaultDimensions.DatasetSizes, "--dataset-sizes", minimum: 1),
             ParseIntegers(payloadPaddingBytes, defaultDimensions.PayloadPaddingBytes, "--payload-padding-bytes", minimum: 0),
             ParseIntegers(selectivityBasisPoints, defaultDimensions.QuerySelectivityBasisPoints, "--selectivity-bps", minimum: 1),
-            ParseInteger(independentRuns, defaultDimensions.IndependentRuns, "--independent-runs", minimum: 1));
+            ParseInteger(independentRuns, defaultDimensions.IndependentRuns, "--independent-runs", minimum: 1))
+        {
+            PayloadProfileIds = payloadPaddingBytes is null
+                ? ParseProfiles(payloadProfiles, defaultDimensions.PayloadProfileIds ?? BenchmarkPayloadProfiles.DefaultReviewedIds)
+                : null
+        };
         dimensions.Validate();
         if (configuration.Mode == BenchmarkRunMode.Scheduled &&
             dimensions.IndependentRuns < RegressionPolicy.Scheduled.MinimumIndependentRuns)
@@ -185,6 +202,16 @@ public static class BenchmarkCommandLine
                 : throw new ArgumentException($"Unknown {typeof(T).Name} value '{item}'."))
             .Distinct()
             .ToArray();
+    }
+
+    private static IReadOnlyList<string> ParseProfiles(string? value, IReadOnlyList<string> defaults)
+    {
+        IReadOnlyList<string> ids = value is null ? defaults : Split(value);
+        if (ids.Count == 0)
+            throw new ArgumentException("Option '--payload-profiles' requires at least one reviewed profile ID.");
+        foreach (var id in ids)
+            BenchmarkPayloadProfiles.GetReviewed(id);
+        return ids.Distinct(StringComparer.Ordinal).ToArray();
     }
 
     private static string[] Split(string value) =>

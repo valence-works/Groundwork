@@ -9,7 +9,7 @@ public sealed class BenchmarkCommandLineTests
     public void Command_line_filters_a_fixed_profile_without_changing_its_reproducibility_controls()
     {
         var command = BenchmarkCommandLine.Parse(
-            ["run", "--profile", "scheduled", "--providers", "sqlite,mongodb", "--forms", "entity", "--workloads", "reused-client-point-read-batch,backfill-migration", "--dataset-sizes", "1000,100000,1000000", "--payload-padding-bytes", "0,1024", "--selectivity-bps", "1000,5000", "--independent-runs", "3", "--no-containers"],
+            ["run", "--profile", "scheduled", "--providers", "sqlite,mongodb", "--forms", "entity", "--workloads", "reused-client-point-read-batch,backfill-migration", "--dataset-sizes", "1000,100000,1000000", "--payload-profiles", "ordinary-json-v1", "--selectivity-bps", "1000,5000", "--independent-runs", "3", "--no-containers"],
             Environment.CurrentDirectory);
 
         var request = Assert.IsType<BenchmarkRunRequest>(command.Request);
@@ -19,7 +19,7 @@ public sealed class BenchmarkCommandLineTests
         Assert.Equal([PhysicalStorageForm.PhysicalEntityTable], request.Configuration.StorageForms);
         Assert.Equal([BenchmarkWorkload.ReusedClientPointReadBatch, BenchmarkWorkload.BackfillMigration], request.Workloads);
         Assert.Equal(BenchmarkProfiles.RatifiedDatasetSizes, request.Dimensions!.DatasetSizes);
-        Assert.Equal([0, 1_024], request.Dimensions.PayloadPaddingBytes);
+        Assert.Equal([BenchmarkPayloadProfiles.OrdinaryJsonV1], request.Dimensions.PayloadProfileIds);
         Assert.Equal([1_000, 5_000], request.Dimensions.QuerySelectivityBasisPoints);
         Assert.Equal(3, request.Dimensions.IndependentRuns);
         Assert.False(request.AllowContainers);
@@ -33,6 +33,23 @@ public sealed class BenchmarkCommandLineTests
             Environment.CurrentDirectory));
 
         Assert.Contains("at least 3", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Scheduled_command_rejects_raw_padding_and_smoke_keeps_it_explicitly_unreviewed()
+    {
+        var scheduled = Assert.Throws<ArgumentException>(() => BenchmarkCommandLine.Parse(
+            ["run", "--profile", "scheduled", "--payload-padding-bytes", "1024"],
+            Environment.CurrentDirectory));
+        Assert.Contains("smoke-only", scheduled.Message, StringComparison.OrdinalIgnoreCase);
+
+        var smoke = BenchmarkCommandLine.Parse(
+            ["run", "--profile", "smoke", "--payload-padding-bytes", "1024"],
+            Environment.CurrentDirectory);
+        Assert.Null(smoke.Request!.Dimensions!.PayloadProfileIds);
+        var shape = Assert.Single(smoke.Request.Dimensions.CreateShapes(BenchmarkWorkload.StorageGrowth));
+        Assert.False(shape.PayloadProfile.Reviewed);
+        Assert.Equal(1_024, shape.PayloadPaddingBytes);
     }
 
     [Theory]
