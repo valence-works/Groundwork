@@ -303,23 +303,21 @@ strict group schemas/digests, and nonzero child-exit propagation; and sharding t
 into 36 provider/form/cardinality jobs with an exact 4,032-worker aggregate verifier. The pull
 request smoke remains deliberately narrow and every workflow artifact remains non-promotable.
 
-The originating reviewers must re-verify the frozen remediation commit before merge. Their final
-verdicts and any further dispositions are recorded here when that gate completes.
+The originating reviewers re-verified the frozen remediation tree at `c69e7eefc14c04ceec2416d984cc5d51797d757c`.
+All three final verdicts were **CLEAN**:
 
-### Draft post-review dispositions (pending re-verification)
-
-These are author draft dispositions, not reviewer approvals. The originating reviewers have not
-yet re-verified this remediation commit.
-
-- **Payload-profile preservation — proposed addressed:** the benchmark target contract now requires
+- **Correctness and mechanism — addressed:** the benchmark target contract now requires
   a complete `BenchmarkDataShape` for seeding, and the runner regression double records the full
   shape for both the measured and isolated plan targets.
-- **PR smoke coverage — proposed addressed:** the SQLite/shared-form pull-request smoke now also
-  executes `storage-growth`.
-- **SQLite payload evidence — proposed addressed:** the SQLite target test checks the returned and
-  persisted storage-growth padding against the profile's exact UTF-8 byte count.
-- **Payload-profile documentation — proposed addressed:** the matrix and baseline-eligibility text
-  now describe the workload-bound reviewed payload profiles in the plural.
+- **Evidence integrity — addressed:** hosted run `30141568325` passed 200 tests and all 12 smoke
+  workers. Its retained artifact contains the warm-up and measured `storage-growth` workers bound
+  to `storage-growth-1k-v1`, with 1,024 declared padding bytes, exact-tree provenance, matching
+  internal digests, and `promotable: false`. The SQLite target test independently checks the
+  returned and directly persisted padding against the profile's exact UTF-8 byte count.
+- **Scope and test preservation — clean:** the pull-request smoke remains SQLite/shared-form and
+  non-decision; scheduled four-provider cardinality remains 4,032; no test or provider path was
+  removed or weakened; immutable-baseline eligibility remains disabled; and no #50 completion is
+  claimed.
 
 ## Remaining issue #50 acceptance work
 
