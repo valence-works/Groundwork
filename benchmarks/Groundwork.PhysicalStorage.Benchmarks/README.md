@@ -337,6 +337,25 @@ All three final verdicts were **CLEAN**:
   removed or weakened; immutable-baseline eligibility remains disabled; and no #50 completion is
   claimed.
 
+A second three-axis review examined the target-scoped database-work signal follow-up from
+`ba8e87f7a48d8fbfbe1db260f0472af15c6c2387` through
+`c7f9137b0088015724298190af4ffe2eec233dea`. It initially found that callers could override an
+unavailable observation and that SQL Server/PostgreSQL lacked positive selector and runner-path
+coverage. After remediation, the originating reviewers returned **PASS**:
+
+- **Correctness and mechanism — addressed:** the runner accepts only the scoped snapshot's
+  observable count; diagnostic and client-activity evidence must agree exactly with the persisted
+  round-trip count; unavailable evidence cannot claim a count.
+- **Evidence integrity — addressed:** writer, reader, summarizer, report reconstruction, JSON
+  Schema validation, and fully resealed scheduled-group verification reject forged or internally
+  inconsistent signal counts.
+- **Scope and test preservation — addressed:** SQL Server and PostgreSQL now have positive and
+  negative selector coverage, all four provider runner paths are exercised without retaining
+  selector values, no provider/workload/form declaration or worker protocol was removed, and live
+  controlled evidence remains explicitly outstanding.
+
+The focused verification suite passed 74 tests and `git diff --check` remained clean.
+
 ## Remaining issue #50 acceptance work
 
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
