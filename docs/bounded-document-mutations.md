@@ -84,10 +84,35 @@ selection and fingerprinting, so case-policy-equivalent spellings share one repl
 Operation identities themselves remain ordinal and are never projected through document identity
 policy.
 
+Relationship-guarded mutation plans extend that established request identity with a versioned,
+canonical relationship-plan component. Unguarded `Delete`, `Transition`, and `Assign` requests keep
+their original byte-for-byte fingerprint contract so durable operations created by an older
+provider build continue to replay after an upgrade.
+
 The durable ledger key is manifest identity, provider name, storage unit, route-derived scope, and
 operation identity. Provider version is retained only as completion evidence, not as operation
 identity, so a version upgrade replays the original exact result instead of executing the mutation
 again.
+
+## Cross-storage relationship guards
+
+`RequireNoReferences` and `RequireRelatedTargetNotEqual` are closed manifest declarations, not
+runtime query input. Admission resolves every storage route from one exact manifest and exposes a
+sealed route set; callers cannot combine a local route with source or target routes compiled from a
+different manifest. The declared source reference and target comparison-key indexes must have an
+exact usable equality prefix. Missing references remain absent, while blank or malformed reference
+values fail closed.
+
+The generated relationship materialization and target-key fence identities rotate when reference
+paths, indexes, scope, case policy, or source/target identity algorithms change. Provider-native
+physical renames do not rotate those identities.
+
+This checkpoint defines Core admission only. SQLite, SQL Server, PostgreSQL, and MongoDB currently
+advertise no relationship-materialization capability and reject any manifest containing a
+relationship declaration or relationship guard with `GW-RELATIONSHIP-012` before schema or
+document I/O. Guarded mutation handler certification also fails closed. A provider may advertise
+the capability only after its native relationship materialization, target-key fence, atomic
+execution, runtime evidence, and recovery behavior pass the provider conformance contract.
 
 Relational providers retain all five ledger identity values for exact collision verification while
 using provider-generated SHA-256 keys for the primary key. SQL Server hashes each unbounded

@@ -19,6 +19,10 @@ public static class PhysicalSchemaTargetCompiler
         ArgumentNullException.ThrowIfNull(providerNames);
         namePolicy ??= PhysicalNamePolicy.Identity;
         new StorageManifestValidator().Validate(manifest).RequireValid();
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            manifest,
+            provider,
+            supportsRelationshipMaterialization: false);
 
         var resolution = PhysicalStorageResolver.Resolve(manifest, namePolicy, providerNames);
         if (!resolution.IsValid)

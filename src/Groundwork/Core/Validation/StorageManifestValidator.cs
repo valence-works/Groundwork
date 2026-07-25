@@ -25,6 +25,13 @@ public sealed class StorageManifestValidator
             "manifest.storageUnits",
             diagnostics);
 
+        AddDuplicateDiagnostics(
+            manifest.Relationships.Select(relationship => relationship.Identity),
+            "GW-MANIFEST-006",
+            "Relationship identities must be unique within a manifest.",
+            "manifest.relationships",
+            diagnostics);
+
         for (var unitIndex = 0; unitIndex < manifest.StorageUnits.Count; unitIndex++)
             ValidateStorageUnit(manifest.StorageUnits[unitIndex], unitIndex, diagnostics);
 

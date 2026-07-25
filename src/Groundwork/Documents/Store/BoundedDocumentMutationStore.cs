@@ -131,9 +131,27 @@ public static class BoundedMutationRequestFingerprint
                 .ToArray())
             .Select(comparisons => string.Join("\u001d", comparisons))
             .Order(StringComparer.Ordinal);
+        var canonicalPlan = CanonicalPlan(plan);
+        if (plan.RelationshipGuards.Count != 0)
+        {
+            canonicalPlan = string.Join(
+                "\u000f",
+                canonicalPlan,
+                "relationship-plan-v1",
+                string.Join(
+                    "\u000e",
+                    plan.RelationshipGuards
+                        .OrderBy(guard => guard.Kind)
+                        .ThenBy(guard => guard.CanonicalIdentity, StringComparer.Ordinal)
+                        .Select(guard => string.Join(
+                            "\u000d",
+                            Encode(((int)guard.Kind).ToString(
+                                System.Globalization.CultureInfo.InvariantCulture)),
+                            Encode(guard.CanonicalIdentity)))));
+        }
         var canonical = string.Join(
             "\u001c",
-            CanonicalPlan(plan),
+            canonicalPlan,
             Encode(mutation.DocumentKind),
             Encode(mutation.MutationIdentity),
             Encode(storageScope),
@@ -386,6 +404,16 @@ public sealed class PhysicalMutationHandlerCertification
         IReadOnlyList<PhysicalMutationEvidenceStageCertification>? evidenceStages = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        if (plan.RelationshipGuards.Count != 0)
+        {
+            throw new PhysicalRelationshipProviderNotSupportedException(
+                plan.Predicate.Provider,
+                plan.RelationshipGuards
+                    .Select(guard => guard.RelationshipIdentity)
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+                    .ToArray());
+        }
         MutationIdentity = plan.MutationIdentity;
         ActionKind = plan.Action.Kind;
         var valueAction = plan.Action as IPhysicalValueMutationAction;

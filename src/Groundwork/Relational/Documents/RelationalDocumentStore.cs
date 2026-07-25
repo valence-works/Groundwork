@@ -1,8 +1,10 @@
 using System.Data;
 using System.Data.Common;
 using System.Text.Json;
+using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Physicalization;
 using Groundwork.Core.Transactions;
 using Groundwork.Core.Scoping;
@@ -37,6 +39,7 @@ public class RelationalDocumentStore : IDocumentStore
         this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
         this.manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
         this.dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
+        RequireRelationshipMaterializationSupport(this.manifest);
         identityBindings = DocumentIdentityBinding.Bind(manifest);
         this.access = access ?? throw new ArgumentNullException(nameof(access));
         this.scopeObserver = scopeObserver ?? NullStorageScopeObserver.Instance;
@@ -53,11 +56,18 @@ public class RelationalDocumentStore : IDocumentStore
         this.sessionFactory = sessionFactory ?? throw new ArgumentNullException(nameof(sessionFactory));
         this.manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
         this.dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
+        RequireRelationshipMaterializationSupport(this.manifest);
         identityBindings = DocumentIdentityBinding.Bind(manifest);
         this.access = access ?? throw new ArgumentNullException(nameof(access));
         this.scopeObserver = scopeObserver ?? NullStorageScopeObserver.Instance;
         DocumentStoreScopeResolver.ObserveAcquisition(access, this.scopeObserver);
     }
+
+    private static void RequireRelationshipMaterializationSupport(StorageManifest manifest) =>
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            manifest,
+            new ProviderIdentity("relational", "unadvertised"),
+            supportsRelationshipMaterialization: false);
 
     public async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
     {

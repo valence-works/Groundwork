@@ -244,6 +244,204 @@ public sealed class BoundedTransitionMutationAction : BoundedMutationAction
 }
 
 /// <summary>
+/// The deliberately small set of cross-unit relationship checks available to a bounded mutation.
+/// These declarations are not a caller-programmable join language: each guard binds an immutable
+/// relationship and an immutable predicate to one manifest-owned mutation.
+/// </summary>
+public enum BoundedMutationRelationshipGuardKind
+{
+    RequireNoReferences,
+    RequireRelatedTargetNotEqual
+}
+
+/// <summary>
+/// A manifest-declared cross-unit relationship check. Runtime callers cannot provide a unit, path,
+/// comparison, or target value; they only invoke the named bounded mutation.
+/// </summary>
+public abstract class BoundedMutationRelationshipGuard : IEquatable<BoundedMutationRelationshipGuard>
+{
+    protected BoundedMutationRelationshipGuard(
+        BoundedMutationRelationshipGuardKind kind,
+        string relationshipIdentity)
+    {
+        Kind = kind;
+        RelationshipIdentity = RequireValue(relationshipIdentity, nameof(relationshipIdentity));
+    }
+
+    public BoundedMutationRelationshipGuardKind Kind { get; }
+
+    /// <summary>The stable manifest relationship identity to which this guard is bound.</summary>
+    public string RelationshipIdentity { get; }
+
+    internal abstract string CanonicalIdentity { get; }
+
+    /// <summary>
+    /// Requires every local mutation target to have no source document in the named manifest
+    /// relationship whose reference equals that target's immutable identity.
+    /// </summary>
+    public static BoundedMutationRelationshipGuard RequireNoReferences(string relationshipIdentity) =>
+        new RequireNoReferencesMutationRelationshipGuard(relationshipIdentity);
+
+    /// <summary>
+    /// Requires the document addressed by the local stable reference path to exist in the declared
+    /// target storage unit and have a target path different from the manifest-fixed value.
+    /// This is the only related-target predicate presently admitted by the bounded-mutation surface.
+    /// </summary>
+    public static BoundedMutationRelationshipGuard RequireRelatedTargetNotEqual(
+        string relationshipIdentity,
+        string targetPredicatePath,
+        string targetPredicateIndexIdentity,
+        string disallowedTargetValue) =>
+        new RequireRelatedTargetNotEqualMutationRelationshipGuard(
+            relationshipIdentity,
+            targetPredicatePath,
+            targetPredicateIndexIdentity,
+            disallowedTargetValue);
+
+    public abstract bool Equals(BoundedMutationRelationshipGuard? other);
+
+    public override bool Equals(object? obj) => Equals(obj as BoundedMutationRelationshipGuard);
+
+    public abstract override int GetHashCode();
+
+    internal static string RequireValue(string value, string parameterName) =>
+        string.IsNullOrWhiteSpace(value)
+            ? throw new ArgumentException("A stable relationship value is required.", parameterName)
+            : value;
+}
+
+/// <summary>Rejects a guarded delete for a local target that remains referenced by another unit.</summary>
+public sealed class RequireNoReferencesMutationRelationshipGuard : BoundedMutationRelationshipGuard
+{
+    public RequireNoReferencesMutationRelationshipGuard(string relationshipIdentity)
+        : base(BoundedMutationRelationshipGuardKind.RequireNoReferences, relationshipIdentity)
+    {
+    }
+
+    internal override string CanonicalIdentity => PhysicalCanonicalEncoding.Join(RelationshipIdentity);
+
+    public override bool Equals(BoundedMutationRelationshipGuard? other) =>
+        other is RequireNoReferencesMutationRelationshipGuard guard &&
+        RelationshipIdentity == guard.RelationshipIdentity;
+
+    public override int GetHashCode() => HashCode.Combine(
+        Kind,
+        StringComparer.Ordinal.GetHashCode(RelationshipIdentity));
+}
+
+/// <summary>
+/// Requires an optional local reference to resolve to a related target whose declared scalar value
+/// differs from a manifest-fixed value. A missing related target never satisfies this guard.
+/// </summary>
+public sealed class RequireRelatedTargetNotEqualMutationRelationshipGuard : BoundedMutationRelationshipGuard
+{
+    public RequireRelatedTargetNotEqualMutationRelationshipGuard(
+        string relationshipIdentity,
+        string targetPredicatePath,
+        string targetPredicateIndexIdentity,
+        string disallowedTargetValue)
+        : base(BoundedMutationRelationshipGuardKind.RequireRelatedTargetNotEqual, relationshipIdentity)
+    {
+        TargetPredicatePath = RequireValue(targetPredicatePath, nameof(targetPredicatePath));
+        TargetPredicateIndexIdentity = RequireValue(targetPredicateIndexIdentity, nameof(targetPredicateIndexIdentity));
+        DisallowedTargetValue = RequireValue(disallowedTargetValue, nameof(disallowedTargetValue));
+    }
+
+    public string TargetPredicatePath { get; }
+
+    public string TargetPredicateIndexIdentity { get; }
+
+    public string DisallowedTargetValue { get; }
+
+    internal override string CanonicalIdentity => PhysicalCanonicalEncoding.Join(
+        RelationshipIdentity,
+        TargetPredicatePath,
+        TargetPredicateIndexIdentity,
+        DisallowedTargetValue);
+
+    public override bool Equals(BoundedMutationRelationshipGuard? other) =>
+        other is RequireRelatedTargetNotEqualMutationRelationshipGuard guard &&
+        RelationshipIdentity == guard.RelationshipIdentity &&
+        TargetPredicatePath == guard.TargetPredicatePath &&
+        TargetPredicateIndexIdentity == guard.TargetPredicateIndexIdentity &&
+        DisallowedTargetValue == guard.DisallowedTargetValue;
+
+    public override int GetHashCode() => HashCode.Combine(
+        Kind,
+        StringComparer.Ordinal.GetHashCode(RelationshipIdentity),
+        StringComparer.Ordinal.GetHashCode(TargetPredicatePath),
+        StringComparer.Ordinal.GetHashCode(TargetPredicateIndexIdentity),
+        StringComparer.Ordinal.GetHashCode(DisallowedTargetValue));
+}
+
+/// <summary>
+/// One manifest-owned, provider-neutral source-to-target relationship. A bounded mutation guard
+/// names this declaration; it never redefines a unit or an arbitrary join path at the guard site.
+/// </summary>
+public sealed class ManifestRelationshipDeclaration : IEquatable<ManifestRelationshipDeclaration>
+{
+    public ManifestRelationshipDeclaration(
+        string identity,
+        StorageUnitIdentity sourceStorageUnit,
+        string sourceReferencePath,
+        string sourceReferenceIndexIdentity,
+        StorageUnitIdentity targetStorageUnit,
+        string targetIdentityPath,
+        string targetEqualityIndexIdentity,
+        StringIdentityCasePolicy referenceCasePolicy = StringIdentityCasePolicy.Ordinal)
+    {
+        Identity = BoundedMutationRelationshipGuard.RequireValue(identity, nameof(identity));
+        SourceStorageUnit = sourceStorageUnit ?? throw new ArgumentNullException(nameof(sourceStorageUnit));
+        SourceReferencePath = BoundedMutationRelationshipGuard.RequireValue(
+            sourceReferencePath,
+            nameof(sourceReferencePath));
+        SourceReferenceIndexIdentity = BoundedMutationRelationshipGuard.RequireValue(
+            sourceReferenceIndexIdentity,
+            nameof(sourceReferenceIndexIdentity));
+        TargetStorageUnit = targetStorageUnit ?? throw new ArgumentNullException(nameof(targetStorageUnit));
+        TargetIdentityPath = BoundedMutationRelationshipGuard.RequireValue(targetIdentityPath, nameof(targetIdentityPath));
+        TargetEqualityIndexIdentity = BoundedMutationRelationshipGuard.RequireValue(
+            targetEqualityIndexIdentity,
+            nameof(targetEqualityIndexIdentity));
+        if (!Enum.IsDefined(referenceCasePolicy))
+            throw new ArgumentOutOfRangeException(nameof(referenceCasePolicy), referenceCasePolicy, null);
+        ReferenceCasePolicy = referenceCasePolicy;
+    }
+
+    public string Identity { get; }
+    public StorageUnitIdentity SourceStorageUnit { get; }
+    public string SourceReferencePath { get; }
+    public string SourceReferenceIndexIdentity { get; }
+    public StorageUnitIdentity TargetStorageUnit { get; }
+    public string TargetIdentityPath { get; }
+    public string TargetEqualityIndexIdentity { get; }
+    public StringIdentityCasePolicy ReferenceCasePolicy { get; }
+
+    public bool Equals(ManifestRelationshipDeclaration? other) =>
+        other is not null &&
+        Identity == other.Identity &&
+        SourceStorageUnit == other.SourceStorageUnit &&
+        SourceReferencePath == other.SourceReferencePath &&
+        SourceReferenceIndexIdentity == other.SourceReferenceIndexIdentity &&
+        TargetStorageUnit == other.TargetStorageUnit &&
+        TargetIdentityPath == other.TargetIdentityPath &&
+        TargetEqualityIndexIdentity == other.TargetEqualityIndexIdentity &&
+        ReferenceCasePolicy == other.ReferenceCasePolicy;
+
+    public override bool Equals(object? obj) => Equals(obj as ManifestRelationshipDeclaration);
+
+    public override int GetHashCode() => HashCode.Combine(
+        StringComparer.Ordinal.GetHashCode(Identity),
+        SourceStorageUnit,
+        StringComparer.Ordinal.GetHashCode(SourceReferencePath),
+        StringComparer.Ordinal.GetHashCode(SourceReferenceIndexIdentity),
+        TargetStorageUnit,
+        StringComparer.Ordinal.GetHashCode(TargetIdentityPath),
+        StringComparer.Ordinal.GetHashCode(TargetEqualityIndexIdentity),
+        ReferenceCasePolicy);
+}
+
+/// <summary>
 /// Binds a caller-visible mutation identity to one existing bounded-query declaration. The query
 /// supplies the closed predicate shape; the action supplies the only effect the caller may invoke.
 /// </summary>
@@ -252,7 +450,8 @@ public sealed class BoundedMutationDeclaration : IEquatable<BoundedMutationDecla
     public BoundedMutationDeclaration(
         string identity,
         string predicateQueryIdentity,
-        BoundedMutationAction action)
+        BoundedMutationAction action,
+        IReadOnlyList<BoundedMutationRelationshipGuard>? relationshipGuards = null)
     {
         Identity = string.IsNullOrWhiteSpace(identity)
             ? throw new ArgumentException("A bounded-mutation identity is required.", nameof(identity))
@@ -261,6 +460,10 @@ public sealed class BoundedMutationDeclaration : IEquatable<BoundedMutationDecla
             ? throw new ArgumentException("A bounded predicate-query identity is required.", nameof(predicateQueryIdentity))
             : predicateQueryIdentity;
         Action = action ?? throw new ArgumentNullException(nameof(action));
+        RelationshipGuards = Array.AsReadOnly((relationshipGuards ?? [])
+            .OrderBy(guard => guard.Kind)
+            .ThenBy(guard => guard.CanonicalIdentity, StringComparer.Ordinal)
+            .ToArray());
     }
 
     public string Identity { get; }
@@ -269,18 +472,22 @@ public sealed class BoundedMutationDeclaration : IEquatable<BoundedMutationDecla
 
     public BoundedMutationAction Action { get; }
 
+    public IReadOnlyList<BoundedMutationRelationshipGuard> RelationshipGuards { get; }
+
     public bool Equals(BoundedMutationDeclaration? other) =>
         other is not null &&
         Identity == other.Identity &&
         PredicateQueryIdentity == other.PredicateQueryIdentity &&
-        Action.Equals(other.Action);
+        Action.Equals(other.Action) &&
+        RelationshipGuards.SequenceEqual(other.RelationshipGuards);
 
     public override bool Equals(object? obj) => Equals(obj as BoundedMutationDeclaration);
 
     public override int GetHashCode() => HashCode.Combine(
         StringComparer.Ordinal.GetHashCode(Identity),
         StringComparer.Ordinal.GetHashCode(PredicateQueryIdentity),
-        Action);
+        Action,
+        RelationshipGuards.Aggregate(0, (current, guard) => HashCode.Combine(current, guard)));
 }
 
 /// <summary>A provider-neutral logical index whose fields are stable serialized paths.</summary>

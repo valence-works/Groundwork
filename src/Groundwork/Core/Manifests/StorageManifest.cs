@@ -15,4 +15,11 @@ public sealed partial record StorageManifest(
     /// <see cref="SharedStorageBinding"/> and cannot redefine their primary envelope or name.
     /// </summary>
     public IReadOnlyList<SharedDocumentStorageDefinition> SharedDocumentStorages { get; init; } = [];
+
+    /// <summary>
+    /// Gets the manifest-owned relationships that bounded mutations may guard. A relationship is
+    /// deliberately declared once, independently of its guards, so ordinary writes and guarded
+    /// mutations use the same source, target, equality-index, scope, and identity contract.
+    /// </summary>
+    public IReadOnlyList<ManifestRelationshipDeclaration> Relationships { get; init; } = [];
 }

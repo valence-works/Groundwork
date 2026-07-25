@@ -47,6 +47,7 @@ public static class StorageManifestComposition
         var compatibilityNotes = new List<string>();
         var seenNotes = new HashSet<string>(StringComparer.Ordinal);
         var sharedDocumentStorages = new Dictionary<string, SharedDocumentStorageDefinition>(StringComparer.Ordinal);
+        var relationships = new Dictionary<string, ManifestRelationshipDeclaration>(StringComparer.Ordinal);
 
         foreach (var manifest in manifests)
         {
@@ -74,6 +75,17 @@ public static class StorageManifestComposition
                 sharedDocumentStorages[sharedStorage.Binding.Value] = sharedStorage;
             }
 
+            foreach (var relationship in manifest.Relationships)
+            {
+                if (relationships.TryGetValue(relationship.Identity, out var existing) &&
+                    !existing.Equals(relationship))
+                {
+                    throw new ManifestRelationshipCompositionException(relationship.Identity);
+                }
+
+                relationships[relationship.Identity] = relationship;
+            }
+
             foreach (var note in manifest.CompatibilityNotes)
             {
                 if (seenNotes.Add(note))
@@ -91,6 +103,9 @@ public static class StorageManifestComposition
         {
             SharedDocumentStorages = sharedDocumentStorages.Values
                 .OrderBy(x => x.Binding.Value, StringComparer.Ordinal)
+                .ToArray(),
+            Relationships = relationships.Values
+                .OrderBy(x => x.Identity, StringComparer.Ordinal)
                 .ToArray()
         };
     }
@@ -124,4 +139,19 @@ public sealed class SharedStorageDefinitionCompositionException : InvalidOperati
     }
 
     public string Binding { get; }
+}
+
+/// <summary>
+/// Thrown when two composed manifests assign the same stable relationship identity to different
+/// source/target or equality-index contracts.
+/// </summary>
+public sealed class ManifestRelationshipCompositionException : InvalidOperationException
+{
+    public ManifestRelationshipCompositionException(string relationshipIdentity)
+        : base($"Relationship '{relationshipIdentity}' has conflicting manifest-owned definitions across the composition.")
+    {
+        RelationshipIdentity = relationshipIdentity;
+    }
+
+    public string RelationshipIdentity { get; }
 }

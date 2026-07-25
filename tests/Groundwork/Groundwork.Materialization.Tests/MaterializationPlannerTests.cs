@@ -3,6 +3,7 @@ using Groundwork.Core.Indexing;
 using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Materialization;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Queries;
 using Groundwork.Core.Validation;
@@ -112,6 +113,89 @@ public sealed class MaterializationPlannerTests
         Assert.False(plan.IsPlannable);
         Assert.Empty(plan.Operations);
         Assert.Contains(plan.Diagnostics, diagnostic => diagnostic.Code == "GW-MAT-003");
+    }
+
+    [Fact]
+    public void PlanRejectsRelationshipManifestsUntilTheProviderAdvertisesMaterializationAndFenceSupport()
+    {
+        var manifest = CreateManifest();
+        var unit = Assert.Single(manifest.StorageUnits);
+        manifest = manifest with
+        {
+            Relationships =
+            [
+                new ManifestRelationshipDeclaration(
+                    "configuration-parent",
+                    unit.Identity,
+                    "parentId",
+                    "by-parent-id",
+                    unit.Identity,
+                    PhysicalDocumentFieldPaths.Id,
+                    "by-id")
+            ]
+        };
+
+        var plan = planner.Plan(manifest, RuntimeCapabilities(), CreateCapabilities());
+
+        Assert.False(plan.IsPlannable);
+        Assert.Empty(plan.Operations);
+        Assert.Contains(plan.Diagnostics, diagnostic => diagnostic.Code == "GW-MAT-004");
+    }
+
+    [Fact]
+    public void PlanRejectsGuardOnlyManifestsBeforeProducingMaterializationOperations()
+    {
+        var manifest = CreateManifest();
+        var unit = Assert.Single(manifest.StorageUnits);
+        var logicalIndex = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                "configuration_documents",
+                [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+                indexes:
+                [
+                    new PhysicalIndexDefinition(
+                        logicalIndex.Identity,
+                        [
+                            new PhysicalIndexColumnDefinition("storage_scope", 0),
+                            new PhysicalIndexColumnDefinition("category", 1)
+                        ])
+                ])),
+            [logicalIndex],
+            [new BoundedQueryDeclaration(
+                "list-by-category",
+                logicalIndex.Identity,
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.None,
+                QueryPagingSupport.None,
+                BoundedQueryExecutionClass.ScaleBearing)],
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "guarded-delete",
+                    "list-by-category",
+                    BoundedMutationAction.Delete(),
+                    [BoundedMutationRelationshipGuard.RequireNoReferences("missing-relationship")])
+            ]);
+        manifest = manifest with
+        {
+            StorageUnits = [unit with { PhysicalStorage = physicalStorage }],
+            Relationships = []
+        };
+
+        var plan = planner.Plan(manifest, RuntimeCapabilities(), CreateCapabilities());
+
+        Assert.False(plan.IsPlannable);
+        Assert.Empty(plan.Operations);
+        var diagnostic = Assert.Single(plan.Diagnostics);
+        Assert.Equal("GW-MAT-004", diagnostic.Code);
+        Assert.Contains("missing-relationship", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]

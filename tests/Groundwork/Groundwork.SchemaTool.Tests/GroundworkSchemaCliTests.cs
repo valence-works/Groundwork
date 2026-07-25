@@ -8,6 +8,7 @@ using Groundwork.Core.Indexing;
 using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.Queries;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Scoping;
 using Groundwork.SchemaTool;
@@ -124,6 +125,71 @@ public sealed class GroundworkSchemaCliTests : IDisposable
         Assert.Equal(expectedIdentity, report.RootElement.GetProperty("provider").GetProperty("name").GetString());
         Assert.False(File.Exists(database));
         Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Theory]
+    [InlineData("sqlite", "groundwork-sqlite")]
+    [InlineData("sqlserver", "groundwork-sqlserver")]
+    [InlineData("postgresql", "groundwork-postgresql")]
+    [InlineData("mongodb", "groundwork-mongodb")]
+    public void Target_compilation_rejects_relationship_manifests_before_provider_execution(
+        string provider,
+        string providerIdentity)
+    {
+        var manifest = CreateTestManifest();
+        var unit = Assert.Single(manifest.StorageUnits);
+        var related = manifest with
+        {
+            Relationships =
+            [
+                new ManifestRelationshipDeclaration(
+                    "documents-parent",
+                    unit.Identity,
+                    "category",
+                    "by-category",
+                    unit.Identity,
+                    PhysicalDocumentFieldPaths.Id,
+                    "by-category")
+            ]
+        };
+
+        var result = SchemaToolTargetCompiler.Compile(
+            related,
+            new DelegatePhysicalNamePolicy(_ =>
+                throw new InvalidOperationException("Provider target compilation must not be reached.")),
+            provider);
+
+        Assert.False(result.IsValid);
+        Assert.Null(result.Target);
+        var diagnostic = Assert.Single(result.Diagnostics);
+        Assert.Equal("GW-RELATIONSHIP-012", diagnostic.Code);
+        Assert.Equal("manifest.relationships", diagnostic.Target);
+        Assert.Contains(providerIdentity, diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("documents-parent", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("sqlite", "groundwork-sqlite")]
+    [InlineData("sqlserver", "groundwork-sqlserver")]
+    [InlineData("postgresql", "groundwork-postgresql")]
+    [InlineData("mongodb", "groundwork-mongodb")]
+    public void Target_compilation_rejects_guard_only_manifests_before_provider_execution(
+        string provider,
+        string providerIdentity)
+    {
+        var result = SchemaToolTargetCompiler.Compile(
+            CreateGuardOnlyManifest(),
+            new DelegatePhysicalNamePolicy(_ =>
+                throw new InvalidOperationException("Provider target compilation must not be reached.")),
+            provider);
+
+        Assert.False(result.IsValid);
+        Assert.Null(result.Target);
+        var diagnostic = Assert.Single(result.Diagnostics);
+        Assert.Equal("GW-RELATIONSHIP-012", diagnostic.Code);
+        Assert.Equal("manifest.relationships", diagnostic.Target);
+        Assert.Contains(providerIdentity, diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("missing-relationship", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1067,5 +1133,42 @@ public sealed class GroundworkSchemaCliTests : IDisposable
                 [unit],
                 new HashSet<string>(),
                 []);
+    }
+
+    private static StorageManifest CreateGuardOnlyManifest()
+    {
+        var manifest = CreateTestManifest();
+        var unit = Assert.Single(manifest.StorageUnits);
+        var storage = Assert.IsType<StorageUnitPhysicalStorage>(unit.PhysicalStorage);
+        var logicalIndex = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var guardedStorage = new StorageUnitPhysicalStorage(
+            storage.ProvisioningMode,
+            storage.Policy,
+            [logicalIndex],
+            [new BoundedQueryDeclaration(
+                "list-by-category",
+                logicalIndex.Identity,
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.None,
+                QueryPagingSupport.None,
+                BoundedQueryExecutionClass.ScaleBearing)],
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "guarded-delete",
+                    "list-by-category",
+                    BoundedMutationAction.Delete(),
+                    [BoundedMutationRelationshipGuard.RequireNoReferences("missing-relationship")])
+            ]);
+        return manifest with
+        {
+            StorageUnits = [unit with { PhysicalStorage = guardedStorage }],
+            Relationships = []
+        };
     }
 }

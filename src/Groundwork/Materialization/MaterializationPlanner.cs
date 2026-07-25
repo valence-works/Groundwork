@@ -2,6 +2,7 @@ using Groundwork.Core.Capabilities;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Materialization;
 using Groundwork.Core.Physicalization;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Validation;
 
@@ -27,6 +28,20 @@ public sealed class MaterializationPlanner
     {
         var diagnostics = new List<GroundworkDiagnostic>();
         diagnostics.AddRange(manifestValidator.Validate(manifest).Diagnostics);
+        try
+        {
+            PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+                manifest,
+                materializationCapabilities.Provider,
+                supportsRelationshipMaterialization: false);
+        }
+        catch (PhysicalRelationshipProviderNotSupportedException exception)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MAT-004",
+                exception.Message,
+                "manifest.relationships"));
+        }
 
         if (runtimeCapabilities.Provider != materializationCapabilities.Provider)
         {

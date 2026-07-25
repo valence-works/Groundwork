@@ -1180,6 +1180,625 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
+    public void Relationship_guards_require_complete_manifest_route_admission()
+    {
+        var fixture = CreateFixture(
+            PhysicalStorageForm.PhysicalEntityTable,
+            BoundedQueryExecutionClass.ScaleBearing);
+        var storage = new StorageUnitPhysicalStorage(
+            fixture.Storage.ProvisioningMode,
+            fixture.Storage.Policy,
+            fixture.Storage.LogicalIndexes,
+            fixture.Storage.BoundedQueries,
+            fixture.Storage.NameOverrides,
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "guarded-prune",
+                    "list-by-stimulus-type",
+                    BoundedMutationAction.Delete(),
+                    [BoundedMutationRelationshipGuard.RequireNoReferences("token-authorization")])
+            ]);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-MUTATION-009");
+    }
+
+    [Fact]
+    public void Manifest_relationship_requires_a_stable_source_reference_path()
+    {
+        var source = new StorageUnitIdentity("token");
+        var target = new StorageUnitIdentity("authorization");
+
+        Assert.Throws<ArgumentException>(() => new ManifestRelationshipDeclaration(
+            "token-authorization",
+            source,
+            null!,
+            "token-by-authorization-id",
+            target,
+            PhysicalDocumentFieldPaths.Id,
+            "authorization-by-id"));
+        Assert.Throws<ArgumentException>(() => new ManifestRelationshipDeclaration(
+            "token-authorization",
+            source,
+            " ",
+            "token-by-authorization-id",
+            target,
+            PhysicalDocumentFieldPaths.Id,
+            "authorization-by-id"));
+    }
+
+    [Fact]
+    public void No_reference_guard_binds_the_referencing_route_and_indexed_scalar_path()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        var guard = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(Assert.Single(result.Plans).RelationshipGuards));
+        Assert.Equal("token-authorization", guard.Relationship.Identity);
+        Assert.Equal("token", guard.Relationship.SourceRoute.StorageUnit.Value);
+        Assert.Equal("authorizationId", guard.Relationship.SourceCanonicalJsonReference.Path);
+        Assert.Equal(PhysicalQueryFieldSource.CanonicalJsonPath, guard.Relationship.SourceCanonicalJsonReference.Source);
+        Assert.Equal("token-by-authorization-id", guard.Relationship.SourceReferenceDeclarationIndex.Identity);
+        Assert.Equal("authorization", guard.Relationship.TargetRoute.StorageUnit.Value);
+        Assert.Equal("authorization-by-id", guard.Relationship.TargetEqualityIndex.Identity);
+    }
+
+    [Fact]
+    public void Related_target_guard_binds_route_evidence_and_changes_the_request_fingerprint()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: true);
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        var plan = Assert.Single(result.Plans);
+        var guard = Assert.IsType<PhysicalRequireRelatedTargetNotEqualMutationGuard>(
+            Assert.Single(plan.RelationshipGuards));
+        Assert.Equal("authorizationId", guard.Relationship.SourceCanonicalJsonReference.Path);
+        Assert.Equal("authorization", guard.Relationship.TargetRoute.StorageUnit.Value);
+        Assert.Equal("status", guard.TargetPredicateField.Path);
+        Assert.Equal("authorization-by-status", guard.TargetPredicateIndex.Identity);
+        Assert.Equal("valid", guard.DisallowedTargetValue);
+
+        var changed = plan with
+        {
+            RelationshipGuards =
+            [
+                new PhysicalRequireRelatedTargetNotEqualMutationGuard(
+                    guard.Relationship,
+                    guard.TargetPredicateField,
+                    guard.TargetPredicateIndex,
+                    "revoked")
+            ]
+        };
+        var request = new DocumentMutation(
+            "token",
+            "guarded-prune",
+            "operation-1",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "invalid"))]);
+
+        Assert.NotEqual(
+            BoundedMutationRequestFingerprint.Create(request, plan, "global"),
+            BoundedMutationRequestFingerprint.Create(request, changed, "global"));
+
+        var providerChanged = Assert.Single(PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(
+                new ProviderIdentity("provider-after-upgrade", "9.0"),
+                PhysicalQuerySourceKind.PrimaryProjectedColumns)).Plans);
+        Assert.NotEqual(plan.Fingerprint, providerChanged.Fingerprint);
+        Assert.Equal(
+            BoundedMutationRequestFingerprint.Create(request, plan, "global"),
+            BoundedMutationRequestFingerprint.Create(request, providerChanged, "global"));
+    }
+
+    [Fact]
+    public void Relationship_guard_rejects_an_unindexed_reference_path()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false, includeReferenceIndex: false);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-RELATIONSHIP-010");
+    }
+
+    [Fact]
+    public void Relationship_plan_preserves_an_optional_missing_reference_and_projects_present_values_with_the_target_policy()
+    {
+        var fixture = CreateRelationshipFixture(
+            relatedTarget: false,
+            includeMutation: false,
+            targetIdentityCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase,
+            referenceCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase);
+
+        var plan = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(fixture.RouteSet).Plans);
+
+        Assert.Null(plan.ProjectReference(null));
+        Assert.Throws<ArgumentException>(() => plan.ProjectReference(""));
+        Assert.Throws<ArgumentException>(() => plan.ProjectReference(" "));
+        Assert.Equal(
+            plan.TargetRoute.Envelope.Identity.Project("AUTH-1").ComparisonKey,
+            plan.ProjectReference("AUTH-1"));
+        Assert.Equal(PhysicalQueryFieldSource.CanonicalJsonPath, plan.SourceCanonicalJsonReference.Source);
+        Assert.NotEqual(
+            plan.SourceReferenceDeclarationIndex.Name,
+            plan.TargetEqualityIndex.Name);
+    }
+
+    [Fact]
+    public void Every_manifest_relationship_is_admitted_even_when_no_mutation_guard_references_it()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false, includeMutation: false);
+
+        var relationships = PhysicalRelationshipPlanCompiler.Compile(fixture.RouteSet);
+        var mutations = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.True(relationships.IsValid, string.Join("; ", relationships.Diagnostics.Select(item => item.Message)));
+        Assert.Single(relationships.Plans);
+        Assert.True(mutations.IsValid, string.Join("; ", mutations.Diagnostics.Select(item => item.Message)));
+        Assert.Empty(mutations.Plans);
+    }
+
+    [Fact]
+    public void Provider_admission_rejects_relationship_manifests_until_materialization_is_certified()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false, includeMutation: false);
+        var provider = new ProviderIdentity("provider-under-test", "1.0");
+
+        var exception = Assert.Throws<PhysicalRelationshipProviderNotSupportedException>(() =>
+            PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+                fixture.Manifest,
+                provider,
+                supportsRelationshipMaterialization: false));
+
+        Assert.Contains("GW-RELATIONSHIP-012", exception.Message);
+        Assert.Equal(["token-authorization"], exception.RelationshipIdentities);
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            fixture.Manifest,
+            provider,
+            supportsRelationshipMaterialization: true);
+    }
+
+    [Fact]
+    public void Provider_admission_rejects_guarded_mutations_without_relationship_declarations()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var guardOnly = fixture.Manifest with { Relationships = [] };
+        var provider = new ProviderIdentity("provider-under-test", "1.0");
+
+        var exception = Assert.Throws<PhysicalRelationshipProviderNotSupportedException>(() =>
+            PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+                guardOnly,
+                provider,
+                supportsRelationshipMaterialization: false));
+
+        Assert.Equal(["token-authorization"], exception.RelationshipIdentities);
+    }
+
+    [Fact]
+    public void Relationship_admission_rejects_non_string_and_collection_reference_paths()
+    {
+        var nonString = CreateRelationshipFixture(
+            relatedTarget: false,
+            sourceReferenceType: PortablePhysicalType.Decimal,
+            sourceReferenceValueKind: IndexValueKind.Number);
+        var collection = CreateRelationshipFixture(
+            relatedTarget: false,
+            sourceReferenceCardinality: ProjectionCardinality.CollectionElements);
+
+        var nonStringResult = PhysicalRelationshipPlanCompiler.Compile(nonString.RouteSet);
+        var collectionResult = PhysicalRelationshipPlanCompiler.Compile(collection.RouteSet);
+
+        Assert.Contains(nonStringResult.Diagnostics, diagnostic => diagnostic.Code == "GW-RELATIONSHIP-010");
+        Assert.Contains(collectionResult.Diagnostics, diagnostic => diagnostic.Code == "GW-RELATIONSHIP-010");
+    }
+
+    [Fact]
+    public void Relationship_admission_rejects_case_and_scope_policy_mismatches()
+    {
+        var caseMismatch = CreateRelationshipFixture(
+            relatedTarget: false,
+            targetIdentityCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase);
+        var scopeMismatch = CreateRelationshipFixture(
+            relatedTarget: false,
+            tokenTenancy: TenancyPolicy.Global);
+
+        var caseResult = PhysicalRelationshipPlanCompiler.Compile(caseMismatch.RouteSet);
+        var scopeResult = PhysicalRelationshipPlanCompiler.Compile(scopeMismatch.RouteSet);
+
+        Assert.Contains(caseResult.Diagnostics, diagnostic => diagnostic.Code == "GW-RELATIONSHIP-008");
+        Assert.Contains(scopeResult.Diagnostics, diagnostic => diagnostic.Code == "GW-RELATIONSHIP-006");
+    }
+
+    [Fact]
+    public void Relationship_admission_accepts_matching_global_scope_without_scope_index_prefix()
+    {
+        var fixture = CreateRelationshipFixture(
+            relatedTarget: false,
+            authorizationTenancy: TenancyPolicy.Global,
+            tokenTenancy: TenancyPolicy.Global);
+
+        var result = PhysicalRelationshipPlanCompiler.Compile(fixture.RouteSet);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.Single(result.Plans);
+    }
+
+    [Theory]
+    [InlineData("token-by-status", "authorization-by-id", "GW-RELATIONSHIP-010")]
+    [InlineData("missing-source-index", "authorization-by-id", "GW-RELATIONSHIP-010")]
+    [InlineData("token-by-authorization-id", "authorization-by-status", "GW-RELATIONSHIP-011")]
+    [InlineData("token-by-authorization-id", "missing-target-index", "GW-RELATIONSHIP-011")]
+    public void Relationship_admission_rejects_wrong_or_missing_indexes(
+        string sourceIndex,
+        string targetIndex,
+        string expectedCode)
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var relationship = Assert.Single(fixture.Manifest.Relationships);
+        var changed = fixture.Manifest with
+        {
+            Relationships =
+            [
+                new ManifestRelationshipDeclaration(
+                    relationship.Identity,
+                    relationship.SourceStorageUnit,
+                    relationship.SourceReferencePath,
+                    sourceIndex,
+                    relationship.TargetStorageUnit,
+                    relationship.TargetIdentityPath,
+                    targetIndex,
+                    relationship.ReferenceCasePolicy)
+            ]
+        };
+
+        var result = PhysicalRelationshipPlanCompiler.Compile(CompileRelationshipRouteSet(changed));
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == expectedCode);
+    }
+
+    [Theory]
+    [InlineData(true, false, "GW-RELATIONSHIP-010")]
+    [InlineData(false, true, "GW-RELATIONSHIP-011")]
+    public void Relationship_admission_rejects_non_leading_equality_indexes(
+        bool nonLeadingSourceReference,
+        bool nonLeadingTargetIdentity,
+        string expectedCode)
+    {
+        var fixture = CreateRelationshipFixture(
+            relatedTarget: false,
+            nonLeadingSourceReference: nonLeadingSourceReference,
+            nonLeadingTargetIdentity: nonLeadingTargetIdentity);
+
+        var result = PhysicalRelationshipPlanCompiler.Compile(fixture.RouteSet);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == expectedCode);
+    }
+
+    [Fact]
+    public void Related_target_guard_rejects_a_wrong_predicate_index()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: true);
+        var changedMutation = new BoundedMutationDeclaration(
+            "guarded-prune",
+            "prune-tokens",
+            BoundedMutationAction.Delete(),
+            [BoundedMutationRelationshipGuard.RequireRelatedTargetNotEqual(
+                "token-authorization",
+                "status",
+                "authorization-by-id",
+                "valid")]);
+        var storage = new StorageUnitPhysicalStorage(
+            fixture.MutationStorage.ProvisioningMode,
+            fixture.MutationStorage.Policy,
+            fixture.MutationStorage.LogicalIndexes,
+            fixture.MutationStorage.BoundedQueries,
+            fixture.MutationStorage.NameOverrides,
+            [changedMutation]);
+        var manifest = fixture.Manifest with
+        {
+            StorageUnits = fixture.Manifest.StorageUnits
+                .Select(unit => unit.Identity.Value == "token"
+                    ? unit with { PhysicalStorage = storage }
+                    : unit)
+                .ToArray()
+        };
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            CompileRelationshipRouteSet(manifest),
+            fixture.MutationRoute,
+            storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-MUTATION-012");
+    }
+
+    [Fact]
+    public void Related_target_guard_rejects_a_non_leading_predicate_index()
+    {
+        var fixture = CreateRelationshipFixture(
+            relatedTarget: true,
+            nonLeadingTargetPredicate: true);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-MUTATION-012");
+    }
+
+    [Fact]
+    public void Relationship_admission_rejects_same_unit_and_duplicate_relationship_topologies()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var authorization = fixture.Manifest.StorageUnits.Single(unit => unit.Identity.Value == "authorization");
+        var sameUnit = new ManifestRelationshipDeclaration(
+            "authorization-self",
+            authorization.Identity,
+            "status",
+            "authorization-by-status",
+            authorization.Identity,
+            PhysicalDocumentFieldPaths.Id,
+            "authorization-by-id");
+        var duplicate = Assert.Single(fixture.Manifest.Relationships);
+
+        var sameUnitResult = PhysicalRelationshipPlanCompiler.Compile(
+            CompileRelationshipRouteSet(fixture.Manifest with { Relationships = [sameUnit] }));
+        var duplicateResult = ManifestExecutableRouteSetCompiler.Compile(
+            fixture.Manifest with { Relationships = [duplicate, duplicate] },
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.Contains(sameUnitResult.Diagnostics, diagnostic => diagnostic.Code == "GW-RELATIONSHIP-005");
+        Assert.False(duplicateResult.IsValid);
+        Assert.Contains(duplicateResult.Diagnostics, diagnostic => diagnostic.Code == "GW-MANIFEST-006");
+    }
+
+    [Fact]
+    public void Full_mutation_admission_rejects_rogue_local_route_and_storage_instances()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var rogue = CreateRelationshipFixture(
+            relatedTarget: false,
+            authorizationPhysicalName: "rogue_authorizations");
+
+        var routeResult = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            rogue.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+        var storageResult = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            rogue.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.Contains(routeResult.Diagnostics, diagnostic => diagnostic.Code == "GW-MUTATION-019");
+        Assert.Contains(storageResult.Diagnostics, diagnostic => diagnostic.Code == "GW-MUTATION-020");
+    }
+
+    [Fact]
+    public void Complete_manifest_admission_accepts_only_resolver_compiled_sealed_route_sets()
+    {
+        Assert.Empty(typeof(ManifestExecutableRouteSet).GetConstructors());
+        Assert.DoesNotContain(
+            typeof(PhysicalRelationshipPlanCompiler).GetMethods(),
+            method => method.Name == nameof(PhysicalRelationshipPlanCompiler.Compile) &&
+                      method.GetParameters().Any(parameter =>
+                          parameter.ParameterType == typeof(IReadOnlyList<ExecutableStorageRoute>)));
+        Assert.DoesNotContain(
+            typeof(PhysicalMutationPlanCompiler).GetMethods(),
+            method => method.Name == nameof(PhysicalMutationPlanCompiler.Compile) &&
+                      method.GetParameters().Any(parameter =>
+                          parameter.ParameterType == typeof(IReadOnlyList<ExecutableStorageRoute>)));
+    }
+
+    [Fact]
+    public void Complete_manifest_admission_snapshots_caller_owned_manifest_collections()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var units = fixture.Manifest.StorageUnits.ToList();
+        var relationships = fixture.Manifest.Relationships.ToList();
+        var callerOwned = new StorageManifest(
+            fixture.Manifest.Identity,
+            fixture.Manifest.Owner,
+            fixture.Manifest.Version,
+            units,
+            fixture.Manifest.RequiredCapabilities,
+            fixture.Manifest.CompatibilityNotes)
+        {
+            SharedDocumentStorages = fixture.Manifest.SharedDocumentStorages,
+            Relationships = relationships
+        };
+        var mutatedCallerCollections = false;
+        var compilation = ManifestExecutableRouteSetCompiler.Compile(
+            callerOwned,
+            new DelegatePhysicalNamePolicy(context =>
+            {
+                if (!mutatedCallerCollections)
+                {
+                    units.Clear();
+                    relationships.Clear();
+                    mutatedCallerCollections = true;
+                }
+                return context.FeatureDefaultLogicalName;
+            }),
+            ProviderPhysicalNameNormalizer.Identity);
+        var routeSet = Assert.IsType<ManifestExecutableRouteSet>(compilation.RouteSet);
+
+        Assert.True(mutatedCallerCollections);
+        var result = PhysicalRelationshipPlanCompiler.Compile(routeSet);
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.Single(result.Plans);
+    }
+
+    [Fact]
+    public void Mutation_plan_fingerprint_binds_both_relationship_route_fingerprints()
+    {
+        var baseline = CompileRelationshipMutationPlan(CreateRelationshipFixture(relatedTarget: false));
+        var changedSource = CompileRelationshipMutationPlan(CreateRelationshipFixture(
+            relatedTarget: false,
+            tokenPhysicalName: "tokens_v2"));
+        var changedTarget = CompileRelationshipMutationPlan(CreateRelationshipFixture(
+            relatedTarget: false,
+            authorizationPhysicalName: "authorizations_v2"));
+
+        Assert.NotEqual(baseline.Fingerprint, changedSource.Fingerprint);
+        Assert.NotEqual(baseline.Fingerprint, changedTarget.Fingerprint);
+    }
+
+    [Fact]
+    public void Relationship_materialization_identity_survives_compatible_physical_renames()
+    {
+        var baseline = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(
+                CreateRelationshipFixture(relatedTarget: false)).RelationshipGuards));
+        var renamed = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(CreateRelationshipFixture(
+                relatedTarget: false,
+                authorizationPhysicalName: "authorizations_v2",
+                tokenPhysicalName: "tokens_v2")).RelationshipGuards));
+
+        Assert.Equal(baseline.Relationship.Materialization, renamed.Relationship.Materialization);
+    }
+
+    [Fact]
+    public void Relationship_materialization_identity_rotates_on_semantic_case_policy_drift()
+    {
+        var baseline = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(
+                CreateRelationshipFixture(relatedTarget: false)).RelationshipGuards));
+        var changed = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(CreateRelationshipFixture(
+                relatedTarget: false,
+                targetIdentityCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase,
+                referenceCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase))
+                .RelationshipGuards));
+        var changedSource = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(CreateRelationshipFixture(
+                relatedTarget: false,
+                sourceIdentityCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase))
+                .RelationshipGuards));
+
+        Assert.NotEqual(baseline.Relationship.Materialization, changed.Relationship.Materialization);
+        Assert.NotEqual(baseline.Relationship.Materialization, changedSource.Relationship.Materialization);
+    }
+
+    [Fact]
+    public void Relationship_materialization_identity_rotates_on_semantic_path_and_index_drift()
+    {
+        var baseline = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(
+                CreateRelationshipFixture(relatedTarget: false)).RelationshipGuards));
+        var changedSourcePath = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(CreateRelationshipFixture(
+                relatedTarget: false,
+                sourceReferencePath: "authorizationIdV2")).RelationshipGuards));
+        var changedSourceIndex = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(CreateRelationshipFixture(
+                relatedTarget: false,
+                sourceReferenceIndexIdentity: "token-by-authorization-id-v2")).RelationshipGuards));
+        var changedTargetIndex = Assert.IsType<PhysicalRequireNoReferencesMutationGuard>(
+            Assert.Single(CompileRelationshipMutationPlan(CreateRelationshipFixture(
+                relatedTarget: false,
+                targetEqualityIndexIdentity: "authorization-by-id-v2")).RelationshipGuards));
+
+        Assert.NotEqual(baseline.Relationship.Materialization, changedSourcePath.Relationship.Materialization);
+        Assert.NotEqual(baseline.Relationship.Materialization, changedSourceIndex.Relationship.Materialization);
+        Assert.NotEqual(baseline.Relationship.Materialization, changedTargetIndex.Relationship.Materialization);
+    }
+
+    [Fact]
+    public void Relationship_guard_canonicalization_is_not_ambiguous_when_values_contain_legacy_delimiters()
+    {
+        var plan = CompileRelationshipMutationPlan(CreateRelationshipFixture(relatedTarget: true));
+        var original = Assert.IsType<PhysicalRequireRelatedTargetNotEqualMutationGuard>(
+            Assert.Single(plan.RelationshipGuards));
+        var firstField = original.TargetPredicateField with { Path = "a\u001fb", Identifier = "c" };
+        var secondField = original.TargetPredicateField with { Path = "a", Identifier = "b\u001fc" };
+        var firstGuard = new PhysicalRequireRelatedTargetNotEqualMutationGuard(
+            original.Relationship,
+            firstField,
+            original.TargetPredicateIndex,
+            original.DisallowedTargetValue);
+        var secondGuard = new PhysicalRequireRelatedTargetNotEqualMutationGuard(
+            original.Relationship,
+            secondField,
+            original.TargetPredicateIndex,
+            original.DisallowedTargetValue);
+
+        Assert.NotEqual(firstGuard.CanonicalIdentity, secondGuard.CanonicalIdentity);
+        Assert.NotEqual(
+            (plan with { RelationshipGuards = [firstGuard] }).Fingerprint,
+            (plan with { RelationshipGuards = [secondGuard] }).Fingerprint);
+    }
+
+    [Fact]
+    public void Relationship_guard_fails_closed_without_provider_execution_certification()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var plan = Assert.Single(PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)).Plans);
+
+        var exception = Assert.Throws<PhysicalRelationshipProviderNotSupportedException>(
+            () => new PhysicalMutationHandlerCertification(plan));
+        Assert.Equal(["token-authorization"], exception.RelationshipIdentities);
+    }
+
+    [Fact]
+    public void Relationship_guard_rejects_a_missing_manifest_owned_relationship()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var withoutRelationship = fixture.Manifest with { Relationships = [] };
+
+        Assert.False(fixture.Manifest.HasSameDefinitionAs(withoutRelationship));
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            CompileRelationshipRouteSet(withoutRelationship),
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-MUTATION-016");
+    }
+
+    [Fact]
     public void NamedDeleteMutationRejectsAnExplicitlyUnfilteredPredicate()
     {
         var index = new LogicalIndexDeclaration(
@@ -1432,7 +2051,7 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void MutationRequestFingerprintDistinguishesAssignmentTransitionAndDelete()
+    public void MutationRequestFingerprintRemainsCompatibleForAssignmentTransitionAndDelete()
     {
         var fixture = CreateAssignmentFixture();
         var actions = new BoundedMutationAction[]
@@ -1471,7 +2090,14 @@ public sealed class PhysicalQueryPlanCompilerTests
             .Select(plan => BoundedMutationRequestFingerprint.Create(request, plan, "tenant-a"))
             .ToArray();
 
-        Assert.Equal(fingerprints.Length, fingerprints.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(
+            new[]
+            {
+                "8fb5514ab47436ccd86c257d9c0ab5d3d68a476bc66cc816a8117078347ce94c",
+                "3a88aa5cb812e34ee9766c232e1925045ad288060a5bf5711f75824247b2a195",
+                "12d64e6eea56a5f5e763f459084fefb3b39bf7ae874685e4d8f10a01ca3d8a26"
+            },
+            fingerprints);
     }
 
     [Theory]
@@ -4086,6 +4712,257 @@ public sealed class PhysicalQueryPlanCompilerTests
             Precision: type == PortablePhysicalType.Decimal ? 18 : null,
             Scale: type == PortablePhysicalType.Decimal ? 4 : null);
 
+    private static RelationshipPlanningFixture CreateRelationshipFixture(
+        bool relatedTarget,
+        bool includeReferenceIndex = true,
+        bool includeMutation = true,
+        string authorizationPhysicalName = "authorizations",
+        string tokenPhysicalName = "tokens",
+        PortablePhysicalType sourceReferenceType = PortablePhysicalType.String,
+        ProjectionCardinality sourceReferenceCardinality = ProjectionCardinality.Scalar,
+        IndexValueKind sourceReferenceValueKind = IndexValueKind.Keyword,
+        StringIdentityCasePolicy targetIdentityCasePolicy = StringIdentityCasePolicy.Ordinal,
+        StringIdentityCasePolicy referenceCasePolicy = StringIdentityCasePolicy.Ordinal,
+        TenancyPolicy? authorizationTenancy = null,
+        TenancyPolicy? tokenTenancy = null,
+        bool nonLeadingSourceReference = false,
+        bool nonLeadingTargetIdentity = false,
+        bool nonLeadingTargetPredicate = false,
+        string sourceReferencePath = "authorizationId",
+        string sourceReferenceIndexIdentity = "token-by-authorization-id",
+        string targetEqualityIndexIdentity = "authorization-by-id",
+        StringIdentityCasePolicy sourceIdentityCasePolicy = StringIdentityCasePolicy.Ordinal)
+    {
+        var authorizationStatusIndex = new LogicalIndexDeclaration(
+            "authorization-by-status",
+            [new IndexField("status")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var authorizationIdIndex = new LogicalIndexDeclaration(
+            targetEqualityIndexIdentity,
+            [new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            true,
+            MissingValueBehavior.Excluded);
+        var tokenStatusIndex = new LogicalIndexDeclaration(
+            "token-by-status",
+            [new IndexField("status")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var tokenReferenceIndex = new LogicalIndexDeclaration(
+            sourceReferenceIndexIdentity,
+            [new IndexField(sourceReferencePath)],
+            sourceReferenceValueKind,
+            false,
+            MissingValueBehavior.Excluded);
+        var nonLeadingAuthorizationStatusIndex = new LogicalIndexDeclaration(
+            "authorization-by-status-after-id",
+            [new IndexField("status")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var authorizationLogicalIndexes = nonLeadingTargetPredicate
+            ? new[] { authorizationStatusIndex, authorizationIdIndex, nonLeadingAuthorizationStatusIndex }
+            : new[] { authorizationStatusIndex, authorizationIdIndex };
+        PhysicalIndexColumnDefinition[] AuthorizationIndex(params string[] fields)
+        {
+            var columns = new List<string>();
+            if ((authorizationTenancy ?? TenancyPolicy.Scoped).Kind != TenancyKind.Global)
+                columns.Add("storage_scope");
+            columns.AddRange(fields);
+            return columns
+                .Select((field, index) => new PhysicalIndexColumnDefinition(field, index))
+                .ToArray();
+        }
+        var authorizationPhysicalIndexes = new List<PhysicalIndexDefinition>
+        {
+            new(
+                authorizationStatusIndex.Identity,
+                AuthorizationIndex("status")),
+            new(
+                authorizationIdIndex.Identity,
+                nonLeadingTargetIdentity
+                    ? AuthorizationIndex("status", "id_comparison_key")
+                    : AuthorizationIndex("id_comparison_key"),
+                isUnique: true)
+        };
+        if (nonLeadingTargetPredicate)
+        {
+            authorizationPhysicalIndexes.Add(new PhysicalIndexDefinition(
+                nonLeadingAuthorizationStatusIndex.Identity,
+                AuthorizationIndex("id_comparison_key", "status")));
+        }
+        var authorizationStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                authorizationPhysicalName,
+                [new ProjectedColumnDefinition("status", "status", PortablePhysicalType.String)],
+                indexes: authorizationPhysicalIndexes)),
+            authorizationLogicalIndexes,
+            [new BoundedQueryDeclaration(
+                "prune-authorizations",
+                authorizationStatusIndex.Identity,
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.None,
+                QueryPagingSupport.None,
+                BoundedQueryExecutionClass.ScaleBearing)],
+            boundedMutations: relatedTarget || !includeMutation
+                ? []
+                :
+                [
+                    new BoundedMutationDeclaration(
+                        "guarded-prune",
+                        "prune-authorizations",
+                        BoundedMutationAction.Delete(),
+                        [BoundedMutationRelationshipGuard.RequireNoReferences("token-authorization")])
+                ]);
+        var tokenIndexes = includeReferenceIndex
+            ? new[] { tokenStatusIndex, tokenReferenceIndex }
+            : new[] { tokenStatusIndex };
+        PhysicalIndexColumnDefinition[] TokenIndex(params string[] fields)
+        {
+            var columns = new List<string>();
+            if ((tokenTenancy ?? TenancyPolicy.Scoped).Kind != TenancyKind.Global)
+                columns.Add("storage_scope");
+            columns.AddRange(fields);
+            return columns
+                .Select((field, index) => new PhysicalIndexColumnDefinition(field, index))
+                .ToArray();
+        }
+        IReadOnlyList<PhysicalIndexDefinition> tokenPhysicalIndexes = includeReferenceIndex
+            ? new[]
+            {
+                new PhysicalIndexDefinition(
+                    tokenStatusIndex.Identity,
+                    TokenIndex("status")),
+                new PhysicalIndexDefinition(
+                    tokenReferenceIndex.Identity,
+                    nonLeadingSourceReference
+                        ? TokenIndex("status", sourceReferencePath)
+                        : TokenIndex(sourceReferencePath))
+            }
+            :
+            [
+                new PhysicalIndexDefinition(
+                    tokenStatusIndex.Identity,
+                    TokenIndex("status"))
+            ];
+        var tokenStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                tokenPhysicalName,
+                [
+                    new ProjectedColumnDefinition("status", "status", PortablePhysicalType.String),
+                    new ProjectedColumnDefinition(
+                        sourceReferencePath,
+                        sourceReferencePath,
+                        sourceReferenceType,
+                        Precision: sourceReferenceType == PortablePhysicalType.Decimal ? 18 : null,
+                        Scale: sourceReferenceType == PortablePhysicalType.Decimal ? 0 : null,
+                        Cardinality: sourceReferenceCardinality,
+                        MaxCollectionElements: sourceReferenceCardinality == ProjectionCardinality.CollectionElements
+                            ? 8
+                            : null)
+                ],
+                indexes: tokenPhysicalIndexes)),
+            tokenIndexes,
+            [new BoundedQueryDeclaration(
+                "prune-tokens",
+                tokenStatusIndex.Identity,
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.None,
+                QueryPagingSupport.None,
+                BoundedQueryExecutionClass.ScaleBearing)],
+            boundedMutations: relatedTarget && includeMutation
+                ?
+                [
+                    new BoundedMutationDeclaration(
+                        "guarded-prune",
+                        "prune-tokens",
+                        BoundedMutationAction.Delete(),
+                        [BoundedMutationRelationshipGuard.RequireRelatedTargetNotEqual(
+                            "token-authorization",
+                            "status",
+                            nonLeadingTargetPredicate
+                                ? nonLeadingAuthorizationStatusIndex.Identity
+                                : authorizationStatusIndex.Identity,
+                            "valid")])
+                ]
+                : []);
+        var template = SampleManifests.MetadataManifest();
+        var original = template.StorageUnits.Single();
+        var authorization = original with
+        {
+            Identity = new StorageUnitIdentity("authorization"),
+            DisplayName = "Authorization",
+            IdentityPolicy = IdentityPolicy.StringId(stringCasePolicy: targetIdentityCasePolicy),
+            Tenancy = authorizationTenancy ?? TenancyPolicy.Scoped,
+            PhysicalStorage = authorizationStorage
+        };
+        var token = original with
+        {
+            Identity = new StorageUnitIdentity("token"),
+            DisplayName = "Token",
+            IdentityPolicy = IdentityPolicy.StringId(stringCasePolicy: sourceIdentityCasePolicy),
+            Tenancy = tokenTenancy ?? TenancyPolicy.Scoped,
+            PhysicalStorage = tokenStorage
+        };
+        var manifest = template with
+        {
+            StorageUnits = [authorization, token],
+            SharedDocumentStorages = [],
+            Relationships =
+            [
+                new ManifestRelationshipDeclaration(
+                    "token-authorization",
+                    token.Identity,
+                    sourceReferencePath,
+                    tokenReferenceIndex.Identity,
+                    authorization.Identity,
+                    PhysicalDocumentFieldPaths.Id,
+                    authorizationIdIndex.Identity,
+                    referenceCasePolicy)
+            ]
+        };
+        return ResolveRelationshipFixture(manifest, relatedTarget);
+    }
+
+    private static RelationshipPlanningFixture ResolveRelationshipFixture(
+        StorageManifest manifest,
+        bool relatedTarget)
+    {
+        var routeSet = CompileRelationshipRouteSet(manifest);
+        var mutationStorage = manifest.StorageUnits
+            .Single(unit => unit.Identity.Value == (relatedTarget ? "token" : "authorization"))
+            .PhysicalStorage!;
+        var mutationRoute = routeSet.Routes.Single(route =>
+            route.StorageUnit.Value == (relatedTarget ? "token" : "authorization"));
+        return new RelationshipPlanningFixture(manifest, routeSet, mutationRoute, mutationStorage);
+    }
+
+    private static ManifestExecutableRouteSet CompileRelationshipRouteSet(StorageManifest manifest)
+    {
+        var result = ManifestExecutableRouteSetCompiler.Compile(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        return Assert.IsType<ManifestExecutableRouteSet>(result.RouteSet);
+    }
+
+    private static PhysicalMutationPlan CompileRelationshipMutationPlan(RelationshipPlanningFixture fixture)
+    {
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.RouteSet,
+            fixture.MutationRoute,
+            fixture.MutationStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        return Assert.Single(result.Plans);
+    }
+
     private static PlanningFixture Resolve(
         StorageUnitPhysicalStorage storage,
         SharedStorageBinding? binding,
@@ -4298,6 +5175,12 @@ public sealed class PhysicalQueryPlanCompilerTests
             .ToDictionary(group => group.Key, group => group.First().Identifier, StringComparer.Ordinal);
 
     private sealed record PlanningFixture(ExecutableStorageRoute Route, StorageUnitPhysicalStorage Storage);
+
+    private sealed record RelationshipPlanningFixture(
+        StorageManifest Manifest,
+        ManifestExecutableRouteSet RouteSet,
+        ExecutableStorageRoute MutationRoute,
+        StorageUnitPhysicalStorage MutationStorage);
 
     private sealed class RecordingHandler(
         string identity,

@@ -177,6 +177,10 @@ public static class MongoDbDocumentStoreFactory
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(access);
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            manifest,
+            provider,
+            supportsRelationshipMaterialization: false);
 
         var client = new MongoClient(connectionString);
         var disposableClient = (object)client as IDisposable;
