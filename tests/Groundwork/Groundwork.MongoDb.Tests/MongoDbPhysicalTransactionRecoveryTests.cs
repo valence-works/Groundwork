@@ -56,6 +56,53 @@ public sealed class MongoDbPhysicalTransactionRecoveryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Default_transaction_retry_budget_survives_five_consecutive_rollout_fence_conflicts()
+    {
+        var bodies = new ConcurrentQueue<IClientSessionHandle>();
+        var database = Database();
+        var model = MongoDbPhysicalStorageConformanceTests.Model(PhysicalStorageForm.PhysicalEntityTable);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = Store(database, model, hooks: Hooks(body: (session, _, _) =>
+        {
+            bodies.Enqueue(session);
+            return ValueTask.CompletedTask;
+        }));
+        await ConfigureCommandFailureAsync(
+            database,
+            "update",
+            new BsonDocument("times", 5),
+            112,
+            ["TransientTransactionError"]);
+
+        DocumentStoreWriteResult result;
+        try
+        {
+            result = await store.SaveAsync(new SaveDocumentRequest(
+                "workItem",
+                "retry-default-budget",
+                "1",
+                """{"status":"open","rank":1}""",
+                ExpectedVersion: 0));
+        }
+        finally
+        {
+            await DisableCommandFailureAsync(database);
+        }
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status);
+        Assert.Equal(6, bodies.Count);
+        Assert.Equal(6, bodies.Distinct(ReferenceEqualityComparer.Instance).Count());
+        Assert.Equal(1, (await store.LoadAsync("workItem", "retry-default-budget"))!.Version);
+        var route = Assert.Single(model.Routes);
+        var fence = await database.GetCollection<BsonDocument>(MongoDbCollectionRolloutFence.CollectionName)
+            .Find(Builders<BsonDocument>.Filter.Eq(
+                "_id",
+                MongoDbCollectionRolloutFence.Identity(route)))
+            .SingleAsync();
+        Assert.Equal(1, fence["activity"].ToInt64());
+    }
+
+    [Fact]
     public async Task Transient_transaction_retry_attempt_budget_terminates_persistent_failure()
     {
         var bodies = new ConcurrentQueue<IClientSessionHandle>();
