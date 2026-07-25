@@ -214,7 +214,8 @@ public sealed class BaselineCompatibilityEvaluatorTests
                         benchmarkCase,
                         new BenchmarkSample(
                             iteration, 4, 1_000_000_000, 100, 1, 0, 0, null, null,
-                            new Dictionary<string, long>(), [100, 200, 300, 400]))))
+                            new Dictionary<string, long>(), [100, 200, 300, 400])
+                            .WithObservedCommandSignal())))
                 .ToArray()
             : [];
         var evidence = new ElsaMigrationEvidenceReport(

@@ -1,4 +1,9 @@
+using System.Data.Common;
+using System.Diagnostics;
 using Groundwork.Core.PhysicalStorage;
+using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+using Npgsql;
 using Xunit;
 
 namespace Groundwork.PhysicalStorage.Benchmarks.Tests;
@@ -234,6 +239,69 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Measured_query_run_ignores_a_target_round_trip_count_without_scoped_telemetry()
+    {
+        var environment = new RecordingEnvironment(reportedRoundTrips: 2);
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            DatasetSize = 10,
+            MigrationDatasetSize = 1,
+            MeasurementIterations = 5,
+            OperationsPerIteration = 1,
+            Providers = [BenchmarkProvider.Sqlite],
+            StorageForms = [PhysicalStorageForm.SharedDocuments]
+        };
+        var runner = new BenchmarkRunner(null, () => environment);
+
+        var result = await runner.RunAsync(
+            new BenchmarkRunRequest(
+                FindRepositoryRoot(), configuration, [BenchmarkWorkload.IndexedQuery], output, null,
+                AllowContainers: false, RegressionConfirmationRun: false),
+            CancellationToken.None);
+
+        Assert.All(Assert.Single(result.Report.Cases).Samples, sample =>
+        {
+            Assert.Null(sample.RoundTrips);
+            Assert.Equal(DatabaseSignalAvailability.Unavailable, sample.DatabaseSignal.Availability);
+            Assert.Null(sample.DatabaseSignal.ObservableRoundTrips);
+        });
+    }
+
+    [Theory]
+    [InlineData(BenchmarkProvider.Sqlite)]
+    [InlineData(BenchmarkProvider.SqlServer)]
+    [InlineData(BenchmarkProvider.PostgreSql)]
+    [InlineData(BenchmarkProvider.MongoDb)]
+    public async Task Measured_run_persists_target_scoped_signals_for_every_provider_path(BenchmarkProvider provider)
+    {
+        var environment = new RecordingEnvironment(emitTargetScopedTelemetry: true);
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            DatasetSize = 10,
+            MigrationDatasetSize = 1,
+            MeasurementIterations = 5,
+            OperationsPerIteration = 1,
+            Providers = [provider],
+            StorageForms = [PhysicalStorageForm.SharedDocuments]
+        };
+        var providerOutput = Path.Combine(output, provider.ToString());
+        var runner = new BenchmarkRunner(null, () => environment);
+
+        var result = await runner.RunAsync(
+            new BenchmarkRunRequest(
+                FindRepositoryRoot(), configuration, [BenchmarkWorkload.Insert], providerOutput, null,
+                AllowContainers: false, RegressionConfirmationRun: false),
+            CancellationToken.None);
+
+        Assert.All(Assert.Single(result.Report.Cases).Samples, sample =>
+        {
+            Assert.Equal(DatabaseSignalAvailability.Observed, sample.DatabaseSignal.Availability);
+            Assert.True(sample.DatabaseSignal.ObservableRoundTrips > 0);
+            Assert.Equal(sample.DatabaseSignal.ObservableRoundTrips, sample.RoundTrips);
+        });
+    }
+
+    [Fact]
     public async Task Measured_run_rejects_later_observable_result_drift_instead_of_reusing_the_first_vector()
     {
         var environment = new RecordingEnvironment(driftObservableResults: true);
@@ -276,7 +344,10 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         ManualTimeProvider? clock = null,
         TimeSpan? executionDuration = null,
         bool invalidOperationLatencies = false,
-        bool driftObservableResults = false) : IBenchmarkProviderEnvironment
+        bool driftObservableResults = false,
+        bool zeroRoundTrips = false,
+        bool emitTargetScopedTelemetry = false,
+        long? reportedRoundTrips = null) : IBenchmarkProviderEnvironment
     {
         public List<RecordingTarget> Targets { get; } = [];
 
@@ -299,7 +370,10 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
                 clock,
                 executionDuration,
                 invalidOperationLatencies,
-                driftObservableResults);
+                driftObservableResults,
+                zeroRoundTrips,
+                emitTargetScopedTelemetry,
+                reportedRoundTrips);
             Targets.Add(target);
             return target;
         }
@@ -314,12 +388,33 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         ManualTimeProvider? clock,
         TimeSpan? executionDuration,
         bool invalidOperationLatencies,
-        bool driftObservableResults) : IPhysicalStorageBenchmarkTarget
+        bool driftObservableResults,
+        bool zeroRoundTrips,
+        bool emitTargetScopedTelemetry,
+        long? reportedRoundTrips) : IPhysicalStorageBenchmarkTarget
     {
+        private const string SqliteDataSource = "recording-target.db";
+        private const string SqlServerDatabase = "groundwork_measured";
+        private const string PostgreSqlApplicationName = "groundwork-measured";
+        private const string MongoDatabase = "groundwork-measured";
+        private readonly DiagnosticListener? diagnosticListener = emitTargetScopedTelemetry && provider != BenchmarkProvider.MongoDb
+            ? new DiagnosticListener(provider == BenchmarkProvider.Sqlite
+                ? "Microsoft.Data.Sqlite"
+                : provider == BenchmarkProvider.SqlServer ? "Microsoft.Data.SqlClient" : "Npgsql")
+            : null;
+
         public BenchmarkProvider Provider => provider;
         public PhysicalStorageForm StorageForm => storageForm;
         public string ProviderVersion => "test";
         public IReadOnlyDictionary<string, string> ProviderConfiguration { get; } = new Dictionary<string, string>();
+        public DatabaseSignalTarget SignalTarget { get; } = provider switch
+        {
+            BenchmarkProvider.Sqlite => DatabaseSignalTarget.ForSqlite(SqliteDataSource),
+            BenchmarkProvider.SqlServer => DatabaseSignalTarget.ForSqlServer(SqlServerDatabase),
+            BenchmarkProvider.PostgreSql => DatabaseSignalTarget.ForPostgreSql(PostgreSqlApplicationName),
+            BenchmarkProvider.MongoDb => DatabaseSignalTarget.ForMongoDb(MongoDatabase),
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+        };
         public string Instance => instance;
         public (int Seed, BenchmarkDataShape Shape) Seed { get; private set; }
         public int CorrectnessCalls { get; private set; }
@@ -368,11 +463,12 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
             ExecuteCalls++;
             if (executionDuration is not null)
                 clock!.Advance(executionDuration.Value);
+            EmitTargetScopedTelemetry();
             return Task.FromResult(new WorkloadExecution(
                 operations,
                 0,
                 0,
-                2,
+                reportedRoundTrips ?? (zeroRoundTrips ? 0 : 2),
                 new Dictionary<string, long>(),
                 Enumerable.Repeat(100L, invalidOperationLatencies ? operations - 1 : operations).ToArray(),
                 BenchmarkObservableResultVector.Create(
@@ -394,8 +490,33 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
 
         public ValueTask DisposeAsync()
         {
+            diagnosticListener?.Dispose();
             Disposed = true;
             return ValueTask.CompletedTask;
+        }
+
+        private void EmitTargetScopedTelemetry()
+        {
+            if (emitTargetScopedTelemetry && provider == BenchmarkProvider.MongoDb)
+            {
+                DatabaseSignalCollector.PublishMongoDbCommandStart(MongoDatabase);
+                return;
+            }
+
+            if (diagnosticListener is null)
+                return;
+
+            using DbConnection connection = provider switch
+            {
+                BenchmarkProvider.Sqlite => new SqliteConnection($"Data Source={SqliteDataSource}"),
+                BenchmarkProvider.SqlServer => new SqlConnection(
+                    $"Server=localhost;Database={SqlServerDatabase};User Id=groundwork;Password=secret"),
+                BenchmarkProvider.PostgreSql => new NpgsqlConnection(
+                    $"Host=localhost;Database=groundwork;Username=groundwork;Password=secret;Application Name={PostgreSqlApplicationName}"),
+                _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+            };
+            using var command = connection.CreateCommand();
+            diagnosticListener.Write("CommandStart", new { Command = command });
         }
     }
 

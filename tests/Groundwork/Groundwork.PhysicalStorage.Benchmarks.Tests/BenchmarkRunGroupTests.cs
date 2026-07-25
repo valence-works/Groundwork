@@ -315,7 +315,8 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                                 null,
                                 null,
                                 new Dictionary<string, long>(),
-                                Enumerable.Repeat(latency, 10).ToArray())),
+                                Enumerable.Repeat(latency, 10).ToArray())
+                                .WithObservedCommandSignal()),
                         BenchmarkJson.CompactOptions));
                 await File.WriteAllLinesAsync(rawPath, lines);
                 await WriteWorkerEnvelopeArtifactsAsync(
@@ -439,7 +440,8 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                             null,
                             null,
                             new Dictionary<string, long>(),
-                            Enumerable.Repeat(latency, 10).ToArray())),
+                            Enumerable.Repeat(latency, 10).ToArray())
+                            .WithObservedCommandSignal()),
                     BenchmarkJson.CompactOptions));
             await File.WriteAllLinesAsync(rawPath, lines, cancellationToken);
         }

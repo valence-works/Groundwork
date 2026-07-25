@@ -37,6 +37,8 @@ public sealed class SqlServerBenchmarkTarget(
         ["factory"] = nameof(SqlServerDocumentStoreFactory.OpenPhysicalAsync)
     };
 
+    public override DatabaseSignalTarget SignalTarget => DatabaseSignalTarget.ForSqlServer(databaseName);
+
     protected override ProviderIdentity GroundworkProvider => SqlServerGroundworkCapabilities.Provider;
     protected override IProviderPhysicalNameNormalizer PhysicalNames => SqlServerGroundworkCapabilities.PhysicalNames;
     protected override string HandlerPrefix => "sqlserver";

@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Groundwork.PhysicalStorage.Benchmarks;
 
 public sealed record StorageSnapshot(
@@ -12,6 +14,7 @@ public sealed record BenchmarkSample(
     int Operations,
     long ElapsedNanoseconds,
     long AllocatedBytes,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     long? RoundTrips,
     long LogicalPayloadBytes,
     long LogicalMutations,
@@ -20,8 +23,51 @@ public sealed record BenchmarkSample(
     IReadOnlyDictionary<string, long> ProviderWork,
     IReadOnlyList<long> OperationLatencyNanoseconds)
 {
+    public DatabaseSignalEvidence DatabaseSignal { get; init; } = new(
+        DatabaseSignalAvailability.Unavailable,
+        "unavailable",
+        "no-target-scoped-provider-telemetry",
+        null,
+        null,
+        null);
+
     public double ThroughputOperationsPerSecond => Operations * 1_000_000_000d / ElapsedNanoseconds;
     public double AllocatedBytesPerOperation => (double)AllocatedBytes / Operations;
+
+    /// <summary>
+    /// Keeps the persisted round-trip metric bound exclusively to the target-scoped
+    /// diagnostic snapshot that produced it. A target's compatibility counter is not
+    /// evidence and must never be persisted as a substitute for unavailable telemetry.
+    /// </summary>
+    public bool HasValidDatabaseSignalEvidence()
+    {
+        if (DatabaseSignal is null)
+            return false;
+
+        return DatabaseSignal.Availability switch
+        {
+            DatabaseSignalAvailability.Observed =>
+                DatabaseSignalEvidence.IsRecognizedObservedSource(DatabaseSignal.Source) &&
+                DatabaseSignal.Reason is null &&
+                DatabaseSignal.ObservableRoundTrips is > 0 &&
+                RoundTrips == DatabaseSignal.ObservableRoundTrips &&
+                (DatabaseSignal.CommandStarts is null or > 0) &&
+                (DatabaseSignal.ClientActivities is null or > 0) &&
+                (DatabaseSignal.Source == "target-scoped-diagnostic-command"
+                    ? DatabaseSignal.CommandStarts == DatabaseSignal.ObservableRoundTrips &&
+                      DatabaseSignal.ClientActivities is null
+                    : DatabaseSignal.CommandStarts is null &&
+                      DatabaseSignal.ClientActivities == DatabaseSignal.ObservableRoundTrips),
+            DatabaseSignalAvailability.Unavailable =>
+                string.Equals(DatabaseSignal.Source, "unavailable", StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(DatabaseSignal.Reason) &&
+                DatabaseSignal.CommandStarts is null &&
+                DatabaseSignal.ClientActivities is null &&
+                DatabaseSignal.ObservableRoundTrips is null &&
+                RoundTrips is null,
+            _ => false
+        };
+    }
 }
 
 public sealed record BenchmarkCaseSummary(
@@ -50,12 +96,13 @@ public static class BenchmarkSummarizer
         if (samples.Any(sample =>
                 sample.Operations <= 0 ||
                 sample.ElapsedNanoseconds <= 0 ||
+                !sample.HasValidDatabaseSignalEvidence() ||
                 sample.OperationLatencyNanoseconds is null ||
                 sample.OperationLatencyNanoseconds.Count != sample.Operations ||
                 sample.OperationLatencyNanoseconds.Any(latency => latency <= 0)))
         {
             throw new ArgumentException(
-                "Every sample must contain one positive raw latency observation per operation.",
+                "Every sample must contain valid target-scoped database-signal evidence and one positive raw latency observation per operation.",
                 nameof(samples));
         }
 

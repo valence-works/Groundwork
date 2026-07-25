@@ -236,7 +236,7 @@ public sealed class BenchmarkRunner
                                 ? await target.CaptureStorageAsync(cancellationToken)
                                 : null;
                             var allocatedBefore = GC.GetTotalAllocatedBytes(precise: false);
-                            using var measurement = signals.BeginMeasurement();
+                            using var measurement = signals.BeginMeasurement(target.SignalTarget);
                             var timestamp = timeProvider.GetTimestamp();
                             var execution = await target.ExecuteAsync(
                                 workload,
@@ -258,7 +258,7 @@ public sealed class BenchmarkRunner
                             QueryBranchEvidence.EnsureObserved(
                                 workload,
                                 request.Configuration.OperationsPerIteration,
-                                execution.RoundTrips ?? signalSnapshot.ObservableRoundTrips);
+                                signalSnapshot.ObservableRoundTrips);
                             var allocatedBytes = Math.Max(0, GC.GetTotalAllocatedBytes(precise: false) - allocatedBefore);
                             await target.ValidateIterationAsync(workload, cancellationToken);
                             var storageAfter = capturesStorage
@@ -269,13 +269,16 @@ public sealed class BenchmarkRunner
                                 execution.Operations,
                                 elapsedNanoseconds,
                                 allocatedBytes,
-                                execution.RoundTrips ?? signalSnapshot.ObservableRoundTrips,
+                                signalSnapshot.ObservableRoundTrips,
                                 execution.LogicalPayloadBytes,
                                 execution.LogicalMutations,
                                 storageBefore,
                                 storageAfter,
                                 Merge(execution.ProviderWork, signalSnapshot.ToProviderWork()),
-                                execution.OperationLatencyNanoseconds);
+                                execution.OperationLatencyNanoseconds)
+                            {
+                                DatabaseSignal = signalSnapshot.Evidence
+                            };
                             samples.Add(sample);
                             measuredOperations += sample.Operations;
                             measuredElapsedNanoseconds += sample.ElapsedNanoseconds;

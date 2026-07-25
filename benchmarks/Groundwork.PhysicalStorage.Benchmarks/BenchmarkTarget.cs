@@ -87,6 +87,7 @@ public interface IPhysicalStorageBenchmarkTarget : IAsyncDisposable
     PhysicalStorageForm StorageForm { get; }
     string ProviderVersion { get; }
     IReadOnlyDictionary<string, string> ProviderConfiguration { get; }
+    DatabaseSignalTarget SignalTarget { get; }
 
     Task InitializeAsync(CancellationToken cancellationToken);
     Task SeedAsync(int seed, BenchmarkDataShape shape, CancellationToken cancellationToken);

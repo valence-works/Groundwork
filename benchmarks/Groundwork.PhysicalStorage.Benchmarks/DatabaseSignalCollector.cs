@@ -1,56 +1,206 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Diagnostics;
+using System.Text.Json.Serialization;
+using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+using Npgsql;
 
 namespace Groundwork.PhysicalStorage.Benchmarks;
 
-public sealed record DatabaseSignalSnapshot(long CommandStarts, long ClientActivities)
+public enum DatabaseSignalAvailability
 {
-    public long? ObservableRoundTrips => CommandStarts > 0
-        ? CommandStarts
-        : ClientActivities > 0 ? ClientActivities : null;
+    Observed,
+    Unavailable
+}
 
-    public IReadOnlyDictionary<string, long> ToProviderWork() => new Dictionary<string, long>
+/// <summary>
+/// Artifact-safe description of target-scoped provider telemetry. Connection values, target names,
+/// and diagnostic payloads never leave the in-process selector.
+/// </summary>
+public sealed record DatabaseSignalEvidence(
+    DatabaseSignalAvailability Availability,
+    string Source,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    string? Reason,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    long? CommandStarts,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    long? ClientActivities,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    long? ObservableRoundTrips)
+{
+    public static bool IsRecognizedObservedSource(string? source) =>
+        source is "target-scoped-diagnostic-command" or "target-scoped-client-activity";
+}
+
+public sealed record DatabaseSignalSnapshot(
+    long? CommandStarts,
+    long? ClientActivities,
+    DatabaseSignalEvidence Evidence)
+{
+    public long? ObservableRoundTrips => Evidence.ObservableRoundTrips;
+
+    public IReadOnlyDictionary<string, long> ToProviderWork()
     {
-        ["diagnostic_command_starts"] = CommandStarts,
-        ["database_client_activities"] = ClientActivities,
-        ["round_trips_observable"] = ObservableRoundTrips.HasValue ? 1 : 0,
-        ["round_trip_signal_is_diagnostic_command"] = CommandStarts > 0 ? 1 : 0,
-        ["round_trip_signal_is_client_activity"] = CommandStarts == 0 && ClientActivities > 0 ? 1 : 0
+        var values = new Dictionary<string, long>(StringComparer.Ordinal);
+        if (CommandStarts.HasValue)
+            values["target_scoped_diagnostic_command_starts"] = CommandStarts.Value;
+        if (ClientActivities.HasValue)
+            values["target_scoped_client_activities"] = ClientActivities.Value;
+        if (ObservableRoundTrips.HasValue)
+            values["target_scoped_round_trip_signals"] = ObservableRoundTrips.Value;
+        if (Evidence.Availability == DatabaseSignalAvailability.Unavailable)
+            values["target_scoped_provider_telemetry_unavailable"] = 1;
+        return values;
+    }
+}
+
+/// <summary>
+/// A non-serializable selector that accepts only telemetry emitted for the target being measured.
+/// It intentionally retains the matching connection/database details in private fields.
+/// </summary>
+public sealed class DatabaseSignalTarget
+{
+    private readonly BenchmarkProvider provider;
+    private readonly string target;
+
+    private DatabaseSignalTarget(BenchmarkProvider provider, string target)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+            throw new ArgumentException("A database signal target is required.", nameof(target));
+        this.provider = provider;
+        this.target = target;
+    }
+
+    public static DatabaseSignalTarget ForSqlite(string dataSource) =>
+        new(BenchmarkProvider.Sqlite, NormalizeSqliteDataSource(dataSource));
+
+    public static DatabaseSignalTarget ForSqlServer(string databaseName) =>
+        new(BenchmarkProvider.SqlServer, databaseName);
+
+    public static DatabaseSignalTarget ForPostgreSql(string applicationName) =>
+        new(BenchmarkProvider.PostgreSql, applicationName);
+
+    public static DatabaseSignalTarget ForMongoDb(string databaseName) =>
+        new(BenchmarkProvider.MongoDb, databaseName);
+
+    internal bool MatchesCommand(DbCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        var connection = command.Connection;
+        if (connection is null)
+            return false;
+
+        return provider switch
+        {
+            BenchmarkProvider.Sqlite when connection is SqliteConnection =>
+                string.Equals(
+                    NormalizeSqliteDataSource(connection.DataSource),
+                    target,
+                    StringComparison.Ordinal),
+            BenchmarkProvider.SqlServer when connection is SqlConnection =>
+                string.Equals(connection.Database, target, StringComparison.OrdinalIgnoreCase),
+            BenchmarkProvider.PostgreSql when connection is NpgsqlConnection =>
+                string.Equals(GetApplicationName(connection.ConnectionString), target, StringComparison.Ordinal),
+            _ => false
+        };
+    }
+
+    internal bool MatchesActivity(Activity activity)
+    {
+        ArgumentNullException.ThrowIfNull(activity);
+        if (!IsProviderSource(activity.Source.Name))
+            return false;
+        var connectionString = Tag(activity, "db.connection_string") ??
+                               Tag(activity, "db.connectionString") ??
+                               Tag(activity, "connection_string");
+        return connectionString is not null && MatchesConnectionString(connectionString);
+    }
+
+    internal bool MatchesMongoDbDatabase(string databaseName) =>
+        provider == BenchmarkProvider.MongoDb &&
+        string.Equals(databaseName, target, StringComparison.Ordinal);
+
+    private bool MatchesConnectionString(string connectionString)
+    {
+        try
+        {
+            return provider switch
+            {
+                BenchmarkProvider.Sqlite => string.Equals(
+                    NormalizeSqliteDataSource(new SqliteConnectionStringBuilder(connectionString).DataSource),
+                    target,
+                    StringComparison.Ordinal),
+                BenchmarkProvider.SqlServer => string.Equals(
+                    new SqlConnectionStringBuilder(connectionString).InitialCatalog,
+                    target,
+                    StringComparison.OrdinalIgnoreCase),
+                BenchmarkProvider.PostgreSql => string.Equals(
+                    GetApplicationName(connectionString),
+                    target,
+                    StringComparison.Ordinal),
+                _ => false
+            };
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private bool IsProviderSource(string source) => provider switch
+    {
+        BenchmarkProvider.Sqlite => source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase),
+        BenchmarkProvider.SqlServer => source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase),
+        BenchmarkProvider.PostgreSql => source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase),
+        _ => false
     };
+
+    private static string? Tag(Activity activity, string name) =>
+        activity.GetTagItem(name)?.ToString();
+
+    private static string GetApplicationName(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString).ApplicationName ?? string.Empty;
+
+    private static string NormalizeSqliteDataSource(string dataSource) =>
+        string.Equals(dataSource, ":memory:", StringComparison.OrdinalIgnoreCase)
+            ? dataSource
+            : Path.GetFullPath(dataSource);
 }
 
 public sealed class DatabaseSignalCollector :
     IObserver<DiagnosticListener>,
-    IObserver<KeyValuePair<string, object?>>, IDisposable
+    IObserver<KeyValuePair<string, object?>>,
+    IDisposable
 {
+    private const string MongoCommandEventName = "CommandStart";
+    private static readonly DiagnosticListener MongoCommandListener =
+        new("Groundwork.MongoDB.Driver.Commands");
     private readonly ConcurrentBag<IDisposable> subscriptions = [];
     private readonly IDisposable allListenersSubscription;
     private readonly ActivityListener activityListener;
-    private long commandStarts;
-    private long clientActivities;
+    private MeasurementScope? activeMeasurement;
 
     public DatabaseSignalCollector()
     {
         allListenersSubscription = DiagnosticListener.AllListeners.Subscribe(this);
         activityListener = new ActivityListener
         {
-            ShouldListenTo = source => IsDatabaseSource(source.Name),
+            ShouldListenTo = static source => IsDatabaseActivitySource(source.Name),
             Sample = static (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
-            ActivityStopped = activity =>
-            {
-                if (activity.Kind == ActivityKind.Client && IsDatabaseSource(activity.Source.Name))
-                    Volatile.Read(ref Current)?.IncrementActivity();
-            }
+            ActivityStopped = activity => Volatile.Read(ref activeMeasurement)?.TryRecordClientActivity(activity)
         };
         ActivitySource.AddActivityListener(activityListener);
     }
 
-    private static DatabaseSignalCollector? Current;
-
-    public MeasurementScope BeginMeasurement()
+    public MeasurementScope BeginMeasurement(DatabaseSignalTarget target)
     {
-        Volatile.Write(ref Current, this);
-        return new MeasurementScope(this, Interlocked.Read(ref commandStarts), Interlocked.Read(ref clientActivities));
+        ArgumentNullException.ThrowIfNull(target);
+        var measurement = new MeasurementScope(this, target);
+        if (Interlocked.CompareExchange(ref activeMeasurement, measurement, null) is not null)
+            throw new InvalidOperationException("A database signal measurement is already active.");
+        return measurement;
     }
 
     public void OnNext(DiagnosticListener listener)
@@ -62,7 +212,13 @@ public sealed class DatabaseSignalCollector :
     public void OnNext(KeyValuePair<string, object?> value)
     {
         if (IsCommandStartEvent(value.Key))
-            Interlocked.Increment(ref commandStarts);
+        {
+            var measurement = Volatile.Read(ref activeMeasurement);
+            if (value.Value is MongoDbCommandStartSignal mongo)
+                measurement?.TryRecordMongoDbCommand(mongo.DatabaseName);
+            else
+                measurement?.TryRecordCommand(value.Value);
+        }
     }
 
     public void OnError(Exception error)
@@ -75,11 +231,18 @@ public sealed class DatabaseSignalCollector :
 
     public void Dispose()
     {
-        Volatile.Write(ref Current, null);
+        Interlocked.Exchange(ref activeMeasurement, null);
         activityListener.Dispose();
         allListenersSubscription.Dispose();
         while (subscriptions.TryTake(out var subscription))
             subscription.Dispose();
+    }
+
+    internal static void PublishMongoDbCommandStart(string databaseName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
+        if (MongoCommandListener.IsEnabled(MongoCommandEventName))
+            MongoCommandListener.Write(MongoCommandEventName, new MongoDbCommandStartSignal(databaseName));
     }
 
     public static bool IsCommandStartEvent(string eventName) =>
@@ -89,39 +252,110 @@ public sealed class DatabaseSignalCollector :
          eventName.EndsWith("Started", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsDatabaseSource(string source) =>
-        source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) ||
-        source.Contains("MongoDB", StringComparison.OrdinalIgnoreCase);
+        ClassifyDatabaseSource(source) != DatabaseSignalSourceKind.None;
 
-    private void IncrementActivity() => Interlocked.Increment(ref clientActivities);
+    private static bool IsDatabaseActivitySource(string source) =>
+        ClassifyDatabaseSource(source) is not (DatabaseSignalSourceKind.None or DatabaseSignalSourceKind.MongoDb);
+
+    private static DatabaseSignalSourceKind ClassifyDatabaseSource(string source)
+    {
+        if (source.Contains("SqlClient", StringComparison.OrdinalIgnoreCase))
+            return DatabaseSignalSourceKind.SqlServer;
+        if (source.Contains("Sqlite", StringComparison.OrdinalIgnoreCase))
+            return DatabaseSignalSourceKind.Sqlite;
+        if (source.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
+            return DatabaseSignalSourceKind.PostgreSql;
+        return source.Contains("MongoDB", StringComparison.OrdinalIgnoreCase)
+            ? DatabaseSignalSourceKind.MongoDb
+            : DatabaseSignalSourceKind.None;
+    }
+
+    private sealed record MongoDbCommandStartSignal(string DatabaseName);
+
+    private enum DatabaseSignalSourceKind
+    {
+        None,
+        Sqlite,
+        SqlServer,
+        PostgreSql,
+        MongoDb
+    }
 
     public sealed class MeasurementScope : IDisposable
     {
         private readonly DatabaseSignalCollector owner;
-        private readonly long commandStarts;
-        private readonly long clientActivities;
+        private readonly DatabaseSignalTarget target;
+        private long commandStarts;
+        private long clientActivities;
+        private DatabaseSignalSnapshot? snapshot;
         private int disposed;
 
-        internal MeasurementScope(DatabaseSignalCollector owner, long commandStarts, long clientActivities)
+        internal MeasurementScope(DatabaseSignalCollector owner, DatabaseSignalTarget target)
         {
             this.owner = owner;
-            this.commandStarts = commandStarts;
-            this.clientActivities = clientActivities;
+            this.target = target;
+        }
+
+        internal void TryRecordCommand(object? payload)
+        {
+            if (TryGetCommand(payload) is { } command && target.MatchesCommand(command))
+                Interlocked.Increment(ref commandStarts);
+        }
+
+        internal void TryRecordMongoDbCommand(string databaseName)
+        {
+            if (target.MatchesMongoDbDatabase(databaseName))
+                Interlocked.Increment(ref commandStarts);
+        }
+
+        internal void TryRecordClientActivity(Activity activity)
+        {
+            if (activity.Kind == ActivityKind.Client && target.MatchesActivity(activity))
+                Interlocked.Increment(ref clientActivities);
         }
 
         public DatabaseSignalSnapshot Complete()
         {
             Dispose();
-            return new DatabaseSignalSnapshot(
-                Interlocked.Read(ref owner.commandStarts) - commandStarts,
-                Interlocked.Read(ref owner.clientActivities) - clientActivities);
+            return snapshot ??= CreateSnapshot(
+                Interlocked.Read(ref commandStarts),
+                Interlocked.Read(ref clientActivities));
         }
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref disposed, 1) == 0)
-                Volatile.Write(ref Current, null);
+                Interlocked.CompareExchange(ref owner.activeMeasurement, null, this);
         }
+
+        private static DatabaseSignalSnapshot CreateSnapshot(long commandStarts, long clientActivities)
+        {
+            long? observedCommands = commandStarts > 0 ? commandStarts : null;
+            long? observedActivities = clientActivities > 0 ? clientActivities : null;
+            var observableRoundTrips = observedCommands ?? observedActivities;
+            var availability = observableRoundTrips.HasValue
+                ? DatabaseSignalAvailability.Observed
+                : DatabaseSignalAvailability.Unavailable;
+            var source = observedCommands.HasValue
+                ? "target-scoped-diagnostic-command"
+                : observedActivities.HasValue
+                    ? "target-scoped-client-activity"
+                    : "unavailable";
+            return new DatabaseSignalSnapshot(
+                observedCommands,
+                observedActivities,
+                new DatabaseSignalEvidence(
+                    availability,
+                    source,
+                    availability == DatabaseSignalAvailability.Unavailable
+                        ? "no-target-scoped-provider-telemetry"
+                        : null,
+                    observedCommands,
+                    observedCommands.HasValue ? null : observedActivities,
+                    observableRoundTrips));
+        }
+
+        private static DbCommand? TryGetCommand(object? payload) =>
+            payload?.GetType().GetProperty("Command")?.GetValue(payload) as DbCommand;
     }
 }

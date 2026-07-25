@@ -25,6 +25,7 @@ public sealed class PostgreSqlBenchmarkTarget(
 {
     private readonly string serverConnectionString = serverConnectionString;
     private readonly string schemaName = $"groundwork_bench_{instance}_{storageForm}".ToLowerInvariant();
+    private readonly string signalApplicationName = $"groundwork-benchmark-{instance}-{storageForm}".ToLowerInvariant();
     private readonly string sourceDescription = sourceDescription;
     private string connectionString = string.Empty;
 
@@ -37,6 +38,17 @@ public sealed class PostgreSqlBenchmarkTarget(
         ["connection_lifetime"] = "per-operation concurrent production sessions",
         ["factory"] = nameof(PostgreSqlDocumentStoreFactory.OpenPhysicalAsync)
     };
+
+    public override DatabaseSignalTarget SignalTarget => DatabaseSignalTarget.ForPostgreSql(signalApplicationName);
+
+    internal string SignalApplicationName => signalApplicationName;
+
+    internal string CreateProductionConnectionString() =>
+        new NpgsqlConnectionStringBuilder(serverConnectionString)
+        {
+            SearchPath = schemaName,
+            ApplicationName = signalApplicationName
+        }.ConnectionString;
 
     protected override ProviderIdentity GroundworkProvider => PostgreSqlGroundworkCapabilities.Provider;
     protected override IProviderPhysicalNameNormalizer PhysicalNames => PostgreSqlGroundworkCapabilities.PhysicalNames;
@@ -176,7 +188,7 @@ public sealed class PostgreSqlBenchmarkTarget(
         await using var command = connection.CreateCommand();
         command.CommandText = $"CREATE SCHEMA {Q(schemaName)};";
         await command.ExecuteNonQueryAsync(cancellationToken);
-        connectionString = new NpgsqlConnectionStringBuilder(serverConnectionString) { SearchPath = schemaName }.ConnectionString;
+        connectionString = CreateProductionConnectionString();
     }
 
     protected override async Task DropIsolationBoundaryAsync(CancellationToken cancellationToken)

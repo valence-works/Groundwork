@@ -49,6 +49,58 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rejects_a_resealed_target_scoped_signal_change_that_is_not_bound_by_the_summary()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { TamperMeasuredRawDatabaseSignal = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("raw measurements", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_resealed_raw_and_summary_pair_that_claims_round_trips_while_telemetry_is_unavailable()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { ForgeMeasuredUnavailableRoundTrips = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Rejects_a_resealed_raw_and_summary_pair_with_a_forged_observed_count()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { ForgeMeasuredObservedCountMismatch = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Rejects_a_resealed_raw_and_summary_pair_with_conflicting_secondary_signal_count()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { ForgeMeasuredSecondarySignalCount = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Rejects_measured_workers_that_do_not_meet_the_authenticated_operation_and_duration_floors()
     {
         var fixture = await ScheduledGroupFixture.CreateAsync(
@@ -149,6 +201,10 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         public sealed record Options
         {
             public bool ForgeMeasuredConsumerResultDigest { get; init; }
+            public bool TamperMeasuredRawDatabaseSignal { get; init; }
+            public bool ForgeMeasuredUnavailableRoundTrips { get; init; }
+            public bool ForgeMeasuredObservedCountMismatch { get; init; }
+            public bool ForgeMeasuredSecondarySignalCount { get; init; }
             public bool GitDirty { get; init; }
             public bool WriteMeasuredIntegrityLedger { get; init; } = true;
             public int MeasuredSampleCount { get; init; } = 30;
@@ -273,11 +329,27 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             var samples = role == BenchmarkExecutionRole.Measured
                 ? CreateSamples(options)
                 : [];
+            var forgeUnavailableRoundTrips = options.ForgeMeasuredUnavailableRoundTrips &&
+                                                role == BenchmarkExecutionRole.Measured;
+            var forgeObservedCountMismatch = options.ForgeMeasuredObservedCountMismatch &&
+                                               role == BenchmarkExecutionRole.Measured;
+            var forgeSecondarySignalCount = options.ForgeMeasuredSecondarySignalCount &&
+                                            role == BenchmarkExecutionRole.Measured;
+            if (forgeUnavailableRoundTrips)
+                samples = ForgeUnavailableRoundTrips(samples);
+            else if (forgeObservedCountMismatch)
+                samples = ForgeObservedCountMismatch(samples);
+            else if (forgeSecondarySignalCount)
+                samples = ForgeSecondarySignalCount(samples);
+            var forgeDatabaseSignal =
+                forgeUnavailableRoundTrips || forgeObservedCountMismatch || forgeSecondarySignalCount;
             var benchmarkCase = new BenchmarkCase(
                 BenchmarkProvider.Sqlite,
                 PhysicalStorageForm.PhysicalEntityTable,
                 BenchmarkWorkload.Insert);
-            var report = CreateReport(role, samples, benchmarkCase, shape, workerRoot);
+            var report = forgeDatabaseSignal
+                ? CreateForgedDatabaseSignalReport(samples, benchmarkCase, shape, workerRoot)
+                : CreateReport(role, samples, benchmarkCase, shape, workerRoot);
             var runId = $"scheduled-fixture-{ordinalText}";
             var workerManifest = new BenchmarkRunManifest(
                 BenchmarkProfiles.SchemaVersion,
@@ -303,13 +375,29 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     : null,
                 ArtifactIntegrity: "reports/artifact-integrity.json");
 
-            await using (var writer = new BenchmarkArtifactWriter(layout))
+            if (forgeDatabaseSignal)
             {
+                await WriteForgedDatabaseSignalArtifactsAsync(
+                    layout,
+                    workerManifest,
+                    machine,
+                    providers,
+                    persistedConfiguration,
+                    benchmarkCase,
+                    samples,
+                    report,
+                    independentRun);
+            }
+            else
+            {
+                await using var writer = new BenchmarkArtifactWriter(layout);
                 await writer.WriteManifestAsync(workerManifest, CancellationToken.None);
                 await writer.WriteMachineAsync(machine, CancellationToken.None);
                 await writer.WriteProvidersAsync(providers, CancellationToken.None);
                 await writer.WriteConfigurationAsync(persistedConfiguration, CancellationToken.None);
-                foreach (var sample in samples)
+                foreach (var sample in options.TamperMeasuredRawDatabaseSignal && role == BenchmarkExecutionRole.Measured
+                             ? TamperFirstSignal(samples)
+                             : samples)
                     await writer.AppendSampleAsync(new RawBenchmarkRecord(benchmarkCase, sample), CancellationToken.None);
                 await writer.WriteReportAsync(report, CancellationToken.None);
                 if (role == BenchmarkExecutionRole.Measured)
@@ -399,6 +487,140 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     new Dictionary<string, long>(),
                     Enumerable.Repeat(100L, options.OperationsPerSample).ToArray()))
                 .ToArray();
+
+        private static IReadOnlyList<BenchmarkSample> TamperFirstSignal(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select((sample, index) => index == 0
+                ? sample with
+                {
+                    RoundTrips = 1,
+                    DatabaseSignal = new DatabaseSignalEvidence(
+                        DatabaseSignalAvailability.Observed,
+                        "target-scoped-diagnostic-command",
+                        null,
+                        1,
+                        null,
+                        1)
+                }
+                : sample).ToArray();
+
+        private static IReadOnlyList<BenchmarkSample> ForgeUnavailableRoundTrips(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select(sample => sample with { RoundTrips = 1 }).ToArray();
+
+        private static IReadOnlyList<BenchmarkSample> ForgeObservedCountMismatch(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select(sample => sample with
+            {
+                RoundTrips = 2,
+                DatabaseSignal = new DatabaseSignalEvidence(
+                    DatabaseSignalAvailability.Observed,
+                    "target-scoped-diagnostic-command",
+                    null,
+                    CommandStarts: 1,
+                    ClientActivities: null,
+                    ObservableRoundTrips: 2)
+            }).ToArray();
+
+        private static IReadOnlyList<BenchmarkSample> ForgeSecondarySignalCount(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select(sample => sample with
+            {
+                RoundTrips = 1,
+                DatabaseSignal = new DatabaseSignalEvidence(
+                    DatabaseSignalAvailability.Observed,
+                    "target-scoped-diagnostic-command",
+                    null,
+                    CommandStarts: 1,
+                    ClientActivities: 2,
+                    ObservableRoundTrips: 1)
+            }).ToArray();
+
+        private static BenchmarkRunReport CreateForgedDatabaseSignalReport(
+            IReadOnlyList<BenchmarkSample> samples,
+            BenchmarkCase benchmarkCase,
+            BenchmarkDataShape shape,
+            string workerRoot)
+        {
+            var operations = samples.Sum(sample => (long)sample.Operations);
+            var elapsed = samples.Sum(sample => sample.ElapsedNanoseconds);
+            var latencyCount = samples.Sum(sample => sample.OperationLatencyNanoseconds.Count);
+            return new BenchmarkRunReport(
+                BenchmarkProfiles.SchemaVersion,
+                $"scheduled-fixture-{Path.GetFileName(workerRoot)}",
+                BenchmarkRunMode.Scheduled,
+                [new BenchmarkCaseResult(
+                    benchmarkCase,
+                    new CorrectnessGateResult(true, true, true, true, true),
+                    [],
+                    new BenchmarkCaseSummary(
+                        benchmarkCase.Identity,
+                        samples.Count,
+                        latencyCount,
+                        100,
+                        100,
+                        100,
+                        operations * 1_000_000_000d / elapsed,
+                        100,
+                        samples.Sum(sample => sample.RoundTrips!.Value) / (double)operations,
+                        null,
+                        null,
+                        null,
+                        new Dictionary<string, double>()),
+                    samples,
+                    [new BenchmarkObservableResult(0, "fixture-result", "validated", 1, operations, null)])],
+                [],
+                new BaselineEligibility(false, ["fixture is non-promotable"]),
+                shape);
+        }
+
+        private static async Task WriteForgedDatabaseSignalArtifactsAsync(
+            ArtifactLayout layout,
+            BenchmarkRunManifest manifest,
+            BenchmarkMachineMetadata machine,
+            IReadOnlyList<BenchmarkProviderMetadata> providers,
+            BenchmarkRunConfiguration configuration,
+            BenchmarkCase benchmarkCase,
+            IReadOnlyList<BenchmarkSample> samples,
+            BenchmarkRunReport report,
+            int independentRun)
+        {
+            layout.CreateDirectories();
+            await WriteJsonAsync(layout.Manifest, manifest);
+            await WriteJsonAsync(layout.MachineMetadata, machine);
+            await WriteJsonAsync(layout.ProviderMetadata, providers);
+            await WriteJsonAsync(layout.Configuration, configuration);
+            await File.WriteAllLinesAsync(
+                layout.RawMeasurements,
+                samples.Select(sample => JsonSerializer.Serialize(
+                    new RawBenchmarkRecord(benchmarkCase, sample),
+                    BenchmarkJson.CompactOptions)));
+            await WriteJsonAsync(layout.SummaryJson, report);
+            await WriteJsonAsync(layout.ElsaMigrationEvidenceJson, ElsaMigrationEvidenceReport.From(report));
+            var consumer = BenchmarkConsumerEvidenceReport.Create(
+                report,
+                configuration,
+                machine,
+                providers,
+                layout,
+                independentRun);
+            await WriteJsonAsync(layout.ConsumerEvidenceJson, consumer);
+
+            var artifacts = new[]
+            {
+                layout.RelativePath(layout.Manifest),
+                manifest.RawMeasurements,
+                manifest.Summary,
+                manifest.ElsaMigrationEvidence,
+                manifest.MachineMetadata,
+                manifest.ProviderMetadata,
+                manifest.Configuration,
+                manifest.ConsumerEvidence!
+            }.Order(StringComparer.Ordinal)
+             .Select(relative => new BenchmarkArtifactDigest(
+                 relative,
+                 Digest(Path.Combine(layout.Root, relative.Replace('/', Path.DirectorySeparatorChar)))) )
+             .ToArray();
+            await WriteJsonAsync(
+                layout.ArtifactIntegrityJson,
+                new BenchmarkArtifactIntegrity(BenchmarkArtifactIntegrity.ContractVersion, manifest.RunId, artifacts));
+        }
 
         private static BenchmarkRunReport CreateReport(
             BenchmarkExecutionRole role,

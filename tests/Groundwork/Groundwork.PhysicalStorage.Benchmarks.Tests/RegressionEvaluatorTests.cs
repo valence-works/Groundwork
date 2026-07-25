@@ -117,7 +117,8 @@ public sealed class RegressionEvaluatorTests
             .Select(iteration => new BenchmarkSample(
                 iteration, 10, elapsedNanoseconds + iteration, 1_000, 1, 0, 0,
                 null, null, new Dictionary<string, long>(),
-                Enumerable.Repeat(elapsedNanoseconds, 10).ToArray()))
+                Enumerable.Repeat(elapsedNanoseconds, 10).ToArray())
+                .WithObservedCommandSignal())
             .ToArray();
 
     private static BenchmarkSample[] SamplesWithStorage(
@@ -141,6 +142,7 @@ public sealed class RegressionEvaluatorTests
                     0,
                     new Dictionary<string, long>()),
                 ProviderWork: new Dictionary<string, long>(),
-                OperationLatencyNanoseconds: Enumerable.Repeat(100L, 10).ToArray()))
+                OperationLatencyNanoseconds: Enumerable.Repeat(100L, 10).ToArray())
+                .WithObservedCommandSignal())
             .ToArray();
 }

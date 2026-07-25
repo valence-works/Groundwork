@@ -277,6 +277,25 @@ evidence report, and measured consumer-evidence report. The verifier rejects pat
 JSON members, identity mismatches, Git drift, and digest mismatches before a group can be used as a
 baseline. Connection strings and provider secrets remain excluded.
 
+## Target-scoped database-work signals
+
+Every measured raw sample now carries a sealed `databaseSignal` object. SQLite and SQL Server
+accept provider diagnostic command starts only when the command is bound to the disposable measured
+database target. PostgreSQL uses a target-specific `Application Name` on every production-path
+connection so its diagnostic commands cannot be confused with another schema sharing the same
+server database. MongoDB configures the production target client with the driver's public
+`CommandStartedEvent` subscriber and accepts a command only when its database namespace matches the
+measured target. The target selector and all connection values remain in memory; artifacts contain
+only the provider-neutral source, availability, and positive counts.
+
+These are observable client command/activity signals, not a claim that the harness has exact
+wire-level server round-trip accounting. `roundTrips` is written exclusively from the matching
+target-scoped signal snapshot; a target-reported compatibility counter cannot fill a telemetry
+gap. If a provider does not expose the relevant public telemetry during a workload, `roundTrips`
+and every signal count are `null`, with an explicit `unavailable` reason and no synthetic zero.
+Raw measurement digests, artifact-integrity ledgers, consumer-evidence reconstruction, and
+scheduled-worker raw/summary equality bind those signals to the exact run group.
+
 Machine metadata records CPU model, memory, storage/filesystem capacity, and power/governor state
 when the host exposes them, otherwise the literal `unavailable`. Provider metadata distinguishes
 declared configuration from effective settings and explicitly marks settings unavailable when the
@@ -319,12 +338,55 @@ All three final verdicts were **CLEAN**:
   removed or weakened; immutable-baseline eligibility remains disabled; and no #50 completion is
   claimed.
 
+A second three-axis review examined the target-scoped database-work signal follow-up from
+`ba8e87f7a48d8fbfbe1db260f0472af15c6c2387` through
+`c7f9137b0088015724298190af4ffe2eec233dea`. It initially found that callers could override an
+unavailable observation and that SQL Server/PostgreSQL lacked positive selector and runner-path
+coverage. After remediation, the originating reviewers returned **PASS**:
+
+- **Correctness and mechanism — addressed:** the runner accepts only the scoped snapshot's
+  observable count; persisted diagnostic-command and client-activity evidence states are exclusive,
+  and their authoritative count must agree exactly with the persisted round-trip count; unavailable
+  evidence cannot claim a count.
+- **Evidence integrity — addressed:** writer, reader, summarizer, report reconstruction, JSON
+  Schema validation, and fully resealed scheduled-group verification reject forged or internally
+  inconsistent signal counts.
+- **Scope and test preservation — addressed:** SQL Server and PostgreSQL now have positive and
+  negative selector coverage, all four provider runner paths are exercised without retaining
+  selector values, no provider/workload/form declaration or worker protocol was removed, and live
+  controlled evidence remains explicitly outstanding.
+
+The focused verification suite passed 74 tests and `git diff --check` remained clean.
+
+The final exact-head audit then found two additional blockers. Evidence review proved that a
+diagnostic signal could retain a conflicting lower-precedence activity count and survive complete
+artifact resealing. Correctness review proved that MongoDB's runner-only synthetic activity test
+did not bind telemetry to the production target client. Both findings were remediated:
+
+- persisted signal states are now exclusive, every authoritative count must equal `roundTrips`,
+  and writer/reader plus fully resealed scheduled-group tests reject the forged dual-signal vector;
+- MongoDB now subscribes to the driver's public `CommandStartedEvent` on the target-owned client,
+  passes that client's database through the production `CreatePhysicalAsync` admission overload,
+  recreates the instrumented client for reset/restart, and uses it for measured backfill work; and
+- a real replica-set runner test covers indexed query, client reset, backfill, and client restart
+  while proving positive exact signal equality and absence of connection/target values in raw
+  evidence.
+
+The originating correctness, evidence-integrity, and scope/test-preservation reviewers all returned
+**PASS** on `63e166d62d6dd56bc00c12d2c860fc6d71fa77aa`. A standards follow-up also identified duplicated
+integration-test workspace setup and duplicated provider-source classification; both were extracted
+into single shared definitions without changing the protocol or evidence schema. The full benchmark
+test project passed 227 tests, including the live MongoDB evidence test, and the hosted SQLite
+non-decision smoke remained green.
+
 ## Remaining issue #50 acceptance work
 
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
   the 1K/100K/1M dataset matrix for the reviewed workload-bound payload profiles.
 - Capture exact-HEAD live evidence from SQLite, SQL Server, PostgreSQL, and MongoDB.
-- Complete reliable provider database-work/round-trip signals and concurrent-load evidence.
+- Exercise the target-scoped provider database-work signals under controlled live evidence for all
+  providers, then complete sustained concurrent-load evidence. The current observable client
+  signals do not by themselves close either acceptance item.
 - Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
 - Capture actual crash/failure recovery evidence required by issue #50. Client pool reset/reopen
   validation is not crash or failure recovery evidence and does not close that acceptance work.

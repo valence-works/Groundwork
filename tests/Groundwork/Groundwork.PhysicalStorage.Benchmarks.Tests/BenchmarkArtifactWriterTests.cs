@@ -33,12 +33,154 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var reloaded = await BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None);
 
         Assert.Single(lines);
+        using var serialized = JsonDocument.Parse(lines[0]);
+        var serializedSample = serialized.RootElement.GetProperty("sample");
+        Assert.Equal(JsonValueKind.Null, serializedSample.GetProperty("roundTrips").ValueKind);
+        var serializedSignal = serializedSample.GetProperty("databaseSignal");
+        Assert.Equal(JsonValueKind.Null, serializedSignal.GetProperty("commandStarts").ValueKind);
+        Assert.Equal(JsonValueKind.Null, serializedSignal.GetProperty("clientActivities").ValueKind);
+        Assert.Equal(JsonValueKind.Null, serializedSignal.GetProperty("observableRoundTrips").ValueKind);
         var actual = Assert.Single(reloaded);
         Assert.Equal(record.Case, actual.Case);
         Assert.Equal(record.Sample.Iteration, actual.Sample.Iteration);
         Assert.Equal(record.Sample.ElapsedNanoseconds, actual.Sample.ElapsedNanoseconds);
         Assert.Equal([100L], actual.Sample.OperationLatencyNanoseconds);
         Assert.Empty(actual.Sample.ProviderWork);
+        Assert.Equal(DatabaseSignalAvailability.Unavailable, actual.Sample.DatabaseSignal.Availability);
+        Assert.Equal("no-target-scoped-provider-telemetry", actual.Sample.DatabaseSignal.Reason);
+        Assert.Null(actual.Sample.DatabaseSignal.CommandStarts);
+        Assert.Null(actual.Sample.DatabaseSignal.ClientActivities);
+        Assert.Null(actual.Sample.DatabaseSignal.ObservableRoundTrips);
+    }
+
+    [Fact]
+    public async Task Raw_measurements_reject_zero_or_ambiguous_database_signal_evidence()
+    {
+        var layout = new ArtifactLayout(root);
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, null, 0, 0, null, null, new Dictionary<string, long>(), [100])
+        {
+            DatabaseSignal = new DatabaseSignalEvidence(
+                DatabaseSignalAvailability.Observed,
+                "target-scoped-diagnostic-command",
+                null,
+                0,
+                null,
+                0)
+        };
+        await using var writer = new BenchmarkArtifactWriter(layout);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => writer.AppendSampleAsync(
+            new RawBenchmarkRecord(
+                new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+                sample),
+            CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal evidence", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Raw_measurements_reject_a_compatibility_round_trip_when_target_scoped_telemetry_is_unavailable()
+    {
+        var layout = new ArtifactLayout(root);
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, 1, 0, 0, null, null, new Dictionary<string, long>(), [100]);
+        await using var writer = new BenchmarkArtifactWriter(layout);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => writer.AppendSampleAsync(
+            new RawBenchmarkRecord(
+                new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+                sample),
+            CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal evidence", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Raw_reader_rejects_a_resealed_unavailable_signal_with_a_round_trip_claim()
+    {
+        var layout = new ArtifactLayout(root);
+        layout.CreateDirectories();
+        var record = new RawBenchmarkRecord(
+            new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+            new BenchmarkSample(
+                0, 1, 100, 50, 1, 0, 0, null, null, new Dictionary<string, long>(), [100]));
+        await File.WriteAllTextAsync(
+            layout.RawMeasurements,
+            JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions) + Environment.NewLine);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Raw_writer_and_reader_reject_an_observed_count_that_disagrees_with_claimed_round_trips()
+    {
+        var layout = new ArtifactLayout(root);
+        layout.CreateDirectories();
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, 2, 0, 0, null, null, new Dictionary<string, long>(), [100])
+        {
+            DatabaseSignal = new DatabaseSignalEvidence(
+                DatabaseSignalAvailability.Observed,
+                "target-scoped-diagnostic-command",
+                null,
+                CommandStarts: 1,
+                ClientActivities: null,
+                ObservableRoundTrips: 2)
+        };
+        var record = new RawBenchmarkRecord(
+            new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+            sample);
+        await using (var writer = new BenchmarkArtifactWriter(layout))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                writer.AppendSampleAsync(record, CancellationToken.None));
+        }
+
+        await File.WriteAllTextAsync(
+            layout.RawMeasurements,
+            JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions) + Environment.NewLine);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Raw_writer_and_reader_reject_a_secondary_count_in_diagnostic_evidence()
+    {
+        var layout = new ArtifactLayout(root);
+        layout.CreateDirectories();
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, 1, 0, 0, null, null, new Dictionary<string, long>(), [100])
+        {
+            DatabaseSignal = new DatabaseSignalEvidence(
+                DatabaseSignalAvailability.Observed,
+                "target-scoped-diagnostic-command",
+                null,
+                CommandStarts: 1,
+                ClientActivities: 2,
+                ObservableRoundTrips: 1)
+        };
+        var record = new RawBenchmarkRecord(
+            new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+            sample);
+        await using (var writer = new BenchmarkArtifactWriter(layout))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                writer.AppendSampleAsync(record, CancellationToken.None));
+        }
+
+        await File.WriteAllTextAsync(
+            layout.RawMeasurements,
+            JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions) + Environment.NewLine);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -77,7 +219,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -205,7 +348,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.SharedDocuments,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 1, 1_000, 40, 1, 0, 0, null, null, new Dictionary<string, long>(), [100]);
+            0, 1, 1_000, 40, 1, 0, 0, null, null, new Dictionary<string, long>(), [100])
+            .WithObservedCommandSignal();
         var machine = new BenchmarkMachineMetadata(
             "test-os", "benchmark-host", "Arm64", ".NET 10", "Release", 8, true, 1_000_000_000,
             "1.0.0", "abcdef", false, DateTimeOffset.UnixEpoch);
@@ -267,7 +411,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.SharedDocuments,
             BenchmarkWorkload.Insert);
         var sample = new BenchmarkSample(
-            0, 1, 1_000, 40, 1, 0, 1, null, null, new Dictionary<string, long>(), [100]);
+            0, 1, 1_000, 40, 1, 0, 1, null, null, new Dictionary<string, long>(), [100])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -323,7 +468,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -370,7 +516,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -417,7 +564,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var machine = new BenchmarkMachineMetadata(
             "test-os", "benchmark-host", "Arm64", ".NET 10", "Release", 8, true, 1_000_000_000,
             "1.0.0", "abcdef", false, DateTimeOffset.UnixEpoch);
@@ -485,7 +633,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var before = new StorageSnapshot(100, 10, 1, 0, new Dictionary<string, long>());
         var after = new StorageSnapshot(500, 20, 5, 0, new Dictionary<string, long>());
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 4, before, after, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 4, before, after, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
