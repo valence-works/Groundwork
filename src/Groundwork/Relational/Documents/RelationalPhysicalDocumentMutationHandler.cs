@@ -51,12 +51,12 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
     private const string DiscoveryTable = "groundwork_bounded_mutation_discovery";
     private const string CandidateTable = "groundwork_bounded_mutation_candidates";
     private const string ProvisionalTable = "groundwork_bounded_mutation_provisional";
-    private const string SelectionTable = "groundwork_bounded_mutation_selection";
-    private const string SelectionKind = "document_kind";
-    private const string SelectionScope = "storage_scope";
-    private const string SelectionId = "document_id";
-    private const string SelectionComparison = "document_id_comparison_key";
-    private const string SelectionLookup = "document_id_lookup_key";
+    internal const string SelectionTable = "groundwork_bounded_mutation_selection";
+    internal const string SelectionKind = "document_kind";
+    internal const string SelectionScope = "storage_scope";
+    internal const string SelectionId = "document_id";
+    internal const string SelectionComparison = "document_id_comparison_key";
+    internal const string SelectionLookup = "document_id_lookup_key";
     private const string SelectionVersion = "document_version";
     private const string SelectionIncarnation = "document_incarnation";
 
@@ -108,6 +108,9 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         FrozenDictionary<string, string>.Empty;
 
     public IReadOnlyList<PhysicalMutationHandlerCertification> Certifications { get; }
+
+    public bool SupportsAtomicCollectionMaintenance =>
+        store.SupportsAtomicCollectionMutationMaintenance;
 
     public bool SupportsCompoundPredicates => true;
 
@@ -623,6 +626,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         long expectedAffected,
         CancellationToken ct)
     {
+        await DeleteCollectionSelectionAsync(connection, transaction, route, ct);
         if (route.LinkedIndexStorage is not null)
         {
             var linkedAffected = await ExecuteAsync(
@@ -648,6 +652,71 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             [],
             ct);
         EnsureAffectedCount("primary delete", primaryAffected, expectedAffected);
+    }
+
+    /// <summary>
+    /// Deletes every collection-element row owned by the already rechecked mutation selection.
+    /// This deliberately runs before the owner delete, but in the very same mutation transaction:
+    /// a failed linked or primary delete therefore rolls back element maintenance together with the
+    /// owner rows. Collection cardinality is independent of the owner affected count, so there is
+    /// no one-to-one count assertion to make here.
+    /// </summary>
+    private async Task DeleteCollectionSelectionAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        ExecutableStorageRoute route,
+        CancellationToken ct)
+    {
+        foreach (var storage in route.CollectionElementStorages)
+        {
+            await ExecuteAsync(
+                connection,
+                transaction,
+                BuildCollectionDeleteCommand(store, storage, SelectionTableExpression).CommandText,
+                [],
+                ct);
+        }
+    }
+
+    /// <summary>
+    /// Renders the exact collection-maintenance command used by a physical delete mutation.
+    /// Provider conformance tests inspect this command natively so evidence stays tied to the
+    /// production owner-key deletion rather than a separately reconstructed approximation.
+    /// </summary>
+    internal static RelationalPhysicalQueryCommand BuildCollectionDeleteCommand(
+        RelationalPhysicalDocumentStore store,
+        ExecutableCollectionElementStorageRoute storage,
+        string selectionTableExpression)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(storage);
+        ArgumentException.ThrowIfNullOrWhiteSpace(selectionTableExpression);
+
+        // Collection elements use their own owner+ordinal key. In particular, SQL Server does
+        // not add the primary/linked hidden identity hashes to this table, so this remains an
+        // exact retained-column join rather than ExactPhysicalIdentityJoin.
+        var exactIdentity = new RelationalPhysicalIdentityJoinPart[]
+        {
+            new(storage.DocumentKind.Column.Identifier, "c", SelectionKind, "s"),
+            new(storage.StorageScope.Column.Identifier, "c", SelectionScope, "s"),
+            new(storage.IdComparisonKey.Column.Identifier, "c", SelectionComparison, "s"),
+            new(storage.IdLookupKey.Column.Identifier, "c", SelectionLookup, "s")
+        };
+        var ownerKeyPrefix = new RelationalPhysicalIdentityJoinPart[]
+        {
+            new(storage.DocumentKind.Column.Identifier, "c", SelectionKind, "s"),
+            new(storage.StorageScope.Column.Identifier, "c", SelectionScope, "s"),
+            new(storage.IdLookupKey.Column.Identifier, "c", SelectionLookup, "s")
+        };
+        return new RelationalPhysicalQueryCommand(
+            store.DeleteCollectionByMutationSelection(
+                store.Q(storage.Storage.Name.Identifier),
+                "c",
+                selectionTableExpression,
+                exactIdentity,
+                ownerKeyPrefix),
+            [],
+            []);
     }
 
     private async Task TransitionSelectionAsync(

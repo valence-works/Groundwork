@@ -12,8 +12,10 @@ using Groundwork.PostgreSql.PhysicalStorage;
 using Groundwork.Relational.Documents;
 using Groundwork.TestInfrastructure;
 using Npgsql;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Testcontainers.PostgreSql;
 using Xunit;
 
@@ -513,6 +515,70 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     [Fact]
     public Task Concurrent_distinct_deletes_serialize_the_selected_set() =>
         RelationalBoundedMutationServerAssertions.ConcurrentDistinctDeletesSerializeSelectedSetAsync(MutationHarness());
+
+    [Fact]
+    public Task Collection_bearing_scalar_mutations_keep_element_storage_atomic() =>
+        RelationalBoundedMutationServerAssertions.CollectionBearingScalarMutationsMaintainElementsAtomicallyAsync(MutationHarness());
+
+    [Fact]
+    public async Task Collection_delete_uses_the_owner_primary_key_inside_the_mutation_transaction()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: true,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            includeCollection: true,
+            mutationOptions: new(IncludeRangeDelete: true));
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString()));
+        var route = model.Target.Routes.Single();
+        var collection = Assert.Single(route.CollectionElementStorages);
+        var store = new PostgreSqlPhysicalDocumentStore(
+            container.GetConnectionString(), model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument",
+            "collection-native-plan",
+            "1",
+            """{"category":"authorization-a","priority":1,"permissions":["read","write","audit"]}"""));
+
+        string? plan = null;
+        var runtime = RelationalPhysicalMutationRuntime.CreateWithInterceptor(
+            new RelationalPhysicalMutationRuntimeContext(
+                store,
+                model.Manifest,
+                route,
+                model.Target.Provider,
+                PostgreSqlGroundworkCapabilities.Provider.Name,
+                "postgresql"),
+            async (point, connection, transaction, cancellationToken) =>
+            {
+                if (point != RelationalPhysicalMutationExecutionPoint.AfterSelection)
+                    return;
+
+                var command = RelationalPhysicalDocumentMutationHandler.BuildCollectionDeleteCommand(
+                    store,
+                    collection,
+                    store.MutationSelectionTable(RelationalPhysicalDocumentMutationHandler.SelectionTable));
+                plan = await ExplainCollectionDeleteAsync(connection, transaction, command, cancellationToken);
+            });
+
+        var result = await runtime.ExecuteAsync(new DocumentMutation(
+            "configurationDocument",
+            "prune-by-category-cutoff",
+            "postgresql-collection-native-plan",
+            [
+                DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "authorization-a")),
+                DocumentQueryClause.Of(DocumentQueryComparison.LessThan("priority", "10"))
+            ]));
+
+        Assert.Equal(1, result.AffectedCount);
+        Assert.True(
+            UsesCollectionOwnerPrimaryKey(plan, collection),
+            $"The exact production collection-delete command did not use the collection owner primary key. Native plan:{Environment.NewLine}{plan}");
+    }
 
     [Fact]
     public Task Ordinary_save_and_delete_serialize_with_the_selected_set() =>
@@ -1353,6 +1419,204 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         while (await reader.ReadAsync())
             lines.Add(reader.GetString(0));
         return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// Captures an <c>EXPLAIN ANALYZE</c> plan for the exact production collection-delete command
+    /// while the mutation selection table and outer mutation transaction are still live. The
+    /// savepoint rolls the probe back before the handler performs its real delete.
+    /// </summary>
+    private static async ValueTask<string> ExplainCollectionDeleteAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        RelationalPhysicalQueryCommand rendered,
+        CancellationToken cancellationToken)
+    {
+        const string savepoint = "groundwork_collection_plan";
+        await ExecutePlanControlAsync(connection, transaction, $"SAVEPOINT {savepoint};", cancellationToken);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = $"EXPLAIN (ANALYZE, FORMAT JSON) {rendered.CommandText}";
+            foreach (var (name, value) in rendered.Parameters)
+            {
+                var parameter = command.CreateParameter();
+                parameter.ParameterName = name;
+                parameter.Value = value ?? DBNull.Value;
+                command.Parameters.Add(parameter);
+            }
+
+            var lines = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                lines.Add(reader.GetString(0));
+            return string.Join(Environment.NewLine, lines);
+        }
+        finally
+        {
+            await ExecutePlanControlAsync(connection, transaction, $"ROLLBACK TO SAVEPOINT {savepoint};", cancellationToken);
+            await ExecutePlanControlAsync(connection, transaction, $"RELEASE SAVEPOINT {savepoint};", cancellationToken);
+        }
+    }
+
+    private static async ValueTask ExecutePlanControlAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string sql,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static bool UsesCollectionOwnerPrimaryKey(
+        string? nativePlan,
+        ExecutableCollectionElementStorageRoute collection)
+    {
+        if (string.IsNullOrWhiteSpace(nativePlan))
+            return false;
+
+        using var document = JsonDocument.Parse(nativePlan);
+        var exactComparison = collection.IdComparisonKey.Column.Identifier;
+        var ownerColumns = new[]
+        {
+            collection.DocumentKind.Column.Identifier,
+            collection.StorageScope.Column.Identifier,
+            collection.IdLookupKey.Column.Identifier
+        };
+        var expectedIndex = $"{collection.Storage.Name.Identifier}_pkey";
+        var nodes = EnumeratePlanNodes(document.RootElement).ToArray();
+        if (nodes.Any(node =>
+                string.Equals(ReadPlanString(node, "Relation Name"), collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
+                string.Equals(ReadPlanString(node, "Node Type"), "Seq Scan", StringComparison.Ordinal)))
+            return false;
+
+        return nodes.Any(node =>
+            (string.Equals(ReadPlanString(node, "Node Type"), "Index Scan", StringComparison.Ordinal) ||
+             string.Equals(ReadPlanString(node, "Node Type"), "Index Only Scan", StringComparison.Ordinal)) &&
+            string.Equals(ReadPlanString(node, "Relation Name"), collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
+            string.Equals(ReadPlanString(node, "Index Name"), expectedIndex, StringComparison.Ordinal) &&
+            ownerColumns.All(column => ContainsPlanColumn(ReadPlanString(node, "Index Cond"), column)) &&
+            ContainsPlanColumn(PlanNodeText(node), exactComparison));
+    }
+
+    private static IEnumerable<JsonElement> EnumeratePlanNodes(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                foreach (var node in EnumeratePlanNodes(item))
+                    yield return node;
+            yield break;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+            yield break;
+
+        if (element.TryGetProperty("Plan", out var plan))
+        {
+            foreach (var node in EnumeratePlanNodes(plan))
+                yield return node;
+            yield break;
+        }
+
+        if (element.TryGetProperty("Node Type", out _))
+            yield return element;
+        if (element.TryGetProperty("Plans", out var children))
+            foreach (var child in children.EnumerateArray())
+                foreach (var node in EnumeratePlanNodes(child))
+                    yield return node;
+    }
+
+    private static string ReadPlanString(JsonElement node, string property) =>
+        node.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
+
+    private static string PlanNodeText(JsonElement node) => string.Join(
+        Environment.NewLine,
+        new[] { "Index Cond", "Filter", "Hash Cond", "Join Filter", "Merge Cond" }
+            .Select(property => ReadPlanString(node, property)));
+
+    private static bool ContainsPlanColumn(string planText, string column) =>
+        planText.Contains($"\"{column}\"", StringComparison.Ordinal) ||
+        planText.Contains(column, StringComparison.Ordinal);
+
+    [Fact]
+    public void Collection_owner_primary_key_plan_recognition_rejects_non_owner_access()
+    {
+        var collection = RelationalPhysicalStorageTestModels.Create(
+                PhysicalStorageForm.PhysicalEntityTable,
+                PostgreSqlGroundworkCapabilities.Provider,
+                includePriority: true,
+                normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+                includeCollection: true,
+                mutationOptions: new(IncludeRangeDelete: true))
+            .Target.Routes.Single().CollectionElementStorages.Single();
+        Dictionary<string, object?> IndexNode(string indexName, string filter) =>
+            new()
+            {
+                ["Node Type"] = "Index Scan",
+                ["Relation Name"] = collection.Storage.Name.Identifier,
+                ["Index Name"] = indexName,
+                ["Index Cond"] = string.Join(" AND ", new[]
+                {
+                    $"{collection.DocumentKind.Column.Identifier} = s.kind",
+                    $"{collection.StorageScope.Column.Identifier} = s.scope",
+                    $"{collection.IdLookupKey.Column.Identifier} = s.lookup"
+                }),
+                ["Filter"] = filter
+            };
+        var validIndexNode = IndexNode(
+            $"{collection.Storage.Name.Identifier}_pkey",
+            $"{collection.IdComparisonKey.Column.Identifier} = s.comparison");
+        var fixtures = new[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["Plan"] = IndexNode(
+                    "wrong_index",
+                    $"{collection.IdComparisonKey.Column.Identifier} = s.comparison")
+            },
+            new Dictionary<string, object?>
+            {
+                ["Plan"] = new Dictionary<string, object?>
+                {
+                    ["Node Type"] = "Nested Loop",
+                    ["Plans"] = new object[]
+                    {
+                        IndexNode($"{collection.Storage.Name.Identifier}_pkey", string.Empty),
+                        new Dictionary<string, object?>
+                        {
+                            ["Node Type"] = "Result",
+                            ["Filter"] = $"{collection.IdComparisonKey.Column.Identifier} = s.comparison"
+                        }
+                    }
+                }
+            },
+            new Dictionary<string, object?>
+            {
+                ["Plan"] = new Dictionary<string, object?>
+                {
+                    ["Node Type"] = "Nested Loop",
+                    ["Plans"] = new object[]
+                    {
+                        validIndexNode,
+                        new Dictionary<string, object?>
+                        {
+                            ["Node Type"] = "Seq Scan",
+                            ["Relation Name"] = collection.Storage.Name.Identifier
+                        }
+                    }
+                }
+            }
+        };
+
+        Assert.All(fixtures, fixture =>
+            Assert.False(UsesCollectionOwnerPrimaryKey(JsonSerializer.Serialize(new[] { fixture }), collection)));
     }
 
     private async Task SeedPlanNoiseAsync(ExecutableStorageRoute route)

@@ -129,10 +129,10 @@ public sealed class SqliteBoundedMutationTests
     [Fact]
     public async Task Delete_is_bounded_exact_idempotent_and_rejects_operation_reuse()
     {
-        await using var fixture = await CreateAsync();
-        await fixture.SaveAsync("stale-a", "stale");
-        await fixture.SaveAsync("stale-b", "stale");
-        await fixture.SaveAsync("current", "current");
+        await using var fixture = await CreateAsync(includeCollection: true);
+        await fixture.SaveCollectionAsync("stale-a", "stale", "stale-a-element");
+        await fixture.SaveCollectionAsync("stale-b", "stale", "stale-b-element");
+        await fixture.SaveCollectionAsync("current", "current", "current-element");
         var request = Delete("prune-1", "stale");
 
         var completed = await fixture.Mutations.ExecuteAsync(request);
@@ -145,6 +145,7 @@ public sealed class SqliteBoundedMutationTests
         Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "current"));
         await Assert.ThrowsAsync<BoundedMutationOperationConflictException>(() =>
             fixture.Mutations.ExecuteAsync(Delete("prune-1", "current")));
+        Assert.Equal(1L, await fixture.CountCollectionElementsAsync());
     }
 
     [Fact]
@@ -276,6 +277,68 @@ public sealed class SqliteBoundedMutationTests
         Assert.Null(await fixture.Documents.LoadAsync(DocumentKind, "expired-b"));
         Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "future"));
         Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "other-authorization"));
+    }
+
+    [Fact]
+    public async Task Collection_bearing_scalar_mutations_keep_element_storage_atomic_and_use_owner_ordinal_index()
+    {
+        await using var fixture = await CreateAsync(includeCollection: true);
+        await fixture.SaveCollectionAsync("pending", "pending", "pending-element");
+        await fixture.SaveCollectionAsync("delete", "authorization-a", "delete-element");
+        await fixture.SaveCollectionAsync("keep", "authorization-b", "keep-element");
+        var storage = Assert.Single(fixture.Route.CollectionElementStorages);
+
+        var maintenancePlan = await fixture.ExplainCollectionMaintenanceAsync();
+        Assert.Contains(
+            $"SEARCH c USING INDEX sqlite_autoindex_{storage.Storage.Name.Identifier}_1",
+            maintenancePlan,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SCAN c", maintenancePlan, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await fixture.Mutations.ExecuteAsync(Transition("sqlite-collection-transition")));
+        Assert.Equal("revoked", Category((await fixture.Documents.LoadAsync(DocumentKind, "pending"))!.ContentJson));
+        Assert.Equal(3L, await fixture.CountCollectionElementsAsync());
+
+        var deletion = new DocumentMutation(
+            DocumentKind,
+            "prune-by-category-cutoff",
+            "sqlite-collection-delete",
+            [
+                DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "authorization-a")),
+                DocumentQueryClause.Of(DocumentQueryComparison.LessThan("priority", "10"))
+            ]);
+        var failing = fixture.CreateMutationRuntime(point =>
+            point == RelationalPhysicalMutationExecutionPoint.BeforeCommit
+                ? ValueTask.FromException(new SimulatedCollectionMutationFailureException())
+                : ValueTask.CompletedTask);
+        await Assert.ThrowsAsync<SimulatedCollectionMutationFailureException>(() => failing.ExecuteAsync(deletion));
+        Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "delete"));
+        Assert.Equal(3L, await fixture.CountCollectionElementsAsync());
+
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = fixture.CreateMutationRuntime(point =>
+        {
+            if (point != RelationalPhysicalMutationExecutionPoint.BeforeCommit)
+                return ValueTask.CompletedTask;
+            cancellation.Cancel();
+            return ValueTask.FromCanceled(cancellation.Token);
+        });
+        var cancellationException = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled.ExecuteAsync(deletion));
+        Assert.Equal(cancellation.Token, cancellationException.CancellationToken);
+        Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "delete"));
+        Assert.Equal(3L, await fixture.CountCollectionElementsAsync());
+
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(deletion));
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Replayed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(deletion));
+        Assert.Null(await fixture.Documents.LoadAsync(DocumentKind, "delete"));
+        Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "keep"));
+        Assert.Equal(2L, await fixture.CountCollectionElementsAsync());
     }
 
     [Fact]
@@ -753,9 +816,10 @@ public sealed class SqliteBoundedMutationTests
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
-        var (manifest, target) = CreateModel(scoped: true);
+        var (manifest, target) = CreateModel(scoped: true, includeCollection: true);
         await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
         var route = target.Routes.Single();
+        var elements = Assert.Single(route.CollectionElementStorages);
         var tenantA = new SqlitePhysicalDocumentStore(
             connection,
             manifest,
@@ -766,8 +830,8 @@ public sealed class SqliteBoundedMutationTests
             manifest,
             target.Routes,
             DocumentStoreAccess.Scoped(new StorageScope("tenant-b")));
-        await SaveAsync(tenantA, "same-id", "stale", 1);
-        await SaveAsync(tenantB, "same-id", "stale", 1);
+        await SaveCollectionAsync(tenantA, "same-id", "stale", "tenant-a-element");
+        await SaveCollectionAsync(tenantB, "same-id", "stale", "tenant-b-element");
 
         var result = await SqlitePhysicalMutationRuntime.Create(tenantA, manifest, route, target.Provider)
             .ExecuteAsync(Delete("tenant-a-prune", "stale"));
@@ -775,6 +839,9 @@ public sealed class SqliteBoundedMutationTests
         Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 1), result);
         Assert.Null(await tenantA.LoadAsync(DocumentKind, "same-id"));
         Assert.NotNull(await tenantB.LoadAsync(DocumentKind, "same-id"));
+        await using var count = connection.CreateCommand();
+        count.CommandText = $"SELECT COUNT(*) FROM {Q(elements.Storage.Name.Identifier)};";
+        Assert.Equal(1L, Convert.ToInt64(await count.ExecuteScalarAsync()));
     }
 
     [Fact]
@@ -816,6 +883,7 @@ public sealed class SqliteBoundedMutationTests
         Func<RelationalPhysicalMutationExecutionPoint, ValueTask>? intercept = null,
         Func<DbTransaction, IRelationalPhysicalMutationTransaction>? mutationTransactionFactory = null,
         PhysicalStorageForm form = PhysicalStorageForm.DedicatedDocumentTable,
+        bool includeCollection = false,
         Groundwork.Core.Manifests.StringIdentityCasePolicy stringCasePolicy =
             Groundwork.Core.Manifests.StringIdentityCasePolicy.Ordinal)
     {
@@ -823,7 +891,10 @@ public sealed class SqliteBoundedMutationTests
         await connection.OpenAsync();
         try
         {
-            var (manifest, target) = CreateModel(form: form, stringCasePolicy: stringCasePolicy);
+            var (manifest, target) = CreateModel(
+                form: form,
+                includeCollection: includeCollection,
+                stringCasePolicy: stringCasePolicy);
             await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
             var route = target.Routes.Single();
             var documents = mutationTransactionFactory is null
@@ -856,12 +927,14 @@ public sealed class SqliteBoundedMutationTests
     private static (Groundwork.Core.Manifests.StorageManifest Manifest, PhysicalSchemaTarget Target) CreateModel(
         bool scoped = false,
         PhysicalStorageForm form = PhysicalStorageForm.DedicatedDocumentTable,
+        bool includeCollection = false,
         Groundwork.Core.Manifests.StringIdentityCasePolicy stringCasePolicy =
             Groundwork.Core.Manifests.StringIdentityCasePolicy.Ordinal)
     {
         var (template, _) = SqlitePhysicalSchemaExecutorTests.CreateModel(
             form,
             includePriority: true,
+            includeCollection: includeCollection,
             scoped: scoped,
             stringCasePolicy: stringCasePolicy);
         var unit = template.StorageUnits.Single();
@@ -943,6 +1016,9 @@ public sealed class SqliteBoundedMutationTests
         public Task SaveAsync(string id, string category, int priority = 1) =>
             SqliteBoundedMutationTests.SaveAsync(Documents, id, category, priority);
 
+        public Task SaveCollectionAsync(string id, string category, string permission) =>
+            SqliteBoundedMutationTests.SaveCollectionAsync(Documents, id, category, permission);
+
         public async Task ChangeLinkedIdentityEvidenceAsync(
             string originalId,
             string? comparisonKey = null)
@@ -963,6 +1039,18 @@ public sealed class SqliteBoundedMutationTests
 
         public IBoundedDocumentMutationStore CreateMutationRuntime() =>
             SqlitePhysicalMutationRuntime.Create(Documents, manifest, Route, target.Provider);
+
+        public IBoundedDocumentMutationStore CreateMutationRuntime(
+            Func<RelationalPhysicalMutationExecutionPoint, ValueTask> intercept) =>
+            RelationalPhysicalMutationRuntime.Create(
+                new RelationalPhysicalMutationRuntimeContext(
+                    Documents,
+                    manifest,
+                    Route,
+                    target.Provider,
+                    target.Provider.Name,
+                    "sqlite"),
+                intercept);
 
         public IBoundedDocumentMutationStore CreateMutationRuntime(RelationalPhysicalMutationInterceptor intercept) =>
             RelationalPhysicalMutationRuntime.CreateWithInterceptor(
@@ -1005,6 +1093,51 @@ public sealed class SqliteBoundedMutationTests
             return Convert.ToInt64(await command.ExecuteScalarAsync());
         }
 
+        public async Task<long> CountCollectionElementsAsync()
+        {
+            var storage = Assert.Single(Route.CollectionElementStorages);
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT COUNT(*) FROM {Q(storage.Storage.Name.Identifier)};";
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
+        }
+
+        public async Task<string> ExplainCollectionMaintenanceAsync()
+        {
+            var storage = Assert.Single(Route.CollectionElementStorages);
+            var selection = Documents.MutationSelectionTable(RelationalPhysicalDocumentMutationHandler.SelectionTable);
+            await using var create = connection.CreateCommand();
+            create.CommandText = Documents.CreateMutationSelectionTable(
+                selection,
+                RelationalPhysicalDocumentMutationHandler.SelectionKind,
+                RelationalPhysicalDocumentMutationHandler.SelectionScope,
+                RelationalPhysicalDocumentMutationHandler.SelectionId,
+                RelationalPhysicalDocumentMutationHandler.SelectionComparison,
+                RelationalPhysicalDocumentMutationHandler.SelectionLookup,
+                "document_version",
+                "document_incarnation");
+            await create.ExecuteNonQueryAsync();
+            try
+            {
+                var command = RelationalPhysicalDocumentMutationHandler.BuildCollectionDeleteCommand(
+                    Documents,
+                    storage,
+                    selection);
+                await using var explain = connection.CreateCommand();
+                explain.CommandText = $"EXPLAIN QUERY PLAN {command.CommandText}";
+                var lines = new List<string>();
+                await using var reader = await explain.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                    lines.Add(reader.GetString(3));
+                return string.Join(Environment.NewLine, lines);
+            }
+            finally
+            {
+                await using var drop = connection.CreateCommand();
+                drop.CommandText = Documents.DropMutationSelectionTable(selection);
+                await drop.ExecuteNonQueryAsync();
+            }
+        }
+
         public async Task<string> ExplainDeleteAsync(string category) =>
             await SqlitePhysicalMutationRuntime.ExplainAsync(
                 connection,
@@ -1020,6 +1153,8 @@ public sealed class SqliteBoundedMutationTests
     private sealed class SimulatedMutationFailureException : Exception;
 
     private sealed class SimulatedMutationAcknowledgementLossException : Exception;
+
+    private sealed class SimulatedCollectionMutationFailureException : Exception;
 
     private sealed class SimulatedRollbackFailureException : Exception;
 
@@ -1104,6 +1239,20 @@ public sealed class SqliteBoundedMutationTests
             id,
             "1",
             $$"""{"category":"{{category}}","priority":{{priority}}}""",
+            ExpectedVersion: 0))).Status);
+    }
+
+    private static async Task SaveCollectionAsync(
+        SqlitePhysicalDocumentStore documents,
+        string id,
+        string category,
+        string permission)
+    {
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await documents.SaveAsync(new SaveDocumentRequest(
+            DocumentKind,
+            id,
+            "1",
+            $$"""{"category":"{{category}}","priority":1,"permissions":["{{permission}}"]}""",
             ExpectedVersion: 0))).Status);
     }
 }

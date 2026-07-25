@@ -501,6 +501,7 @@ public interface IPhysicalDocumentMutationHandler
     IReadOnlySet<BoundedMutationActionKind> SupportedActions { get; }
     IReadOnlyDictionary<string, string> NativeFieldIdentifiers { get; }
     IReadOnlyList<PhysicalMutationHandlerCertification> Certifications { get; }
+    bool SupportsAtomicCollectionMaintenance => false;
     bool SupportsCompoundPredicates { get; }
     bool SupportsDisjunction { get; }
     Task<BoundedMutationResult> ExecuteAsync(
@@ -556,7 +557,11 @@ public sealed class PhysicalMutationDocumentStore : IPhysicalDocumentMutationExp
             }
         }
 
-        var compilation = PhysicalMutationPlanCompiler.Compile(route, storage, predicateCapabilities);
+        var compilation = PhysicalMutationPlanCompiler.Compile(
+            route,
+            storage,
+            predicateCapabilities,
+            handlers.Count != 0 && handlers.All(handler => handler.SupportsAtomicCollectionMaintenance));
         if (!compilation.IsValid)
         {
             throw new InvalidOperationException(string.Join(

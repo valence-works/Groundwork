@@ -129,6 +129,25 @@ public static class MongoDbPhysicalMutationRuntime
         {
             evidence["linked"] = BsonNull.Value;
         }
+        if (plan.Action is PhysicalDeleteMutationAction &&
+            binding.Route.CollectionElementStorages.Count != 0)
+        {
+            var collectionMaintenance = new BsonArray();
+            foreach (var storage in binding.Route.CollectionElementStorages)
+            {
+                collectionMaintenance.Add(await ExplainCollectionMaintenanceAsync(
+                    store,
+                    binding.Route,
+                    storage,
+                    invocation.Scope.StorageKey!,
+                    cancellationToken));
+            }
+            evidence["collectionMaintenance"] = collectionMaintenance;
+        }
+        else
+        {
+            evidence["collectionMaintenance"] = new BsonArray();
+        }
         var selectors = new List<PhysicalDocumentMutationSelectorEvidence>
         {
             new(
@@ -215,7 +234,11 @@ public static class MongoDbPhysicalMutationRuntime
             ?? throw new InvalidOperationException(
                 $"Storage unit '{route.StorageUnit.Value}' has no physical mutation declarations.");
         var capabilities = store.GetMutationCapabilities(route, storage);
-        var compilation = PhysicalMutationPlanCompiler.Compile(route, storage, capabilities);
+        var compilation = PhysicalMutationPlanCompiler.Compile(
+            route,
+            storage,
+            capabilities,
+            supportsAtomicCollectionMaintenance: true);
         if (!compilation.IsValid)
         {
             throw new InvalidOperationException(string.Join(
@@ -263,6 +286,64 @@ public static class MongoDbPhysicalMutationRuntime
             rendered);
     }
 
+    /// <summary>
+    /// Produces native-plan evidence for the exact fixed-size DeleteMany command used by collection
+    /// maintenance. Synthetic keys preserve the production 128-owner OR shape without exposing live
+    /// identities in diagnostics.
+    /// </summary>
+    private static async Task<BsonDocument> ExplainCollectionMaintenanceAsync(
+        MongoDbPhysicalDocumentStore store,
+        ExecutableStorageRoute route,
+        ExecutableCollectionElementStorageRoute storage,
+        string scope,
+        CancellationToken cancellationToken)
+    {
+        var collection = store.Database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier);
+        var owners = Enumerable.Range(0, MongoDbPhysicalDocumentMutationHandler.CollectionOwnerDeleteBatchSize)
+            .Select(index => new MongoDbCollectionMutationOwner(
+                new BsonString($"groundwork-evidence-owner-comparison-{index:D3}"),
+                new BsonString($"groundwork-evidence-owner-lookup-{index:D3}")))
+            .ToArray();
+        var filter = MongoDbPhysicalDocumentMutationHandler.CollectionOwnerFilter(
+            storage,
+            route.Discriminator.Value,
+            scope,
+            owners);
+        var rendered = filter.Render(new RenderArgs<BsonDocument>(
+            collection.DocumentSerializer,
+            BsonSerializer.SerializerRegistry));
+        var explanation = await store.Database.RunCommandAsync<BsonDocument>(
+            new BsonDocument
+            {
+                ["explain"] = new BsonDocument
+                {
+                    ["delete"] = storage.Storage.Name.Identifier,
+                    ["deletes"] = new BsonArray
+                    {
+                        new BsonDocument
+                        {
+                            ["q"] = rendered,
+                            ["limit"] = 0,
+                            ["hint"] = storage.OwnerOrdinalKey.Name.Identifier
+                        }
+                    }
+                },
+                ["verbosity"] = "queryPlanner"
+            },
+            cancellationToken: cancellationToken);
+        return MongoDbNativeMutationPlanInspector.InspectExactIndex(
+            explanation,
+            store.Database.DatabaseNamespace.DatabaseName,
+            storage.Storage.Name.Identifier,
+            storage.OwnerOrdinalKey.Name.Identifier,
+            rendered,
+            [
+                storage.DocumentKind.Column.Identifier,
+                storage.StorageScope.Column.Identifier,
+                storage.IdLookupKey.Column.Identifier
+            ]);
+    }
+
     private sealed record RuntimeBinding(
         ExecutableStorageRoute Route,
         StorageUnitPhysicalStorage Storage,
@@ -277,11 +358,13 @@ public static class MongoDbPhysicalMutationRuntime
 
 internal static class MongoDbNativeMutationPlanInspector
 {
-    internal static BsonDocument Inspect(
+    internal static BsonDocument InspectExactIndex(
         BsonDocument explanation,
         string databaseName,
-        MongoDbPhysicalMutationSelector selector,
-        BsonDocument rendered)
+        string expectedCollection,
+        string expectedIndex,
+        BsonDocument rendered,
+        IReadOnlyList<string>? requiredConstrainedFields = null)
     {
         var winningPlan = MongoDbWinningPlanInspector.ExactWinningPlan(explanation);
         var observation = MongoDbWinningPlanInspector.Inspect(winningPlan);
@@ -298,22 +381,47 @@ internal static class MongoDbNativeMutationPlanInspector
             .Select(scan => scan.IndexName)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        if (!string.Equals(observedCollection, selector.StorageObject.Identifier, StringComparison.Ordinal) ||
+        var expectedScans = observation.IndexScans
+            .Where(scan => string.Equals(scan.IndexName, expectedIndex, StringComparison.Ordinal))
+            .ToArray();
+        var hasUnboundedRequiredConstraint =
+            expectedScans.Length == 0 ||
+            expectedScans.Any(scan => (requiredConstrainedFields ?? []).Any(field =>
+                !scan.Bounds.Any(bound =>
+                    string.Equals(bound.Field, field, StringComparison.Ordinal) && bound.IsConstrained)));
+        if (!string.Equals(observedCollection, expectedCollection, StringComparison.Ordinal) ||
             observation.HasCollectionScan ||
             indexes.Length != 1 ||
-            indexes[0] != selector.Index.Identifier)
+            indexes[0] != expectedIndex ||
+            hasUnboundedRequiredConstraint)
         {
             throw new InvalidOperationException(
-                $"MongoDB bounded-mutation selector for '{selector.StorageObject.Identifier}' did not use exact index '{selector.Index.Identifier}'.");
+                $"MongoDB bounded-mutation selector for '{expectedCollection}' did not use exact index '{expectedIndex}'.");
         }
         return new BsonDocument
         {
             ["collection"] = observedCollection,
-            ["indexName"] = selector.Index.Identifier,
+            ["indexName"] = expectedIndex,
             ["filter"] = rendered,
             ["winningPlanIndex"] = indexes[0],
+            ["requiredConstrainedFields"] = new BsonArray(
+                (requiredConstrainedFields ?? []).Select(BsonValue.Create)),
             ["winningPlan"] = winningPlan,
             ["nativeExplain"] = explanation
         };
+    }
+
+    internal static BsonDocument Inspect(
+        BsonDocument explanation,
+        string databaseName,
+        MongoDbPhysicalMutationSelector selector,
+        BsonDocument rendered)
+    {
+        return InspectExactIndex(
+            explanation,
+            databaseName,
+            selector.StorageObject.Identifier,
+            selector.Index.Identifier,
+            rendered);
     }
 }

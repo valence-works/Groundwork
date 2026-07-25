@@ -320,7 +320,11 @@ internal static class RelationalPhysicalMutationRuntime
             context.Provider,
             context.HandlerPrefix,
             context.CanonicalJsonValueKinds);
-        var compilation = PhysicalMutationPlanCompiler.Compile(context.Route, storage, capabilities);
+        var compilation = PhysicalMutationPlanCompiler.Compile(
+            context.Route,
+            storage,
+            capabilities,
+            context.Store.SupportsAtomicCollectionMutationMaintenance);
         if (!compilation.IsValid)
         {
             throw new InvalidOperationException(string.Join(
