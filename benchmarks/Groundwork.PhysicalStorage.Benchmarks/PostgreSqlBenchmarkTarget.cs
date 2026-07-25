@@ -41,6 +41,15 @@ public sealed class PostgreSqlBenchmarkTarget(
 
     public override DatabaseSignalTarget SignalTarget => DatabaseSignalTarget.ForPostgreSql(signalApplicationName);
 
+    internal string SignalApplicationName => signalApplicationName;
+
+    internal string CreateProductionConnectionString() =>
+        new NpgsqlConnectionStringBuilder(serverConnectionString)
+        {
+            SearchPath = schemaName,
+            ApplicationName = signalApplicationName
+        }.ConnectionString;
+
     protected override ProviderIdentity GroundworkProvider => PostgreSqlGroundworkCapabilities.Provider;
     protected override IProviderPhysicalNameNormalizer PhysicalNames => PostgreSqlGroundworkCapabilities.PhysicalNames;
     protected override string HandlerPrefix => "postgresql";
@@ -179,11 +188,7 @@ public sealed class PostgreSqlBenchmarkTarget(
         await using var command = connection.CreateCommand();
         command.CommandText = $"CREATE SCHEMA {Q(schemaName)};";
         await command.ExecuteNonQueryAsync(cancellationToken);
-        connectionString = new NpgsqlConnectionStringBuilder(serverConnectionString)
-        {
-            SearchPath = schemaName,
-            ApplicationName = signalApplicationName
-        }.ConnectionString;
+        connectionString = CreateProductionConnectionString();
     }
 
     protected override async Task DropIsolationBoundaryAsync(CancellationToken cancellationToken)

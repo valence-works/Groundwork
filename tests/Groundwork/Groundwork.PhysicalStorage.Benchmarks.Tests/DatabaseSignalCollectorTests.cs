@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
@@ -38,16 +39,40 @@ public sealed class DatabaseSignalCollectorTests
     [Theory]
     [InlineData(BenchmarkProvider.SqlServer)]
     [InlineData(BenchmarkProvider.PostgreSql)]
-    public void Relational_provider_selector_does_not_admit_a_different_target(BenchmarkProvider provider)
+    public void Relational_provider_selector_counts_only_the_measured_target(BenchmarkProvider provider)
     {
         using var collector = new DatabaseSignalCollector();
         using var listener = new DiagnosticListener(provider == BenchmarkProvider.SqlServer ? "Microsoft.Data.SqlClient" : "Npgsql");
-        using var measurement = provider switch
-        {
-            BenchmarkProvider.SqlServer => BeginSqlServerMeasurement(collector, listener),
-            BenchmarkProvider.PostgreSql => BeginPostgreSqlMeasurement(collector, listener),
-            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
-        };
+        using var measured = CreateRelationalConnection(provider, measured: true);
+        using var other = CreateRelationalConnection(provider, measured: false);
+        using var measuredCommand = measured.CreateCommand();
+        using var otherCommand = other.CreateCommand();
+        using var measurement = collector.BeginMeasurement(CreateRelationalTarget(provider));
+
+        listener.Write("CommandStart", new { Command = measuredCommand });
+        listener.Write("CommandStart", new { Command = otherCommand });
+
+        var signals = measurement.Complete();
+
+        Assert.Equal(1, signals.CommandStarts);
+        Assert.Equal(1, signals.ObservableRoundTrips);
+        Assert.Equal(DatabaseSignalAvailability.Observed, signals.Evidence.Availability);
+        Assert.Equal("target-scoped-diagnostic-command", signals.Evidence.Source);
+        Assert.DoesNotContain(signals.ToProviderWork(), pair => pair.Value == 0);
+    }
+
+    [Theory]
+    [InlineData(BenchmarkProvider.SqlServer)]
+    [InlineData(BenchmarkProvider.PostgreSql)]
+    public void Relational_provider_selector_rejects_a_different_target(BenchmarkProvider provider)
+    {
+        using var collector = new DatabaseSignalCollector();
+        using var listener = new DiagnosticListener(provider == BenchmarkProvider.SqlServer ? "Microsoft.Data.SqlClient" : "Npgsql");
+        using var other = CreateRelationalConnection(provider, measured: false);
+        using var otherCommand = other.CreateCommand();
+        using var measurement = collector.BeginMeasurement(CreateRelationalTarget(provider));
+
+        listener.Write("CommandStart", new { Command = otherCommand });
 
         var signals = measurement.Complete();
 
@@ -99,26 +124,35 @@ public sealed class DatabaseSignalCollectorTests
         Assert.DoesNotContain("groundwork-measured", json, StringComparison.Ordinal);
     }
 
-    private static DatabaseSignalCollector.MeasurementScope BeginSqlServerMeasurement(
-        DatabaseSignalCollector collector,
-        DiagnosticListener listener)
+    [Fact]
+    public void PostgreSql_benchmark_target_uses_its_selector_application_name_on_production_connections()
     {
-        using var other = new SqlConnection("Server=localhost;Database=groundwork_other;User Id=groundwork;Password=secret");
-        using var command = other.CreateCommand();
-        var measurement = collector.BeginMeasurement(DatabaseSignalTarget.ForSqlServer("groundwork_measured"));
-        listener.Write("CommandStart", new { Command = command });
-        return measurement;
+        var target = new PostgreSqlBenchmarkTarget(
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.SharedDocuments,
+            "selector-proof",
+            "Host=localhost;Database=groundwork;Username=groundwork;Password=secret;Application Name=wrong-target",
+            migrationDatasetSize: 1,
+            sourceDescription: "test");
+        using var connection = new NpgsqlConnection(target.CreateProductionConnectionString());
+        using var command = connection.CreateCommand();
+
+        Assert.Equal(target.SignalApplicationName, new NpgsqlConnectionStringBuilder(connection.ConnectionString).ApplicationName);
+        Assert.True(target.SignalTarget.MatchesCommand(command));
     }
 
-    private static DatabaseSignalCollector.MeasurementScope BeginPostgreSqlMeasurement(
-        DatabaseSignalCollector collector,
-        DiagnosticListener listener)
+    private static DatabaseSignalTarget CreateRelationalTarget(BenchmarkProvider provider) => provider switch
     {
-        using var other = new NpgsqlConnection(
-            "Host=localhost;Database=groundwork;Username=groundwork;Password=secret;Application Name=groundwork-other");
-        using var command = other.CreateCommand();
-        var measurement = collector.BeginMeasurement(DatabaseSignalTarget.ForPostgreSql("groundwork-measured"));
-        listener.Write("CommandStart", new { Command = command });
-        return measurement;
-    }
+        BenchmarkProvider.SqlServer => DatabaseSignalTarget.ForSqlServer("groundwork_measured"),
+        BenchmarkProvider.PostgreSql => DatabaseSignalTarget.ForPostgreSql("groundwork-measured"),
+        _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+    };
+
+    private static DbConnection CreateRelationalConnection(BenchmarkProvider provider, bool measured) => provider switch
+    {
+        BenchmarkProvider.SqlServer => new SqlConnection(
+            $"Server=localhost;Database={(measured ? "groundwork_measured" : "groundwork_other")};User Id=groundwork;Password=secret"),
+        BenchmarkProvider.PostgreSql => new NpgsqlConnection(
+            $"Host=localhost;Database=groundwork;Username=groundwork;Password=secret;Application Name={(measured ? "groundwork-measured" : "groundwork-other")}"),
+        _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+    };
 }

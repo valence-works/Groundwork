@@ -28,7 +28,11 @@ public sealed record DatabaseSignalEvidence(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     long? ClientActivities,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
-    long? ObservableRoundTrips);
+    long? ObservableRoundTrips)
+{
+    public static bool IsRecognizedObservedSource(string? source) =>
+        source is "target-scoped-diagnostic-command" or "target-scoped-client-activity";
+}
 
 public sealed record DatabaseSignalSnapshot(
     long? CommandStarts,

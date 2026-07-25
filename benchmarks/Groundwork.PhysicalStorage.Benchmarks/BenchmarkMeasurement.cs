@@ -34,21 +34,38 @@ public sealed record BenchmarkSample(
     public double ThroughputOperationsPerSecond => Operations * 1_000_000_000d / ElapsedNanoseconds;
     public double AllocatedBytesPerOperation => (double)AllocatedBytes / Operations;
 
-    public bool HasValidDatabaseSignalEvidence() =>
-        DatabaseSignal is not null &&
-        (DatabaseSignal.Availability == DatabaseSignalAvailability.Observed
-            ? !string.IsNullOrWhiteSpace(DatabaseSignal.Source) &&
-              !DatabaseSignal.Source.Equals("unavailable", StringComparison.Ordinal) &&
-              DatabaseSignal.Reason is null &&
-              (DatabaseSignal.CommandStarts is null or > 0) &&
-              (DatabaseSignal.ClientActivities is null or > 0) &&
-              DatabaseSignal.ObservableRoundTrips is > 0
-            : DatabaseSignal.Availability == DatabaseSignalAvailability.Unavailable &&
-              string.Equals(DatabaseSignal.Source, "unavailable", StringComparison.Ordinal) &&
-              !string.IsNullOrWhiteSpace(DatabaseSignal.Reason) &&
-              DatabaseSignal.CommandStarts is null &&
-              DatabaseSignal.ClientActivities is null &&
-              DatabaseSignal.ObservableRoundTrips is null);
+    /// <summary>
+    /// Keeps the persisted round-trip metric bound exclusively to the target-scoped
+    /// diagnostic snapshot that produced it. A target's compatibility counter is not
+    /// evidence and must never be persisted as a substitute for unavailable telemetry.
+    /// </summary>
+    public bool HasValidDatabaseSignalEvidence()
+    {
+        if (DatabaseSignal is null)
+            return false;
+
+        return DatabaseSignal.Availability switch
+        {
+            DatabaseSignalAvailability.Observed =>
+                DatabaseSignalEvidence.IsRecognizedObservedSource(DatabaseSignal.Source) &&
+                DatabaseSignal.Reason is null &&
+                DatabaseSignal.ObservableRoundTrips is > 0 &&
+                RoundTrips == DatabaseSignal.ObservableRoundTrips &&
+                (DatabaseSignal.CommandStarts is null or > 0) &&
+                (DatabaseSignal.ClientActivities is null or > 0) &&
+                (DatabaseSignal.Source == "target-scoped-diagnostic-command"
+                    ? DatabaseSignal.CommandStarts is > 0
+                    : DatabaseSignal.ClientActivities is > 0),
+            DatabaseSignalAvailability.Unavailable =>
+                string.Equals(DatabaseSignal.Source, "unavailable", StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(DatabaseSignal.Reason) &&
+                DatabaseSignal.CommandStarts is null &&
+                DatabaseSignal.ClientActivities is null &&
+                DatabaseSignal.ObservableRoundTrips is null &&
+                RoundTrips is null,
+            _ => false
+        };
+    }
 }
 
 public sealed record BenchmarkCaseSummary(

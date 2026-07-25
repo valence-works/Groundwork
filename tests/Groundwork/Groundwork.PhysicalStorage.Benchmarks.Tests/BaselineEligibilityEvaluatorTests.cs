@@ -58,7 +58,8 @@ public sealed class BaselineEligibilityEvaluatorTests
         var samples = Enumerable.Range(0, BenchmarkProfiles.Scheduled.MeasurementIterations)
             .Select(iteration => new BenchmarkSample(
                 iteration, 10, 1_000_000_000, 100, 1, 0, 0, null, null, new Dictionary<string, long>(),
-                Enumerable.Repeat(100L, 10).ToArray()))
+                Enumerable.Repeat(100L, 10).ToArray())
+                .WithObservedCommandSignal())
             .ToArray();
         return new BenchmarkCaseResult(
             benchmarkCase,

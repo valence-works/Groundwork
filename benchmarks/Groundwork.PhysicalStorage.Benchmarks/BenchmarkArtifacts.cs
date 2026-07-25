@@ -351,6 +351,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
 
     public async Task WriteReportAsync(BenchmarkRunReport report, CancellationToken cancellationToken)
     {
+        VerifyReportSamples(report);
         await WriteJsonAsync(Layout.SummaryJson, report, cancellationToken);
         await WriteJsonAsync(Layout.RegressionJson, report.Regressions, cancellationToken);
         await WriteJsonAsync(
@@ -378,6 +379,11 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
                 continue;
             records.Add(JsonSerializer.Deserialize<RawBenchmarkRecord>(line, BenchmarkJson.CompactOptions)
                         ?? throw new InvalidOperationException($"Baseline record in '{path}' is null."));
+            if (!records[^1].Sample.HasValidDatabaseSignalEvidence())
+            {
+                throw new InvalidOperationException(
+                    $"Raw measurement in '{path}' has an invalid target-scoped database-signal invariant.");
+            }
         }
         return records;
     }
@@ -403,6 +409,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         var providers = await ReadJsonAsync<IReadOnlyList<BenchmarkProviderMetadata>>(Path.Combine(root, "metadata", "providers.json"), cancellationToken);
         var evidence = await ReadJsonAsync<ElsaMigrationEvidenceReport>(Path.Combine(root, "reports", "elsa-migration-evidence.json"), cancellationToken);
         var report = await ReadJsonAsync<BenchmarkRunReport>(Path.Combine(root, "reports", "summary.json"), cancellationToken);
+        VerifyReportSamples(report);
         var consumer = manifest.ConsumerEvidence is null
             ? null
             : await ReadJsonAsync<BenchmarkConsumerEvidenceReport>(ResolveArtifact(layout, manifest.ConsumerEvidence), cancellationToken);
@@ -519,6 +526,39 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     {
         using var stream = File.OpenRead(path);
         return Convert.ToHexStringLower(SHA256.HashData(stream));
+    }
+
+    private static void VerifyReportSamples(BenchmarkRunReport report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        foreach (var result in report.Cases)
+        {
+            if (result.Samples.Count == 0 || result.Samples.Any(sample => !sample.HasValidDatabaseSignalEvidence()))
+            {
+                throw new InvalidOperationException(
+                    $"Summary for '{result.Case.Identity}' contains invalid target-scoped database-signal evidence.");
+            }
+
+            BenchmarkCaseSummary expected;
+            try
+            {
+                expected = BenchmarkSummarizer.Summarize(result.Case.Identity, result.Samples);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidOperationException(
+                    $"Summary for '{result.Case.Identity}' cannot be reconstructed from its raw samples.",
+                    exception);
+            }
+
+            if (!CryptographicOperations.FixedTimeEquals(
+                    JsonSerializer.SerializeToUtf8Bytes(expected, BenchmarkJson.CompactOptions),
+                    JsonSerializer.SerializeToUtf8Bytes(result.Summary, BenchmarkJson.CompactOptions)))
+            {
+                throw new InvalidOperationException(
+                    $"Summary for '{result.Case.Identity}' does not match its target-scoped raw samples.");
+            }
+        }
     }
 
     private static string Markdown(BenchmarkRunReport report)

@@ -42,6 +42,40 @@
     "sample": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "databaseSignal": {
+                "properties": { "availability": { "const": "observed" } },
+                "required": ["availability"]
+              }
+            },
+            "required": ["databaseSignal"]
+          },
+          "then": {
+            "properties": {
+              "roundTrips": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "databaseSignal": {
+                "properties": { "availability": { "const": "unavailable" } },
+                "required": ["availability"]
+              }
+            },
+            "required": ["databaseSignal"]
+          },
+          "then": {
+            "properties": {
+              "roundTrips": { "type": "null" }
+            }
+          }
+        }
+      ],
       "required": [
         "iteration",
         "operations",
@@ -92,6 +126,41 @@
     "databaseSignal": {
       "type": "object",
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "availability": { "const": "observed" },
+            "source": { "const": "target-scoped-diagnostic-command" },
+            "reason": { "type": "null" },
+            "commandStarts": { "type": "integer", "minimum": 1 },
+            "clientActivities": { "type": ["integer", "null"], "minimum": 1 },
+            "observableRoundTrips": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["availability", "source", "reason", "commandStarts", "clientActivities", "observableRoundTrips"]
+        },
+        {
+          "properties": {
+            "availability": { "const": "observed" },
+            "source": { "const": "target-scoped-client-activity" },
+            "reason": { "type": "null" },
+            "commandStarts": { "type": ["integer", "null"], "minimum": 1 },
+            "clientActivities": { "type": "integer", "minimum": 1 },
+            "observableRoundTrips": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["availability", "source", "reason", "commandStarts", "clientActivities", "observableRoundTrips"]
+        },
+        {
+          "properties": {
+            "availability": { "const": "unavailable" },
+            "source": { "const": "unavailable" },
+            "reason": { "type": "string", "minLength": 1 },
+            "commandStarts": { "type": "null" },
+            "clientActivities": { "type": "null" },
+            "observableRoundTrips": { "type": "null" }
+          },
+          "required": ["availability", "source", "reason", "commandStarts", "clientActivities", "observableRoundTrips"]
+        }
+      ],
       "required": [
         "availability",
         "source",

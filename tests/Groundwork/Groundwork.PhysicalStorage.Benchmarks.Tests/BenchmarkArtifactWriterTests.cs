@@ -80,6 +80,42 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Raw_measurements_reject_a_compatibility_round_trip_when_target_scoped_telemetry_is_unavailable()
+    {
+        var layout = new ArtifactLayout(root);
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, 1, 0, 0, null, null, new Dictionary<string, long>(), [100]);
+        await using var writer = new BenchmarkArtifactWriter(layout);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => writer.AppendSampleAsync(
+            new RawBenchmarkRecord(
+                new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+                sample),
+            CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal evidence", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Raw_reader_rejects_a_resealed_unavailable_signal_with_a_round_trip_claim()
+    {
+        var layout = new ArtifactLayout(root);
+        layout.CreateDirectories();
+        var record = new RawBenchmarkRecord(
+            new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+            new BenchmarkSample(
+                0, 1, 100, 50, 1, 0, 0, null, null, new Dictionary<string, long>(), [100]));
+        await File.WriteAllTextAsync(
+            layout.RawMeasurements,
+            JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions) + Environment.NewLine);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Report_includes_insufficient_Elsa_migration_evidence_without_a_decision_claim()
     {
         var layout = new ArtifactLayout(root);
@@ -115,7 +151,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -243,7 +280,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.SharedDocuments,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 1, 1_000, 40, 1, 0, 0, null, null, new Dictionary<string, long>(), [100]);
+            0, 1, 1_000, 40, 1, 0, 0, null, null, new Dictionary<string, long>(), [100])
+            .WithObservedCommandSignal();
         var machine = new BenchmarkMachineMetadata(
             "test-os", "benchmark-host", "Arm64", ".NET 10", "Release", 8, true, 1_000_000_000,
             "1.0.0", "abcdef", false, DateTimeOffset.UnixEpoch);
@@ -305,7 +343,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.SharedDocuments,
             BenchmarkWorkload.Insert);
         var sample = new BenchmarkSample(
-            0, 1, 1_000, 40, 1, 0, 1, null, null, new Dictionary<string, long>(), [100]);
+            0, 1, 1_000, 40, 1, 0, 1, null, null, new Dictionary<string, long>(), [100])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -361,7 +400,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -408,7 +448,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
@@ -455,7 +496,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 0, null, null, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var machine = new BenchmarkMachineMetadata(
             "test-os", "benchmark-host", "Arm64", ".NET 10", "Release", 8, true, 1_000_000_000,
             "1.0.0", "abcdef", false, DateTimeOffset.UnixEpoch);
@@ -523,7 +565,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var before = new StorageSnapshot(100, 10, 1, 0, new Dictionary<string, long>());
         var after = new StorageSnapshot(500, 20, 5, 0, new Dictionary<string, long>());
         var sample = new BenchmarkSample(
-            0, 4, 1_000, 40, 4, 200, 4, before, after, new Dictionary<string, long>(), [100, 200, 300, 400]);
+            0, 4, 1_000, 40, 4, 200, 4, before, after, new Dictionary<string, long>(), [100, 200, 300, 400])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",

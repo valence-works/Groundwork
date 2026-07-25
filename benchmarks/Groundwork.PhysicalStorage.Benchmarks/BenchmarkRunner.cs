@@ -258,7 +258,7 @@ public sealed class BenchmarkRunner
                             QueryBranchEvidence.EnsureObserved(
                                 workload,
                                 request.Configuration.OperationsPerIteration,
-                                execution.RoundTrips ?? signalSnapshot.ObservableRoundTrips);
+                                signalSnapshot.ObservableRoundTrips);
                             var allocatedBytes = Math.Max(0, GC.GetTotalAllocatedBytes(precise: false) - allocatedBefore);
                             await target.ValidateIterationAsync(workload, cancellationToken);
                             var storageAfter = capturesStorage
@@ -269,7 +269,7 @@ public sealed class BenchmarkRunner
                                 execution.Operations,
                                 elapsedNanoseconds,
                                 allocatedBytes,
-                                execution.RoundTrips ?? signalSnapshot.ObservableRoundTrips,
+                                signalSnapshot.ObservableRoundTrips,
                                 execution.LogicalPayloadBytes,
                                 execution.LogicalMutations,
                                 storageBefore,
@@ -397,11 +397,6 @@ public sealed class BenchmarkRunner
 
     private static void ValidateExecution(WorkloadExecution execution, BenchmarkCase benchmarkCase)
     {
-        if (execution.RoundTrips is <= 0)
-        {
-            throw new InvalidOperationException(
-                $"[{benchmarkCase.Identity}] target must return a positive round-trip count or null when unobserved.");
-        }
         if (execution.Operations <= 0 ||
             execution.OperationLatencyNanoseconds is null ||
             execution.OperationLatencyNanoseconds.Count != execution.Operations ||

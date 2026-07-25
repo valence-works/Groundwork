@@ -62,6 +62,19 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rejects_a_resealed_raw_and_summary_pair_that_claims_round_trips_while_telemetry_is_unavailable()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { ForgeMeasuredUnavailableRoundTrips = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Rejects_measured_workers_that_do_not_meet_the_authenticated_operation_and_duration_floors()
     {
         var fixture = await ScheduledGroupFixture.CreateAsync(
@@ -163,6 +176,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         {
             public bool ForgeMeasuredConsumerResultDigest { get; init; }
             public bool TamperMeasuredRawDatabaseSignal { get; init; }
+            public bool ForgeMeasuredUnavailableRoundTrips { get; init; }
             public bool GitDirty { get; init; }
             public bool WriteMeasuredIntegrityLedger { get; init; } = true;
             public int MeasuredSampleCount { get; init; } = 30;
@@ -287,11 +301,17 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             var samples = role == BenchmarkExecutionRole.Measured
                 ? CreateSamples(options)
                 : [];
+            var forgeUnavailableRoundTrips = options.ForgeMeasuredUnavailableRoundTrips &&
+                                                role == BenchmarkExecutionRole.Measured;
+            if (forgeUnavailableRoundTrips)
+                samples = ForgeUnavailableRoundTrips(samples);
             var benchmarkCase = new BenchmarkCase(
                 BenchmarkProvider.Sqlite,
                 PhysicalStorageForm.PhysicalEntityTable,
                 BenchmarkWorkload.Insert);
-            var report = CreateReport(role, samples, benchmarkCase, shape, workerRoot);
+            var report = forgeUnavailableRoundTrips
+                ? CreateForgedUnavailableRoundTripReport(samples, benchmarkCase, shape, workerRoot)
+                : CreateReport(role, samples, benchmarkCase, shape, workerRoot);
             var runId = $"scheduled-fixture-{ordinalText}";
             var workerManifest = new BenchmarkRunManifest(
                 BenchmarkProfiles.SchemaVersion,
@@ -317,8 +337,22 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     : null,
                 ArtifactIntegrity: "reports/artifact-integrity.json");
 
-            await using (var writer = new BenchmarkArtifactWriter(layout))
+            if (forgeUnavailableRoundTrips)
             {
+                await WriteForgedUnavailableRoundTripArtifactsAsync(
+                    layout,
+                    workerManifest,
+                    machine,
+                    providers,
+                    persistedConfiguration,
+                    benchmarkCase,
+                    samples,
+                    report,
+                    independentRun);
+            }
+            else
+            {
+                await using var writer = new BenchmarkArtifactWriter(layout);
                 await writer.WriteManifestAsync(workerManifest, CancellationToken.None);
                 await writer.WriteMachineAsync(machine, CancellationToken.None);
                 await writer.WriteProvidersAsync(providers, CancellationToken.None);
@@ -420,6 +454,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             samples.Select((sample, index) => index == 0
                 ? sample with
                 {
+                    RoundTrips = 1,
                     DatabaseSignal = new DatabaseSignalEvidence(
                         DatabaseSignalAvailability.Observed,
                         "target-scoped-diagnostic-command",
@@ -429,6 +464,99 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                         1)
                 }
                 : sample).ToArray();
+
+        private static IReadOnlyList<BenchmarkSample> ForgeUnavailableRoundTrips(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select(sample => sample with { RoundTrips = 1 }).ToArray();
+
+        private static BenchmarkRunReport CreateForgedUnavailableRoundTripReport(
+            IReadOnlyList<BenchmarkSample> samples,
+            BenchmarkCase benchmarkCase,
+            BenchmarkDataShape shape,
+            string workerRoot)
+        {
+            var operations = samples.Sum(sample => (long)sample.Operations);
+            var elapsed = samples.Sum(sample => sample.ElapsedNanoseconds);
+            var latencyCount = samples.Sum(sample => sample.OperationLatencyNanoseconds.Count);
+            return new BenchmarkRunReport(
+                BenchmarkProfiles.SchemaVersion,
+                $"scheduled-fixture-{Path.GetFileName(workerRoot)}",
+                BenchmarkRunMode.Scheduled,
+                [new BenchmarkCaseResult(
+                    benchmarkCase,
+                    new CorrectnessGateResult(true, true, true, true, true),
+                    [],
+                    new BenchmarkCaseSummary(
+                        benchmarkCase.Identity,
+                        samples.Count,
+                        latencyCount,
+                        100,
+                        100,
+                        100,
+                        operations * 1_000_000_000d / elapsed,
+                        100,
+                        samples.Sum(sample => sample.RoundTrips!.Value) / (double)operations,
+                        null,
+                        null,
+                        null,
+                        new Dictionary<string, double>()),
+                    samples,
+                    [new BenchmarkObservableResult(0, "fixture-result", "validated", 1, operations, null)])],
+                [],
+                new BaselineEligibility(false, ["fixture is non-promotable"]),
+                shape);
+        }
+
+        private static async Task WriteForgedUnavailableRoundTripArtifactsAsync(
+            ArtifactLayout layout,
+            BenchmarkRunManifest manifest,
+            BenchmarkMachineMetadata machine,
+            IReadOnlyList<BenchmarkProviderMetadata> providers,
+            BenchmarkRunConfiguration configuration,
+            BenchmarkCase benchmarkCase,
+            IReadOnlyList<BenchmarkSample> samples,
+            BenchmarkRunReport report,
+            int independentRun)
+        {
+            layout.CreateDirectories();
+            await WriteJsonAsync(layout.Manifest, manifest);
+            await WriteJsonAsync(layout.MachineMetadata, machine);
+            await WriteJsonAsync(layout.ProviderMetadata, providers);
+            await WriteJsonAsync(layout.Configuration, configuration);
+            await File.WriteAllLinesAsync(
+                layout.RawMeasurements,
+                samples.Select(sample => JsonSerializer.Serialize(
+                    new RawBenchmarkRecord(benchmarkCase, sample),
+                    BenchmarkJson.CompactOptions)));
+            await WriteJsonAsync(layout.SummaryJson, report);
+            await WriteJsonAsync(layout.ElsaMigrationEvidenceJson, ElsaMigrationEvidenceReport.From(report));
+            var consumer = BenchmarkConsumerEvidenceReport.Create(
+                report,
+                configuration,
+                machine,
+                providers,
+                layout,
+                independentRun);
+            await WriteJsonAsync(layout.ConsumerEvidenceJson, consumer);
+
+            var artifacts = new[]
+            {
+                layout.RelativePath(layout.Manifest),
+                manifest.RawMeasurements,
+                manifest.Summary,
+                manifest.ElsaMigrationEvidence,
+                manifest.MachineMetadata,
+                manifest.ProviderMetadata,
+                manifest.Configuration,
+                manifest.ConsumerEvidence!
+            }.Order(StringComparer.Ordinal)
+             .Select(relative => new BenchmarkArtifactDigest(
+                 relative,
+                 Digest(Path.Combine(layout.Root, relative.Replace('/', Path.DirectorySeparatorChar)))) )
+             .ToArray();
+            await WriteJsonAsync(
+                layout.ArtifactIntegrityJson,
+                new BenchmarkArtifactIntegrity(BenchmarkArtifactIntegrity.ContractVersion, manifest.RunId, artifacts));
+        }
 
         private static BenchmarkRunReport CreateReport(
             BenchmarkExecutionRole role,

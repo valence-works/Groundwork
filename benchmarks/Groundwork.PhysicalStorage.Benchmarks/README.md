@@ -288,11 +288,12 @@ namespace. The target selector and all connection values remain in memory; artif
 the provider-neutral source, availability, and positive counts.
 
 These are observable client command/activity signals, not a claim that the harness has exact
-wire-level server round-trip accounting. If a provider does not expose the relevant public
-telemetry during a workload, `roundTrips` and every signal count are `null`, with an explicit
-`unavailable` reason and no synthetic zero. Raw measurement digests, artifact-integrity ledgers,
-consumer-evidence reconstruction, and scheduled-worker raw/summary equality bind those signals to
-the exact run group.
+wire-level server round-trip accounting. `roundTrips` is written exclusively from the matching
+target-scoped signal snapshot; a target-reported compatibility counter cannot fill a telemetry
+gap. If a provider does not expose the relevant public telemetry during a workload, `roundTrips`
+and every signal count are `null`, with an explicit `unavailable` reason and no synthetic zero.
+Raw measurement digests, artifact-integrity ledgers, consumer-evidence reconstruction, and
+scheduled-worker raw/summary equality bind those signals to the exact run group.
 
 Machine metadata records CPU model, memory, storage/filesystem capacity, and power/governor state
 when the host exposes them, otherwise the literal `unavailable`. Provider metadata distinguishes
