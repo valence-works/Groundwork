@@ -1488,6 +1488,13 @@ public static class PhysicalStorageResolver
             return false;
         }
 
+        if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+            predicates.Length == 0 &&
+            query.SortFields.Count == 0)
+        {
+            return false;
+        }
+
         if (query.SortFields.Count == 0)
             return true;
         if (query.SortSupport == QuerySortSupport.None)

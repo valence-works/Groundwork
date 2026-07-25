@@ -30,6 +30,11 @@ public abstract class RelationalPhysicalStorageConformance
 
     protected abstract Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync();
 
+    protected virtual Task PrepareUnfilteredGlobalIdQueryPlanAsync(RelationalUnfilteredGlobalQueryFixture fixture) =>
+        Task.CompletedTask;
+
+    protected abstract void AssertUnfilteredGlobalIdQueryPlan(PhysicalDocumentQueryExplanation explanation);
+
     [Theory]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
     [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
@@ -183,12 +188,13 @@ public abstract class RelationalPhysicalStorageConformance
     }
 
     [Fact]
-    public async Task Explicitly_unfiltered_global_id_route_executes_offset_page_and_count_on_the_comparison_key_index()
+    public async Task Explicitly_unfiltered_global_id_route_executes_an_indexed_offset_page_and_provider_side_count()
     {
         await using var fixture = await CreateUnfilteredGlobalIdQueryAsync();
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("c", "ignored", 0))).Status);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("a", "ignored", 0))).Status);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("b", "ignored", 0))).Status);
+        await PrepareUnfilteredGlobalIdQueryPlanAsync(fixture);
 
         var pageQuery = new DocumentQuery(
             "configurationDocument",
@@ -209,9 +215,9 @@ public abstract class RelationalPhysicalStorageConformance
         var explanation = await Assert.IsAssignableFrom<IPhysicalDocumentQueryExplainer>(fixture.Queries)
             .ExplainAsync(pageQuery);
 
-        Assert.Equal(3, page.TotalCount);
+        Assert.Equal(count, page.TotalCount);
+        Assert.True(count >= 3);
         Assert.Equal("b", Assert.Single(page.Documents).Id);
-        Assert.Equal(3, count);
         Assert.Empty(explanation.Plan.Predicates);
         Assert.Equal(PhysicalQueryAccessKind.PrimaryEnvelope, explanation.Plan.AccessKind);
         Assert.Equal(fixture.Route.Indexes.Single().Name, explanation.Plan.IndexName);
@@ -222,6 +228,7 @@ public abstract class RelationalPhysicalStorageConformance
             [PhysicalDocumentQueryCommandKind.Count, PhysicalDocumentQueryCommandKind.Page],
             explanation.Commands.Select(command => command.Kind));
         Assert.All(explanation.Commands, command => Assert.NotEqual(0, command.ProviderAppliedMaximumRows));
+        AssertUnfilteredGlobalIdQueryPlan(explanation);
     }
 
     protected static (StorageManifest Manifest, PhysicalSchemaTarget Target) CreateUnfilteredGlobalIdQueryModel(

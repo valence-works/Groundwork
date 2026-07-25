@@ -1285,7 +1285,8 @@ public sealed class PhysicalStorageResolutionTests
             new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
             QuerySortSupport.Ascending,
             QueryPagingSupport.Offset,
-            BoundedQueryExecutionClass.ScaleBearing);
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)]);
         var definition = PhysicalTableDefinition.PhysicalEntityTable(
             "configurationDocument",
             [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
@@ -1348,6 +1349,53 @@ public sealed class PhysicalStorageResolutionTests
             "\"predicateBindingMode\":\"DeclaredFields\"",
             PhysicalStorageDefinitionSerializer.Serialize(Assert.Single(declaredEmptyResolved.Definitions)),
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Explicitly_unfiltered_route_requires_declared_provider_ordering()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.None,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            predicateFields: []);
+        var manifest = WithPhysicalStorage(
+            SampleManifests.MetadataManifest() with
+            {
+                StorageUnits =
+                [
+                    SampleManifests.MetadataManifest().StorageUnits.Single() with
+                    {
+                        Tenancy = TenancyPolicy.Global
+                    }
+                ]
+            },
+            new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Default(),
+                [index],
+                [query]));
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(
+            result.Diagnostics,
+            diagnostic =>
+                diagnostic.Code == "GW-PHYSICAL-027" &&
+                diagnostic.Target?.EndsWith(".sortFields", StringComparison.Ordinal) == true);
     }
 
     [Fact]

@@ -255,7 +255,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Explicitly_unfiltered_global_id_route_executes_offset_page_and_count_on_the_comparison_key_index()
+    public async Task Explicitly_unfiltered_global_id_route_executes_an_indexed_offset_page_and_provider_side_count()
     {
         var database = Database();
         var model = UnfilteredGlobalIdModel();

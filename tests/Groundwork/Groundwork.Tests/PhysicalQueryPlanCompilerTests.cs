@@ -704,6 +704,67 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
+    public void Explicitly_unfiltered_route_without_declared_order_is_rejected_before_dispatch()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.None,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            predicateFields: []);
+        var admittedQuery = new BoundedQueryDeclaration(
+            query.Identity,
+            query.IndexIdentity,
+            query.Operations,
+            QuerySortSupport.Ascending,
+            query.PagingSupport,
+            query.ExecutionClass,
+            sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "global_documents",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [new PhysicalIndexColumnDefinition("category", 0)])
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [index],
+            [admittedQuery]);
+        var fixture = Resolve(storage, binding: null, tenancy: TenancyPolicy.Global);
+        var invalidStorage = new StorageUnitPhysicalStorage(
+            fixture.Storage.ProvisioningMode,
+            fixture.Storage.Policy,
+            fixture.Storage.LogicalIndexes,
+            [query]);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            invalidStorage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(
+            result.Diagnostics,
+            diagnostic =>
+                diagnostic.Code == "GW-QUERY-006" &&
+                diagnostic.Message.Contains("must declare its provider-applied ordering", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task RuntimeSeamPreservesQueryIdentityAndDispatchesTheCompiledHandler()
     {
         var fixture = CreateFixture(

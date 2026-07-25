@@ -55,6 +55,8 @@ plus date-time ordering explicit rather than inferring semantics from provider s
 
 For compatibility, omitting `predicateFields` filters the first path in the logical index. Passing
 an explicit empty `predicateFields: []` is different: it declares a truly unfiltered bounded route.
+An explicitly unfiltered route must also declare its provider-applied `sortFields`; implicit
+tie-break ordering is not sufficient evidence for a scale-bearing physical index.
 New compound declarations should always list their predicate fields. An equality predicate prefix
 may be followed by a sort suffix; requested directions must match the physical index either forward
 or fully reversed. Runtime requests using that suffix must provide exactly one standalone equality
@@ -173,3 +175,15 @@ between numeric and lexical semantics. SQLite uses exact fixed-scale integer Dec
 UTC-tick DateTime projections; its canonical-JSON source does not certify Number or DateTime plans.
 SQL Server, PostgreSQL, SQLite, and MongoDB now expose provider-native bounded-query explanations.
 #24 is superseded by the provider implementations in this execution slice.
+
+## Independent review record for explicit unfiltered routes
+
+The 2026-07-25 adversarial review of Groundwork #140 found two blockers in the initial candidate.
+Correctness review demonstrated that an explicit-empty declaration without `sortFields` could
+certify an unrelated index while runtime supplied an identity order; admission and compilation now
+fail that shape closed, with resolver and direct-compiler regressions. Evidence review found that
+the relational provider tests relied on compiled metadata instead of native plans; the conformance
+gate now checks real SQLite, SQL Server, and PostgreSQL page plans for the declared index and absence
+of a provider sort, while separately proving that count executes provider-side. Scope review found
+no deletion, relaxation, or client-evaluation regression. Exact-head re-verification remains a
+required PR merge gate.

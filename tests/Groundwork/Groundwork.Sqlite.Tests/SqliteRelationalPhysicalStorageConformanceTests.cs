@@ -154,6 +154,19 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         }
     }
 
+    protected override void AssertUnfilteredGlobalIdQueryPlan(PhysicalDocumentQueryExplanation explanation)
+    {
+        Assert.All(explanation.Commands, command =>
+        {
+            Assert.Equal("sqlite-query-plan", command.NativePlanFormat);
+            Assert.False(string.IsNullOrWhiteSpace(command.NativePlan));
+        });
+        var page = explanation.Commands.Single(command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        Assert.Contains(explanation.Plan.IndexName!.Identifier, page.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("USE TEMP B-TREE FOR ORDER BY", page.NativePlan, StringComparison.Ordinal);
+    }
+
     protected override async Task<RelationalScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form)
     {
         var connection = new SqliteConnection("Data Source=:memory:");

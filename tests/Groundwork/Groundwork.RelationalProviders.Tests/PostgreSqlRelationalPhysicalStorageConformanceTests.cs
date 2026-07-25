@@ -1257,6 +1257,28 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             () => ValueTask.CompletedTask);
     }
 
+    protected override void AssertUnfilteredGlobalIdQueryPlan(PhysicalDocumentQueryExplanation explanation)
+    {
+        Assert.All(explanation.Commands, command =>
+        {
+            Assert.Equal("postgresql-json", command.NativePlanFormat);
+            Assert.False(string.IsNullOrWhiteSpace(command.NativePlan));
+        });
+        var page = explanation.Commands.Single(command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        Assert.Contains(explanation.Plan.IndexName!.Identifier, page.NativePlan, StringComparison.Ordinal);
+        Assert.Contains("\"Node Type\": \"Limit\"", page.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Node Type\": \"Seq Scan\"", page.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Node Type\": \"Sort\"", page.NativePlan, StringComparison.Ordinal);
+    }
+
+    protected override async Task PrepareUnfilteredGlobalIdQueryPlanAsync(
+        RelationalUnfilteredGlobalQueryFixture fixture)
+    {
+        await SeedPlanNoiseAsync(fixture.Route, "ignored", "c");
+        await AnalyzeRouteAsync(fixture.Route);
+    }
+
     protected override async Task<RelationalServerIdentityFixture> CreateIdentityAsync(
         PhysicalStorageForm form,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal)
@@ -1642,7 +1664,10 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             Assert.False(UsesCollectionOwnerPrimaryKey(JsonSerializer.Serialize(new[] { fixture }), collection)));
     }
 
-    private async Task SeedPlanNoiseAsync(ExecutableStorageRoute route)
+    private async Task SeedPlanNoiseAsync(
+        ExecutableStorageRoute route,
+        string categoryValue = "tools",
+        string? sourceId = null)
     {
         var category = route.ProjectedColumns.Single(column => column.Definition.LogicalName == "category");
         var table = category.Target == ExecutableStorageObjectRole.PrimaryStorage
@@ -1677,9 +1702,14 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                 columns.Add(reader.GetString(0));
         }
         await using var seed = connection.CreateCommand();
+        var sourceIdentityPredicate = sourceId is null
+            ? string.Empty
+            : $" AND {Q(id)} = @sourceId";
         seed.CommandText = $"""
             WITH source AS (
-                SELECT * FROM {Q(table)} WHERE {Q(category.Column.Identifier)} = @category LIMIT 1
+                SELECT * FROM {Q(table)}
+                WHERE {Q(category.Column.Identifier)} = @category{sourceIdentityPredicate}
+                LIMIT 1
             )
             INSERT INTO {Q(table)} ({string.Join(", ", columns.Select(Q))})
             SELECT {string.Join(", ", columns.Select(column => identityColumns.Contains(column)
@@ -1687,7 +1717,9 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                 : column == category.Column.Identifier ? "'noise'" : $"s.{Q(column)}"))}
             FROM source s CROSS JOIN generate_series(1, 4096) AS n;
             """;
-        seed.Parameters.AddWithValue("category", "tools");
+        seed.Parameters.AddWithValue("category", categoryValue);
+        if (sourceId is not null)
+            seed.Parameters.AddWithValue("sourceId", sourceId);
         await seed.ExecuteNonQueryAsync();
     }
 

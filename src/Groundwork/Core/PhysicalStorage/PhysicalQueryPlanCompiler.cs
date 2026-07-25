@@ -754,7 +754,18 @@ public static class PhysicalQueryPlanCompiler
         }
 
         if (query.SortFields.Count == 0)
+        {
+            if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+                predicates.Count == 0)
+            {
+                diagnostics.Add(Error(
+                    "GW-QUERY-006",
+                    "An explicitly unfiltered bounded query must declare its provider-applied ordering.",
+                    target));
+                return false;
+            }
             return true;
+        }
 
         var sortPaths = query.SortFields
             .Select(field => identityFields.ResolveOrderPath(field.Path))
