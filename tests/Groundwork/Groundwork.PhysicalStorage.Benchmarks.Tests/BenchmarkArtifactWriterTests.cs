@@ -1,4 +1,5 @@
 using Groundwork.Core.PhysicalStorage;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Xunit;
@@ -769,11 +770,24 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         {
             new(BenchmarkProvider.Sqlite, "3.50.4", new Dictionary<string, string>())
         };
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.Sqlite,
+            PhysicalStorageForm.SharedDocuments,
+            BenchmarkWorkload.ReusedClientPointReadBatch);
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, 1, 0, 0, null, null, new Dictionary<string, long>(), [100])
+            .WithObservedCommandSignal();
         var report = new BenchmarkRunReport(
             BenchmarkProfiles.SchemaVersion,
             "test-run",
             BenchmarkRunMode.Smoke,
-            [],
+            [new BenchmarkCaseResult(
+                benchmarkCase,
+                new CorrectnessGateResult(true, true, true, true, true),
+                [],
+                BenchmarkSummarizer.Summarize(benchmarkCase.Identity, [sample]),
+                [sample],
+                ObservableResults(benchmarkCase, sample.Operations))],
             [],
             new BaselineEligibility(false, ["Smoke run."]));
         var manifest = new BenchmarkRunManifest(
@@ -804,6 +818,9 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             await writer.WriteMachineAsync(machine, CancellationToken.None);
             await writer.WriteProvidersAsync(providers, CancellationToken.None);
             await writer.WriteConfigurationAsync(BenchmarkProfiles.Smoke, CancellationToken.None);
+            await writer.AppendSampleAsync(
+                new RawBenchmarkRecord(benchmarkCase, sample),
+                CancellationToken.None);
             await writer.WriteReportAsync(report, CancellationToken.None);
             await writer.WriteConsumerEvidenceAsync(
                 BenchmarkConsumerEvidenceReport.Create(report, BenchmarkProfiles.Smoke, machine, providers, layout),
@@ -823,6 +840,21 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var tampered = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             BenchmarkArtifactWriter.ReadBaselineAsync(root, CancellationToken.None));
         Assert.Contains("integrity verification failed", tampered.Message, StringComparison.Ordinal);
+
+        await File.WriteAllTextAsync(
+            layout.SummaryJson,
+            JsonSerializer.Serialize(report, BenchmarkJson.Options));
+        var mismatchedSample = sample with { ElapsedNanoseconds = sample.ElapsedNanoseconds + 1 };
+        await File.WriteAllTextAsync(
+            layout.RawMeasurements,
+            JsonSerializer.Serialize(
+                new RawBenchmarkRecord(benchmarkCase, mismatchedSample),
+                BenchmarkJson.CompactOptions) + Environment.NewLine);
+        await ResealArtifactIntegrityAsync(layout, manifest);
+
+        var mismatched = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.ReadBaselineAsync(root, CancellationToken.None));
+        Assert.Contains("do not exactly bind", mismatched.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -883,6 +915,43 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             operations,
             null)
     ];
+
+    private static async Task ResealArtifactIntegrityAsync(
+        ArtifactLayout layout,
+        BenchmarkRunManifest manifest)
+    {
+        var paths = new[]
+        {
+            layout.RelativePath(layout.Manifest),
+            manifest.RawMeasurements,
+            manifest.Summary,
+            manifest.ElsaMigrationEvidence,
+            manifest.MachineMetadata,
+            manifest.ProviderMetadata,
+            manifest.Configuration,
+            Assert.IsType<string>(manifest.ConsumerEvidence)
+        };
+        var artifacts = paths
+            .Order(StringComparer.Ordinal)
+            .Select(relative =>
+            {
+                var path = Path.Combine(
+                    layout.Root,
+                    relative.Replace('/', Path.DirectorySeparatorChar));
+                return new BenchmarkArtifactDigest(
+                    relative,
+                    Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path))));
+            })
+            .ToArray();
+        await File.WriteAllTextAsync(
+            layout.ArtifactIntegrityJson,
+            JsonSerializer.Serialize(
+                new BenchmarkArtifactIntegrity(
+                    BenchmarkArtifactIntegrity.ContractVersion,
+                    manifest.RunId,
+                    artifacts),
+                BenchmarkJson.Options));
+    }
 
     public ValueTask DisposeAsync()
     {
