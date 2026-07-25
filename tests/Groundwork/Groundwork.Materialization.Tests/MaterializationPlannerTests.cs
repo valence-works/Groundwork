@@ -143,6 +143,62 @@ public sealed class MaterializationPlannerTests
     }
 
     [Fact]
+    public void PlanRejectsGuardOnlyManifestsBeforeProducingMaterializationOperations()
+    {
+        var manifest = CreateManifest();
+        var unit = Assert.Single(manifest.StorageUnits);
+        var logicalIndex = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                "configuration_documents",
+                [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+                indexes:
+                [
+                    new PhysicalIndexDefinition(
+                        logicalIndex.Identity,
+                        [
+                            new PhysicalIndexColumnDefinition("storage_scope", 0),
+                            new PhysicalIndexColumnDefinition("category", 1)
+                        ])
+                ])),
+            [logicalIndex],
+            [new BoundedQueryDeclaration(
+                "list-by-category",
+                logicalIndex.Identity,
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.None,
+                QueryPagingSupport.None,
+                BoundedQueryExecutionClass.ScaleBearing)],
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "guarded-delete",
+                    "list-by-category",
+                    BoundedMutationAction.Delete(),
+                    [BoundedMutationRelationshipGuard.RequireNoReferences("missing-relationship")])
+            ]);
+        manifest = manifest with
+        {
+            StorageUnits = [unit with { PhysicalStorage = physicalStorage }],
+            Relationships = []
+        };
+
+        var plan = planner.Plan(manifest, RuntimeCapabilities(), CreateCapabilities());
+
+        Assert.False(plan.IsPlannable);
+        Assert.Empty(plan.Operations);
+        var diagnostic = Assert.Single(plan.Diagnostics);
+        Assert.Equal("GW-MAT-004", diagnostic.Code);
+        Assert.Contains("missing-relationship", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PlanReturnsRuntimeFitDiagnosticsAndNoOperations()
     {
         var manifest = CreateManifest(
