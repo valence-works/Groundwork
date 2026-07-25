@@ -27,6 +27,13 @@ public sealed class MaterializationPlanner
     {
         var diagnostics = new List<GroundworkDiagnostic>();
         diagnostics.AddRange(manifestValidator.Validate(manifest).Diagnostics);
+        if (manifest.Relationships.Count != 0)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MAT-004",
+                $"Provider '{materializationCapabilities.Provider}' does not advertise relationship materialization and target-key fence support.",
+                "manifest.relationships"));
+        }
 
         if (runtimeCapabilities.Provider != materializationCapabilities.Provider)
         {

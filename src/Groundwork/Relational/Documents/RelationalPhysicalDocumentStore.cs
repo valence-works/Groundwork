@@ -403,6 +403,10 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         this.manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
         this.dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
         this.physicalSchemaProvider = physicalSchemaProvider ?? dialect.PhysicalSchemaProvider;
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            this.manifest,
+            this.physicalSchemaProvider ?? new ProviderIdentity("relational", "unadvertised"),
+            supportsRelationshipMaterialization: false);
         this.createMutationTransaction = createMutationTransaction ??
             (transaction => new RelationalPhysicalMutationTransaction(transaction));
         Access = access ?? throw new ArgumentNullException(nameof(access));

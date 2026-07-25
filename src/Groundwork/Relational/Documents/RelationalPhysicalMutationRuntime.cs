@@ -392,6 +392,18 @@ internal static class RelationalPhysicalMutationRuntime
                     }
                 };
             }
+            else if (typeInfo.Type == typeof(BoundedMutationRelationshipGuard))
+            {
+                typeInfo.PolymorphismOptions = new JsonPolymorphismOptions
+                {
+                    TypeDiscriminatorPropertyName = "$relationshipGuard",
+                    DerivedTypes =
+                    {
+                        new JsonDerivedType(typeof(RequireNoReferencesMutationRelationshipGuard), "no-references"),
+                        new JsonDerivedType(typeof(RequireRelatedTargetNotEqualMutationRelationshipGuard), "related-target-not-equal")
+                    }
+                };
+            }
         });
         return new JsonSerializerOptions { TypeInfoResolver = resolver };
     }

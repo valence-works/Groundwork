@@ -3,6 +3,7 @@ using Groundwork.Core.Indexing;
 using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Materialization;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Queries;
 using Groundwork.Core.Validation;
@@ -112,6 +113,33 @@ public sealed class MaterializationPlannerTests
         Assert.False(plan.IsPlannable);
         Assert.Empty(plan.Operations);
         Assert.Contains(plan.Diagnostics, diagnostic => diagnostic.Code == "GW-MAT-003");
+    }
+
+    [Fact]
+    public void PlanRejectsRelationshipManifestsUntilTheProviderAdvertisesMaterializationAndFenceSupport()
+    {
+        var manifest = CreateManifest();
+        var unit = Assert.Single(manifest.StorageUnits);
+        manifest = manifest with
+        {
+            Relationships =
+            [
+                new ManifestRelationshipDeclaration(
+                    "configuration-parent",
+                    unit.Identity,
+                    "parentId",
+                    "by-parent-id",
+                    unit.Identity,
+                    PhysicalDocumentFieldPaths.Id,
+                    "by-id")
+            ]
+        };
+
+        var plan = planner.Plan(manifest, RuntimeCapabilities(), CreateCapabilities());
+
+        Assert.False(plan.IsPlannable);
+        Assert.Empty(plan.Operations);
+        Assert.Contains(plan.Diagnostics, diagnostic => diagnostic.Code == "GW-MAT-004");
     }
 
     [Fact]

@@ -124,6 +124,10 @@ public static class SqliteDocumentStoreFactory
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(access);
 
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            manifest,
+            provider,
+            supportsRelationshipMaterialization: false);
         var plan = CreateMaterializationPlan(manifest, provider).RequirePlannable();
         await new SqliteGroundworkMaterializer(connection).MaterializeAsync(plan, cancellationToken);
         return new SqliteDocumentStore(connection, manifest, access, scopeObserver);

@@ -70,6 +70,10 @@ public sealed class MongoDbPhysicalStorageModel
         provider ??= MongoDbGroundworkCapabilities.Provider;
         namePolicy ??= PhysicalNamePolicy.Identity;
         new StorageManifestValidator().Validate(manifest).RequireValid();
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            manifest,
+            provider,
+            supportsRelationshipMaterialization: false);
 
         var resolution = PhysicalStorageResolver.Resolve(manifest, namePolicy, MongoDbPhysicalNameNormalizer.Instance);
         if (!resolution.IsValid)

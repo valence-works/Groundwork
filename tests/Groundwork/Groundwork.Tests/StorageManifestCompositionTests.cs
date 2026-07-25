@@ -126,6 +126,112 @@ public sealed class StorageManifestCompositionTests
     }
 
     [Fact]
+    public void UnionKeepsOneManifestOwnedRelationshipAcrossDisjointUnits()
+    {
+        var runtime = RuntimeManifest();
+        var design = DesignManifest();
+        var relationship = new ManifestRelationshipDeclaration(
+            "runtime-to-design",
+            runtime.StorageUnits.Single().Identity,
+            "designReference",
+            "by-design-reference",
+            design.StorageUnits.Single().Identity,
+            PhysicalDocumentFieldPaths.Id,
+            "by-id");
+
+        var union = StorageManifestComposition.Union(
+            new StorageManifestIdentity("composite.documents"),
+            new StorageManifestOwner("sample.application"),
+            new StorageManifestVersion("1.0.0"),
+            runtime with { Relationships = [relationship] },
+            design);
+
+        Assert.Equal(relationship, Assert.Single(union.Relationships));
+    }
+
+    [Fact]
+    public void UnionCoalescesStructurallyIdenticalRelationshipDefinitions()
+    {
+        var runtime = RuntimeManifest();
+        var design = DesignManifest();
+        var relationship = new ManifestRelationshipDeclaration(
+            "runtime-to-design",
+            runtime.StorageUnits.Single().Identity,
+            "designReference",
+            "by-design-reference",
+            design.StorageUnits.Single().Identity,
+            PhysicalDocumentFieldPaths.Id,
+            "by-id");
+
+        var union = StorageManifestComposition.Union(
+            new StorageManifestIdentity("composite.documents"),
+            new StorageManifestOwner("sample.application"),
+            new StorageManifestVersion("1.0.0"),
+            runtime with { Relationships = [relationship] },
+            design with { Relationships = [relationship] });
+
+        Assert.Equal(relationship, Assert.Single(union.Relationships));
+    }
+
+    [Fact]
+    public void Relationship_definition_equality_is_structural_when_values_contain_legacy_delimiters()
+    {
+        var source = new StorageUnitIdentity("source");
+        var target = new StorageUnitIdentity("target");
+        var first = new ManifestRelationshipDeclaration(
+            "relationship",
+            source,
+            "a\u001fb",
+            "c",
+            target,
+            PhysicalDocumentFieldPaths.Id,
+            "by-id");
+        var second = new ManifestRelationshipDeclaration(
+            "relationship",
+            source,
+            "a",
+            "b\u001fc",
+            target,
+            PhysicalDocumentFieldPaths.Id,
+            "by-id");
+
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
+    public void UnionRejectsConflictingDefinitionsForOneRelationshipIdentity()
+    {
+        var runtime = RuntimeManifest();
+        var design = DesignManifest();
+        var source = runtime.StorageUnits.Single().Identity;
+        var target = design.StorageUnits.Single().Identity;
+        var relationship = new ManifestRelationshipDeclaration(
+            "runtime-to-design",
+            source,
+            "designReference",
+            "by-design-reference",
+            target,
+            PhysicalDocumentFieldPaths.Id,
+            "by-id");
+        var conflicting = new ManifestRelationshipDeclaration(
+            relationship.Identity,
+            source,
+            "otherDesignReference",
+            "by-other-design-reference",
+            target,
+            PhysicalDocumentFieldPaths.Id,
+            "by-id");
+
+        Assert.Throws<ManifestRelationshipCompositionException>(() =>
+            StorageManifestComposition.Union(
+                new StorageManifestIdentity("composite.documents"),
+                new StorageManifestOwner("sample.application"),
+                new StorageManifestVersion("1.0.0"),
+                runtime with { Relationships = [relationship] },
+                design with { Relationships = [conflicting] }));
+    }
+
+    [Fact]
     public void UnionRejectsConflictingSharedDefinitions()
     {
         var binding = new SharedStorageBinding("application-documents");

@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Physicalization;
 using Groundwork.Core.Transactions;
 using Groundwork.Core.Scoping;
@@ -48,6 +50,10 @@ public sealed class MongoDbDocumentStore : IDocumentStore
     {
         this.database = database ?? throw new ArgumentNullException(nameof(database));
         this.manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
+        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
+            this.manifest,
+            new ProviderIdentity("mongodb", "unadvertised"),
+            supportsRelationshipMaterialization: false);
         identityBindings = DocumentIdentityBinding.Bind(manifest);
         this.access = access ?? throw new ArgumentNullException(nameof(access));
         this.scopeObserver = scopeObserver ?? NullStorageScopeObserver.Instance;

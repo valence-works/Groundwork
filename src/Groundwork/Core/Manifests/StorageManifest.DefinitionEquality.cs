@@ -22,6 +22,11 @@ public sealed partial record StorageManifest
             other.SharedDocumentStorages,
             item => item.Binding.Value,
             EqualityComparer<SharedDocumentStorageDefinition>.Default) &&
+        SequenceBy(
+            Relationships,
+            other.Relationships,
+            item => item.Identity,
+            EqualityComparer<ManifestRelationshipDeclaration>.Default) &&
         UnitsEqual(StorageUnits, other.StorageUnits);
 
     private static bool UnitsEqual(
