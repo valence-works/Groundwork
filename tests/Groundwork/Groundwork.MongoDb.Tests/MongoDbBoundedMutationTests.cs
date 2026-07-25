@@ -290,6 +290,24 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
     }
 
     [Fact]
+    public void Assignment_schema_binding_round_trips_its_fixed_action_and_fingerprint()
+    {
+        var model = AssignmentModel(PhysicalStorageForm.DedicatedDocumentTable);
+        var definition = Assert.Single(model.Target.ProviderDefinitions.Where(candidate =>
+            candidate.Kind == MongoDbPhysicalMutationSchemaBinding.DefinitionKind));
+
+        var binding = MongoDbPhysicalMutationSchemaBinding.Deserialize(definition.CanonicalDefinition);
+        var roundTripped = MongoDbPhysicalMutationSchemaBinding.Deserialize(binding.CanonicalJson);
+
+        Assert.Equal(BoundedMutationActionKind.Assign, binding.ActionKind);
+        Assert.Equal("status", binding.ActionPath);
+        Assert.Equal("active", binding.ActionTarget);
+        Assert.Empty(binding.AllowedSourceValues);
+        Assert.Equal(binding.CanonicalJson, roundTripped.CanonicalJson);
+        Assert.Equal(binding.Fingerprint, roundTripped.Fingerprint);
+    }
+
+    [Fact]
     public async Task Conflicting_mutation_index_fails_without_publishing_applied_state()
     {
         var database = new MongoClient(container.GetConnectionString())
@@ -1136,6 +1154,114 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
             command.Command["deletes"].AsBsonArray[0].AsBsonDocument["limit"].AsInt32));
     }
 
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes(
+        PhysicalStorageForm form)
+    {
+        var commands = new ConcurrentQueue<(string Name, BsonDocument Command)>();
+        var settings = MongoClientSettings.FromConnectionString(container.GetConnectionString());
+        settings.ClusterConfigurator = builder => builder.Subscribe<CommandStartedEvent>(started =>
+            commands.Enqueue((started.CommandName, started.Command.DeepClone().AsBsonDocument)));
+        var database = new MongoClient(settings).GetDatabase($"groundwork_{Guid.NewGuid():N}");
+        var model = AssignmentModel(form);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var documents = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        var route = Assert.Single(model.Routes);
+        var mutations = MongoDbPhysicalMutationRuntime.Create(
+            documents,
+            model.Manifest,
+            route,
+            model.Provider);
+        await SaveAssignmentAsync(documents, "null-target", """{"category":"eligible","status":null}""");
+        await SaveAssignmentAsync(documents, "missing-target", """{"category":"eligible"}""");
+        await SaveAssignmentAsync(documents, "extension-target", """{"category":"eligible","status":"extension-value"}""");
+        await SaveAssignmentAsync(documents, "different-target", """{"category":"eligible","status":"pending"}""");
+        await SaveAssignmentAsync(documents, "already-target", """{"category":"eligible","status":"active"}""");
+        await SaveAssignmentAsync(documents, "unrelated", """{"category":"other","status":"pending"}""");
+        commands.Clear();
+
+        var request = new DocumentMutation(
+            DocumentKind,
+            "activate-eligible",
+            $"{form}-assignment",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "eligible"))]);
+        var evidence = await Assert.IsAssignableFrom<IPhysicalDocumentMutationExplainer>(mutations)
+            .ExplainAsync(request);
+        Assert.IsType<PhysicalAssignMutationAction>(evidence.Plan.Action);
+        Assert.Equal("mongodb-query-planner", evidence.NativePlanFormat);
+        Assert.Contains("winningPlan", evidence.NativePlan, StringComparison.Ordinal);
+        Assert.All(evidence.Selectors, selector =>
+            Assert.Equal(selector.Index!.Identifier, selector.ObservedIndexIdentifier));
+        commands.Clear();
+
+        var completed = await mutations.ExecuteAsync(request);
+        var replayed = await mutations.ExecuteAsync(request);
+        var mutationCommands = commands.ToArray();
+
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 5), completed);
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Replayed, 5), replayed);
+        foreach (var id in new[]
+                 {
+                     "null-target",
+                     "missing-target",
+                     "extension-target",
+                     "different-target",
+                     "already-target"
+                 })
+        {
+            Assert.Equal("active", Status((await documents.LoadAsync(DocumentKind, id))!.ContentJson));
+        }
+        Assert.Equal("pending", Status((await documents.LoadAsync(DocumentKind, "unrelated"))!.ContentJson));
+
+        var projectionStorage = route.LinkedIndexStorage ?? route.PrimaryStorage;
+        var isLinkedProjection = route.LinkedIndexStorage is not null;
+        var categoryField = isLinkedProjection
+            ? MongoDbPhysicalMutationStorage.LinkedField(route, "category")
+            : MongoDbPhysicalMutationStorage.PrimaryField(route, "category");
+        var statusField = route.ProjectedColumns.Single(column =>
+            column.Definition.Path == "status").Column.Identifier;
+        var projectedRows = await database.GetCollection<BsonDocument>(projectionStorage.Name.Identifier)
+            .Find(Builders<BsonDocument>.Filter.Eq(categoryField, "eligible"))
+            .ToListAsync();
+        Assert.Equal(5, projectedRows.Count);
+        Assert.All(projectedRows, row => Assert.Equal("active", row[statusField].AsString));
+
+        var physicalNames = new HashSet<string>(StringComparer.Ordinal)
+        {
+            route.PrimaryStorage.Name.Identifier
+        };
+        if (route.LinkedIndexStorage is not null)
+            physicalNames.Add(route.LinkedIndexStorage.Name.Identifier);
+        Assert.DoesNotContain(mutationCommands, command =>
+            command.Name == "find" &&
+            physicalNames.Contains(command.Command["find"].AsString));
+        var updates = mutationCommands.Where(command =>
+            command.Name == "update" &&
+            physicalNames.Contains(command.Command["update"].AsString)).ToArray();
+        Assert.Equal(route.LinkedIndexStorage is null ? 1 : 2, updates.Length);
+        Assert.All(updates, command =>
+        {
+            var update = Assert.Single(command.Command["updates"].AsBsonArray).AsBsonDocument;
+            Assert.True(update["multi"].AsBoolean);
+            var selectionField = command.Command["update"].AsString == route.PrimaryStorage.Name.Identifier
+                ? MongoDbPhysicalMutationStorage.PrimaryField(route, "category")
+                : MongoDbPhysicalMutationStorage.LinkedField(route, "category");
+            var targetField = command.Command["update"].AsString == route.PrimaryStorage.Name.Identifier
+                ? MongoDbPhysicalMutationStorage.PrimaryField(route, "status")
+                : MongoDbPhysicalMutationStorage.LinkedField(route, "status");
+            var selectorFields = BsonFieldNames(update["q"])
+                .ToHashSet(StringComparer.Ordinal);
+            Assert.Contains(selectionField, selectorFields);
+            Assert.DoesNotContain(targetField, selectorFields);
+        });
+    }
+
     [Fact]
     public async Task Mutation_scope_is_inherited_from_the_store_session()
     {
@@ -1188,6 +1314,111 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
         Assert.Equal(
             new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
             await fixture.CreateMutationRuntime().ExecuteAsync(request));
+    }
+
+    [Fact]
+    public async Task Assignment_cancellation_before_commit_rolls_back_primary_projection_and_ledger()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var fixture = await CreateAssignmentAsync(point =>
+        {
+            if (point != MongoDbPhysicalMutationExecutionPoint.BeforeCommit)
+                return ValueTask.CompletedTask;
+            cancellation.Cancel();
+            return ValueTask.FromCanceled(cancellation.Token);
+        });
+        await SaveAssignmentAsync(
+            fixture.Documents,
+            "assignment-cancel",
+            """{"category":"eligible","status":"pending"}""");
+        var request = Assignment("assignment-cancel-1");
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Mutations.ExecuteAsync(request, cancellation.Token));
+
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+        Assert.Equal(
+            "pending",
+            Status((await fixture.Documents.LoadAsync(DocumentKind, "assignment-cancel"))!.ContentJson));
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(request));
+        Assert.Equal(
+            "active",
+            Status((await fixture.Documents.LoadAsync(DocumentKind, "assignment-cancel"))!.ContentJson));
+    }
+
+    [Fact]
+    public async Task Assignment_restart_after_acknowledgement_loss_replays_the_durable_matched_count()
+    {
+        var fixture = await CreateAssignmentAsync(point =>
+            point == MongoDbPhysicalMutationExecutionPoint.AfterCommitBeforeAcknowledgement
+                ? ValueTask.FromException(new SimulatedMutationAcknowledgementLossException())
+                : ValueTask.CompletedTask);
+        await SaveAssignmentAsync(
+            fixture.Documents,
+            "assignment-restart",
+            """{"category":"eligible","status":"pending"}""");
+        var request = Assignment("assignment-upgrade-ack-loss-1");
+
+        await Assert.ThrowsAsync<SimulatedMutationAcknowledgementLossException>(() =>
+            fixture.Mutations.ExecuteAsync(request));
+
+        var upgradedProvider = new Groundwork.Core.Capabilities.ProviderIdentity(
+            fixture.Model.Provider.Name,
+            "2.0.0");
+        var upgradedModel = MongoDbPhysicalStorageModel.Compile(
+            fixture.Model.Manifest,
+            upgradedProvider);
+        var restartedDocuments = new MongoDbPhysicalDocumentStore(
+            fixture.Database,
+            upgradedModel,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        var restartedMutations = MongoDbPhysicalMutationRuntime.Create(
+            restartedDocuments,
+            upgradedModel.Manifest,
+            Assert.Single(upgradedModel.Routes),
+            upgradedProvider);
+
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Replayed, 1),
+            await restartedMutations.ExecuteAsync(request));
+        Assert.Equal(
+            "active",
+            Status((await restartedDocuments.LoadAsync(DocumentKind, "assignment-restart"))!.ContentJson));
+    }
+
+    [Fact]
+    public async Task Concurrent_assignments_preserve_matched_counts_for_same_and_distinct_operations()
+    {
+        var fixture = await CreateAssignmentAsync();
+        for (var index = 0; index < 5; index++)
+        {
+            await SaveAssignmentAsync(
+                fixture.Documents,
+                $"assignment-{index}",
+                $$"""{"category":"eligible","status":"pending","ordinal":{{index}}}""");
+        }
+        var sameRequest = Assignment("assignment-concurrent-same");
+
+        var sameResults = await Task.WhenAll(
+            fixture.Mutations.ExecuteAsync(sameRequest),
+            fixture.Mutations.ExecuteAsync(sameRequest));
+
+        Assert.Equal(
+            [BoundedMutationStatus.Completed, BoundedMutationStatus.Replayed],
+            sameResults.Select(result => result.Status).Order().ToArray());
+        Assert.All(sameResults, result => Assert.Equal(5, result.AffectedCount));
+
+        var distinctResults = await Task.WhenAll(
+            fixture.Mutations.ExecuteAsync(Assignment("assignment-concurrent-first")),
+            fixture.Mutations.ExecuteAsync(Assignment("assignment-concurrent-second")));
+
+        Assert.All(distinctResults, result =>
+        {
+            Assert.Equal(BoundedMutationStatus.Completed, result.Status);
+            Assert.Equal(5, result.AffectedCount);
+        });
     }
 
     [Fact]
@@ -1315,6 +1546,98 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
                         ])
                 }
             ]
+        };
+        return MongoDbPhysicalStorageModel.Compile(manifest);
+    }
+
+    private static MongoDbPhysicalStorageModel AssignmentModel(PhysicalStorageForm form)
+    {
+        var binding = new SharedStorageBinding("runtime");
+        var category = new ProjectedColumnDefinition(
+            "category",
+            "category",
+            PortablePhysicalType.String,
+            IsNullable: false);
+        var status = new ProjectedColumnDefinition(
+            "status",
+            "status",
+            PortablePhysicalType.String,
+            IsNullable: true);
+        var categoryIndex = new PhysicalIndexDefinition(
+            "by-category",
+            [
+                new PhysicalIndexColumnDefinition("storage_scope", 0),
+                new PhysicalIndexColumnDefinition("category", 1)
+            ]);
+        var definition = form switch
+        {
+            PhysicalStorageForm.SharedDocuments => PhysicalTableDefinition.SharedDocuments(
+                binding,
+                [category, status],
+                [categoryIndex],
+                linkedProjectionLogicalName: "assignment_work_items_lookup"),
+            PhysicalStorageForm.DedicatedDocumentTable => PhysicalTableDefinition.DedicatedDocumentTable(
+                "assignment_work_items",
+                indexes: [categoryIndex],
+                linkedProjectedColumns: [category, status],
+                linkedProjectionLogicalName: "assignment_work_items_lookup"),
+            PhysicalStorageForm.PhysicalEntityTable => PhysicalTableDefinition.PhysicalEntityTable(
+                "assignment_work_items",
+                [category, status],
+                indexes: [categoryIndex]),
+            _ => throw new ArgumentOutOfRangeException(nameof(form), form, null)
+        };
+        var logical = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-by-category",
+            logical.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.None,
+            QueryPagingSupport.None,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true);
+        var unit = new StorageUnit(
+            new StorageUnitIdentity(DocumentKind),
+            "Work item",
+            StorageIntent.PortableDocument(),
+            LifecyclePolicy.Mutable,
+            IdentityPolicy.StringId(),
+            TenancyPolicy.Scoped,
+            ConcurrencyPolicy.Optimistic(),
+            SerializationPolicy.Json(),
+            [],
+            [],
+            PhysicalizationPolicy.Portable)
+        {
+            PhysicalStorage = new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Explicit(definition),
+                [logical],
+                [query],
+                boundedMutations:
+                [
+                    new BoundedMutationDeclaration(
+                        "activate-eligible",
+                        query.Identity,
+                        BoundedMutationAction.Assign("status", "active"))
+                ])
+        };
+        var manifest = new StorageManifest(
+            new StorageManifestIdentity($"mongo.assignment.{form}"),
+            new StorageManifestOwner("tests"),
+            new StorageManifestVersion("1"),
+            [unit],
+            new HashSet<string>(),
+            [])
+        {
+            SharedDocumentStorages = form == PhysicalStorageForm.SharedDocuments
+                ? [new SharedDocumentStorageDefinition(binding, "assignment_documents", new DocumentEnvelopeDefinition())]
+                : []
         };
         return MongoDbPhysicalStorageModel.Compile(manifest);
     }
@@ -1651,6 +1974,27 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
         return new Fixture(database, model, documents, mutations);
     }
 
+    private async Task<Fixture> CreateAssignmentAsync(
+        Func<MongoDbPhysicalMutationExecutionPoint, ValueTask>? intercept = null,
+        PhysicalStorageForm form = PhysicalStorageForm.DedicatedDocumentTable)
+    {
+        var database = new MongoClient(container.GetConnectionString())
+            .GetDatabase($"groundwork_{Guid.NewGuid():N}");
+        var model = AssignmentModel(form);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var documents = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        var mutations = MongoDbPhysicalMutationRuntime.Create(
+            documents,
+            model.Manifest,
+            Assert.Single(model.Routes),
+            model.Provider,
+            intercept);
+        return new Fixture(database, model, documents, mutations);
+    }
+
     private static DocumentQuery Query(string status) =>
         new(
             DocumentKind,
@@ -1663,6 +2007,13 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
             "prune-by-status",
             operationId,
             [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", status))]);
+
+    private static DocumentMutation Assignment(string operationId) =>
+        new(
+            DocumentKind,
+            "activate-eligible",
+            operationId,
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "eligible"))]);
 
     private static string Status(string json) =>
         JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
@@ -1690,6 +2041,21 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
                 id,
                 "1",
                 $$"""{"status":"{{status}}","rank":1}""",
+                ExpectedVersion: 0))).Status);
+    }
+
+    private static async Task SaveAssignmentAsync(
+        MongoDbPhysicalDocumentStore documents,
+        string id,
+        string contentJson)
+    {
+        Assert.Equal(
+            DocumentStoreWriteStatus.Saved,
+            (await documents.SaveAsync(new SaveDocumentRequest(
+                DocumentKind,
+                id,
+                "1",
+                contentJson,
                 ExpectedVersion: 0))).Status);
     }
 

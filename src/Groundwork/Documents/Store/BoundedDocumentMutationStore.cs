@@ -117,6 +117,11 @@ public static class BoundedMutationRequestFingerprint
                 Encode(transition.Path),
                 Encode(transition.TargetValue),
                 string.Join("\u001e", transition.AllowedSourceValues.Order(StringComparer.Ordinal).Select(Encode))),
+            PhysicalAssignMutationAction assignment => string.Join(
+                "\u001f",
+                "assign",
+                Encode(assignment.Path),
+                Encode(assignment.TargetValue)),
             _ => throw new ArgumentOutOfRangeException(nameof(plan), plan.Action.Kind, null)
         };
         var clauses = mutation.Clauses
@@ -268,10 +273,11 @@ public sealed class PhysicalMutationExecutionCertification
         MutationIdentity = plan.MutationIdentity;
         RouteFingerprint = plan.RouteFingerprint;
         ActionKind = plan.Action.Kind;
-        var transition = plan.Action as PhysicalTransitionMutationAction;
-        TransitionPath = transition?.Path;
-        TransitionTarget = transition?.TargetValue;
-        TransitionSources = Array.AsReadOnly(transition?.AllowedSourceValues.ToArray() ?? []);
+        var valueAction = plan.Action as IPhysicalValueMutationAction;
+        ActionPath = valueAction?.Path;
+        ActionTarget = valueAction?.TargetValue;
+        AllowedSourceValues = Array.AsReadOnly(
+            (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues.ToArray() ?? []);
     }
 
     public ProviderIdentity Provider { get; }
@@ -284,11 +290,20 @@ public sealed class PhysicalMutationExecutionCertification
 
     public BoundedMutationActionKind ActionKind { get; }
 
-    public string? TransitionPath { get; }
+    public string? ActionPath { get; }
 
-    public string? TransitionTarget { get; }
+    public string? ActionTarget { get; }
 
-    public IReadOnlyList<string> TransitionSources { get; }
+    public IReadOnlyList<string> AllowedSourceValues { get; }
+
+    public string? TransitionPath =>
+        ActionKind == BoundedMutationActionKind.Transition ? ActionPath : null;
+
+    public string? TransitionTarget =>
+        ActionKind == BoundedMutationActionKind.Transition ? ActionTarget : null;
+
+    public IReadOnlyList<string> TransitionSources =>
+        ActionKind == BoundedMutationActionKind.Transition ? AllowedSourceValues : [];
 
     public PhysicalMutationSelectorCertification Primary { get; }
 
@@ -298,15 +313,16 @@ public sealed class PhysicalMutationExecutionCertification
 
     internal bool Certifies(PhysicalMutationPlan plan)
     {
-        var transition = plan.Action as PhysicalTransitionMutationAction;
+        var valueAction = plan.Action as IPhysicalValueMutationAction;
         return Provider == plan.Predicate.Provider &&
                StorageUnit == plan.Predicate.StorageUnit &&
                MutationIdentity == plan.MutationIdentity &&
                RouteFingerprint == plan.RouteFingerprint &&
                ActionKind == plan.Action.Kind &&
-               TransitionPath == transition?.Path &&
-               TransitionTarget == transition?.TargetValue &&
-               TransitionSources.SequenceEqual(transition?.AllowedSourceValues ?? []);
+               ActionPath == valueAction?.Path &&
+               ActionTarget == valueAction?.TargetValue &&
+               AllowedSourceValues.SequenceEqual(
+                   (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues ?? []);
     }
 }
 
@@ -361,8 +377,8 @@ public sealed class PhysicalMutationHandlerCertification
 {
     private readonly PhysicalQueryHandlerCertification predicate;
     private readonly IReadOnlyList<string> allowedSourceValues;
-    private readonly string? transitionPath;
-    private readonly string? transitionTarget;
+    private readonly string? actionPath;
+    private readonly string? actionTarget;
 
     public PhysicalMutationHandlerCertification(
         PhysicalMutationPlan plan,
@@ -372,10 +388,11 @@ public sealed class PhysicalMutationHandlerCertification
         ArgumentNullException.ThrowIfNull(plan);
         MutationIdentity = plan.MutationIdentity;
         ActionKind = plan.Action.Kind;
-        var transition = plan.Action as PhysicalTransitionMutationAction;
-        transitionPath = transition?.Path;
-        transitionTarget = transition?.TargetValue;
-        allowedSourceValues = Array.AsReadOnly(transition?.AllowedSourceValues.ToArray() ?? []);
+        var valueAction = plan.Action as IPhysicalValueMutationAction;
+        actionPath = valueAction?.Path;
+        actionTarget = valueAction?.TargetValue;
+        allowedSourceValues = Array.AsReadOnly(
+            (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues.ToArray() ?? []);
         var fields = plan.Predicate.RequiredFields
             .GroupBy(field => field.Path, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First().Identifier, StringComparer.Ordinal);
@@ -453,10 +470,11 @@ public sealed class PhysicalMutationHandlerCertification
             return false;
         }
 
-        var transition = plan.Action as PhysicalTransitionMutationAction;
-        return transitionPath == transition?.Path &&
-               transitionTarget == transition?.TargetValue &&
-               allowedSourceValues.SequenceEqual(transition?.AllowedSourceValues ?? []);
+        var valueAction = plan.Action as IPhysicalValueMutationAction;
+        return actionPath == valueAction?.Path &&
+               actionTarget == valueAction?.TargetValue &&
+               allowedSourceValues.SequenceEqual(
+                   (plan.Action as PhysicalTransitionMutationAction)?.AllowedSourceValues ?? []);
     }
 
     private static IReadOnlyList<PhysicalMutationSelectorCertification> ExpectedSelectors(

@@ -2,8 +2,10 @@
 
 `SqlServerPhysicalSchemaExecutor`, `SqlServerPhysicalDocumentStore`, and
 `SqlServerPhysicalQueryRuntime` implement all three compiled physical storage forms.
-`SqlServerPhysicalMutationRuntime` executes declared bounded transitions and deletes with exact
-idempotent outcomes. Schema
+`SqlServerPhysicalMutationRuntime` executes declared bounded deletes, finite-source transitions,
+and manifest-fixed assignments with exact idempotent outcomes. Assignment uses only its admitted
+selector, overwrites every selected scalar target—including already-target, null, missing, and
+extension-defined values—and returns the exact matched/processed count. Schema
 application uses session-scoped application locks and a transactional operation ledger; document and
 query operations use independent pooled sessions. Route-driven physical tables retain kind/id in
 binary-collated `NVARCHAR(450)` and scope in `NVARCHAR(128)`, with persisted SHA-256 `BINARY(32)`

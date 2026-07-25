@@ -154,6 +154,54 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
     }
 
     [Theory]
+    [InlineData("sqlserver", "target")]
+    [InlineData("sqlserver", "path")]
+    [InlineData("sqlserver", "kind")]
+    [InlineData("postgresql", "target")]
+    [InlineData("postgresql", "path")]
+    [InlineData("postgresql", "kind")]
+    public void Provider_runtime_fingerprint_rejects_altered_assignment_semantics_before_io(
+        string provider,
+        string drift)
+    {
+        var fixture = Create(provider, includeAssignment: true);
+        var manifest = fixture.Model.Manifest;
+        var unit = manifest.StorageUnits.Single();
+        var storage = unit.PhysicalStorage!;
+        var alteredAction = drift switch
+        {
+            "target" => BoundedMutationAction.Assign("priority", "41"),
+            "path" => BoundedMutationAction.Assign("category", "42"),
+            "kind" => BoundedMutationAction.Delete(),
+            _ => throw new ArgumentOutOfRangeException(nameof(drift), drift, null)
+        };
+        var alteredStorage = new StorageUnitPhysicalStorage(
+            storage.ProvisioningMode,
+            storage.Policy,
+            storage.LogicalIndexes,
+            storage.BoundedQueries,
+            storage.NameOverrides,
+            storage.BoundedMutations.Select(mutation => mutation.Identity == "assign-priority"
+                ? new BoundedMutationDeclaration(
+                    mutation.Identity,
+                    mutation.PredicateQueryIdentity,
+                    alteredAction)
+                : mutation).ToArray());
+        var alteredManifest = manifest with
+        {
+            StorageUnits = [unit with { PhysicalStorage = alteredStorage }]
+        };
+
+        Assert.Equal(manifest.Identity, alteredManifest.Identity);
+        Assert.Equal(manifest.Version, alteredManifest.Version);
+        Assert.Throws<ArgumentException>(() => fixture.CreateRuntime(
+            alteredManifest,
+            fixture.Model.Target.Routes.Single(),
+            fixture.Provider));
+        Assert.Equal(0, fixture.ConnectionFactoryCalls());
+    }
+
+    [Theory]
     [InlineData("sqlserver")]
     [InlineData("postgresql")]
     public void Provider_runtime_rejects_another_provider_family_before_io(string provider)
@@ -185,6 +233,20 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
         Assert.Equal(0, fixture.ConnectionFactoryCalls());
     }
 
+    [Theory]
+    [InlineData("sqlserver")]
+    [InlineData("postgresql")]
+    public void Provider_runtime_rejects_an_invalid_fixed_assignment_value_before_io(string provider)
+    {
+        var fixture = Create(provider, includeAssignment: true, assignmentTarget: "not-a-number");
+
+        Assert.Throws<InvalidDataException>(() => fixture.CreateRuntime(
+            fixture.Model.Manifest,
+            fixture.Model.Target.Routes.Single(),
+            fixture.Provider));
+        Assert.Equal(0, fixture.ConnectionFactoryCalls());
+    }
+
     public static IEnumerable<object[]> InvalidTransitionValues()
     {
         foreach (var provider in new[] { "sqlserver", "postgresql" })
@@ -208,7 +270,9 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
         PhysicalStorageForm form = PhysicalStorageForm.PhysicalEntityTable,
         string? transitionField = null,
         string? priorityTransitionSource = null,
-        string? priorityTransitionTarget = null)
+        string? priorityTransitionTarget = null,
+        bool includeAssignment = false,
+        string assignmentTarget = "42")
     {
         var identity = provider switch
         {
@@ -222,23 +286,27 @@ public sealed class RelationalPhysicalMutationRuntimeBindingTests
         var model = RelationalPhysicalStorageTestModels.Create(
             form,
             identity,
-            includePriority: transitionField is not null,
-            priorityType: PortablePhysicalType.Decimal,
-            priorityPrecision: 3,
-            priorityScale: 1,
+            includePriority: transitionField is not null || includeAssignment,
+            priorityType: includeAssignment ? PortablePhysicalType.Int32 : PortablePhysicalType.Decimal,
+            priorityPrecision: includeAssignment ? null : 3,
+            priorityScale: includeAssignment ? null : 1,
             normalizer: normalizer,
-            mutationOptions: new(
-                IncludeCategoryTransition: transitionField is null,
-                IncludeTypedTransitions: transitionField is not null,
-                TypedTransitions: new RelationalTypedTransitionTestOptions(
-                    priorityTransitionSource ?? "1",
-                    priorityTransitionTarget ?? "2",
-                    transitionField is null or "priority"
-                        ? null
-                        : new Dictionary<string, (string Source, string Target)>
-                        {
-                            [transitionField] = (priorityTransitionSource!, priorityTransitionTarget!)
-                        })));
+            mutationOptions: includeAssignment
+                ? new RelationalMutationScenarioOptions(
+                    IncludePriorityAssignment: true,
+                    PriorityAssignmentTarget: assignmentTarget)
+                : new RelationalMutationScenarioOptions(
+                    IncludeCategoryTransition: transitionField is null,
+                    IncludeTypedTransitions: transitionField is not null,
+                    TypedTransitions: new RelationalTypedTransitionTestOptions(
+                        priorityTransitionSource ?? "1",
+                        priorityTransitionTarget ?? "2",
+                        transitionField is null or "priority"
+                            ? null
+                            : new Dictionary<string, (string Source, string Target)>
+                            {
+                                [transitionField] = (priorityTransitionSource!, priorityTransitionTarget!)
+                            })));
         var other = RelationalPhysicalStorageTestModels.Create(
             PhysicalStorageForm.DedicatedDocumentTable,
             identity,

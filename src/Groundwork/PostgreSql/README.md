@@ -2,8 +2,10 @@
 
 `PostgreSqlPhysicalSchemaExecutor`, `PostgreSqlPhysicalDocumentStore`, and
 `PostgreSqlPhysicalQueryRuntime` implement all three compiled physical storage forms.
-`PostgreSqlPhysicalMutationRuntime` executes declared bounded transitions and deletes with exact
-idempotent outcomes. Schema
+`PostgreSqlPhysicalMutationRuntime` executes declared bounded deletes, finite-source transitions,
+and manifest-fixed assignments with exact idempotent outcomes. Assignment uses only its admitted
+selector, overwrites every selected scalar target—including already-target, null, missing, and
+extension-defined values—and returns the exact matched/processed count. Schema
 application uses advisory locks and a transactional operation ledger; document and query operations
 use independent pooled sessions. Portable date-time projections use exact UTC ticks to avoid native
 microsecond rounding, and no client-side query fallback is available.
