@@ -1,23 +1,13 @@
-using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Groundwork.Core.PhysicalStorage;
 
 namespace Groundwork.Core.SchemaEvolution;
 
-/// <summary>The closed lifecycle of a relationship materialization generation transition.</summary>
-public enum RelationshipMaterializationTransitionStage
-{
-    Prepared,
-    Validated,
-    Rejected,
-    Cancelled,
-    Activated
-}
-
 /// <summary>
 /// One exact generated relationship materialization generation. The generation and fingerprint are
-/// captured together from the generated schema so a provider cannot validate or activate a
-/// different physical shape under the same relationship route.
+/// captured together from the generated schema so provider executors can bind durable transition
+/// state to one physical shape.
 /// </summary>
 public sealed class RelationshipMaterializationGeneration : IEquatable<RelationshipMaterializationGeneration>
 {
@@ -52,179 +42,19 @@ public sealed class RelationshipMaterializationGeneration : IEquatable<Relations
 }
 
 /// <summary>
-/// A redacted, deterministic validation failure for a reference whose target does not exist in a
-/// legacy store. It deliberately exposes only the relationship route and a one-way target-key
-/// identity, never the stored reference, target scope, or comparison key.
+/// Describes the exact before/after generations an authoritative provider executor must use for a
+/// transition. This is not durable state, validation evidence, an activation receipt, or admission
+/// authority. The executor that eventually consumes it must own durable revision checks and atomic
+/// compare-and-swap activation.
 /// </summary>
-public sealed class RelationshipMaterializationDanglingReference :
-    IEquatable<RelationshipMaterializationDanglingReference>
+public sealed class RelationshipMaterializationTransitionRequirement
 {
-    public const string DiagnosticCode = "GW-RELATIONSHIP-013";
-
-    private RelationshipMaterializationDanglingReference(
-        RelationshipMaterializationGeneration generation,
-        string targetKeyIdentity)
-    {
-        Generation = generation;
-        RelationshipRouteIdentity = generation.RelationshipIdentity;
-        TargetKeyIdentity = targetKeyIdentity;
-    }
-
-    public RelationshipMaterializationGeneration Generation { get; }
-
-    public string RelationshipRouteIdentity { get; }
-
-    /// <summary>
-    /// A domain-separated SHA-256 identity for the target key. This is stable for the same route,
-    /// generation, materialization, scope, and projected comparison key, but does not contain the
-    /// stored reference value.
-    /// </summary>
-    public string TargetKeyIdentity { get; }
-
-    public string Message =>
-        $"{DiagnosticCode}: Relationship route '{RelationshipRouteIdentity}' has a legacy dangling reference at target key '{TargetKeyIdentity}'.";
-
-    public static RelationshipMaterializationDanglingReference Create(
-        RelationshipMaterializationGeneration generation,
-        string targetScope,
-        string targetComparisonKey)
-    {
-        ArgumentNullException.ThrowIfNull(generation);
-        ArgumentException.ThrowIfNullOrWhiteSpace(targetScope);
-        ArgumentException.ThrowIfNullOrWhiteSpace(targetComparisonKey);
-        var canonical = string.Concat(
-            "groundwork.relationship.dangling-reference.v1\u001e",
-            generation.RelationshipIdentity, "\u001e",
-            generation.GenerationIdentity, "\u001e",
-            generation.MaterializationFingerprint, "\u001e",
-            targetScope, "\u001e",
-            targetComparisonKey);
-        var targetKeyIdentity = "sha256:" + Convert.ToHexString(
-            SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
-        return new RelationshipMaterializationDanglingReference(generation, targetKeyIdentity);
-    }
-
-    public bool Equals(RelationshipMaterializationDanglingReference? other) =>
-        other is not null &&
-        Equals(Generation, other.Generation) &&
-        string.Equals(TargetKeyIdentity, other.TargetKeyIdentity, StringComparison.Ordinal);
-
-    public override bool Equals(object? obj) => Equals(obj as RelationshipMaterializationDanglingReference);
-
-    public override int GetHashCode() => HashCode.Combine(Generation, StringComparer.Ordinal.GetHashCode(TargetKeyIdentity));
-}
-
-/// <summary>
-/// Immutable validation evidence for one exact candidate generation. A successful result means a
-/// provider has finished its complete backfill and validation; a failed result currently records
-/// legacy dangling references, which must block cutover.
-/// </summary>
-public sealed class RelationshipMaterializationValidationEvidence
-{
-    private RelationshipMaterializationValidationEvidence(
-        RelationshipMaterializationGeneration generation,
-        IReadOnlyList<RelationshipMaterializationDanglingReference> danglingReferences)
-    {
-        Generation = generation ?? throw new ArgumentNullException(nameof(generation));
-        DanglingReferences = Array.AsReadOnly((danglingReferences ?? throw new ArgumentNullException(nameof(danglingReferences)))
-            .OrderBy(reference => reference.TargetKeyIdentity, StringComparer.Ordinal)
-            .ToArray());
-        if (DanglingReferences.Any(reference => !Equals(reference.Generation, generation)))
-        {
-            throw new ArgumentException(
-                "Relationship materialization validation evidence must bind one exact candidate generation.",
-                nameof(danglingReferences));
-        }
-    }
-
-    public RelationshipMaterializationGeneration Generation { get; }
-
-    public IReadOnlyList<RelationshipMaterializationDanglingReference> DanglingReferences { get; }
-
-    public bool IsValid => DanglingReferences.Count == 0;
-
-    public static RelationshipMaterializationValidationEvidence Succeeded(
-        RelationshipMaterializationGeneration generation) =>
-        new(generation, []);
-
-    public static RelationshipMaterializationValidationEvidence Failed(
-        RelationshipMaterializationGeneration generation,
-        IReadOnlyList<RelationshipMaterializationDanglingReference> danglingReferences)
-    {
-        ArgumentNullException.ThrowIfNull(danglingReferences);
-        if (danglingReferences.Count == 0)
-            throw new ArgumentException(
-                "Failed relationship materialization validation requires at least one diagnostic.",
-                nameof(danglingReferences));
-        return new RelationshipMaterializationValidationEvidence(generation, danglingReferences);
-    }
-}
-
-/// <summary>
-/// Raised when a caller tries to activate a candidate rejected by complete validation. The stable,
-/// redacted diagnostics are retained so operators can identify and repair the legacy data without
-/// exposing stored reference values.
-/// </summary>
-public sealed class RelationshipMaterializationTransitionRejectedException : InvalidOperationException
-{
-    public RelationshipMaterializationTransitionRejectedException(
-        RelationshipMaterializationValidationEvidence evidence)
-        : base(CreateMessage(evidence)) => Evidence = evidence;
-
-    public RelationshipMaterializationValidationEvidence Evidence { get; }
-
-    private static string CreateMessage(RelationshipMaterializationValidationEvidence evidence)
-    {
-        ArgumentNullException.ThrowIfNull(evidence);
-        if (evidence.IsValid)
-            throw new ArgumentException(
-                "A successful relationship materialization validation cannot reject cutover.",
-                nameof(evidence));
-        return string.Join("; ", evidence.DanglingReferences.Select(reference => reference.Message));
-    }
-}
-
-/// <summary>
-/// An immutable, provider-neutral transition for one existing relationship materialization. It is
-/// only a contract for provider executors: it neither admits a provider nor performs schema or
-/// document I/O. A new generation cannot become active until complete evidence for that exact
-/// generation validates successfully.
-/// </summary>
-public sealed class RelationshipMaterializationTransition
-{
-    private RelationshipMaterializationTransition(
-        RelationshipMaterializationGeneration activeGeneration,
-        RelationshipMaterializationGeneration candidateGeneration,
-        RelationshipMaterializationTransitionStage stage,
-        RelationshipMaterializationValidationEvidence? validationEvidence,
-        RelationshipMaterializationGeneration? previousGeneration)
-    {
-        ActiveGeneration = activeGeneration;
-        CandidateGeneration = candidateGeneration;
-        Stage = stage;
-        ValidationEvidence = validationEvidence;
-        PreviousGeneration = previousGeneration;
-    }
-
-    /// <summary>The generation serving ordinary relationship checks at this lifecycle point.</summary>
-    public RelationshipMaterializationGeneration ActiveGeneration { get; }
-
-    /// <summary>The independently materialized generation proposed for future activation.</summary>
-    public RelationshipMaterializationGeneration CandidateGeneration { get; }
-
-    public RelationshipMaterializationTransitionStage Stage { get; }
-
-    public RelationshipMaterializationValidationEvidence? ValidationEvidence { get; }
-
-    /// <summary>The generation replaced by a successful cutover, retained as transition evidence.</summary>
-    public RelationshipMaterializationGeneration? PreviousGeneration { get; }
-
-    public static RelationshipMaterializationTransition Prepare(
+    public RelationshipMaterializationTransitionRequirement(
         RelationshipMaterializationGeneration activeGeneration,
         RelationshipMaterializationGeneration candidateGeneration)
     {
-        ArgumentNullException.ThrowIfNull(activeGeneration);
-        ArgumentNullException.ThrowIfNull(candidateGeneration);
+        ActiveGeneration = activeGeneration ?? throw new ArgumentNullException(nameof(activeGeneration));
+        CandidateGeneration = candidateGeneration ?? throw new ArgumentNullException(nameof(candidateGeneration));
         if (!string.Equals(
                 activeGeneration.RelationshipIdentity,
                 candidateGeneration.RelationshipIdentity,
@@ -243,80 +73,129 @@ public sealed class RelationshipMaterializationTransition
                 "Relationship materialization transitions require a new generation identity.",
                 nameof(candidateGeneration));
         }
-
-        return new RelationshipMaterializationTransition(
-            activeGeneration,
-            candidateGeneration,
-            RelationshipMaterializationTransitionStage.Prepared,
-            null,
-            null);
     }
 
-    /// <summary>
-    /// Records the outcome of the candidate's complete backfill validation. The active generation
-    /// is intentionally unchanged for both valid and rejected evidence.
-    /// </summary>
-    public RelationshipMaterializationTransition CompleteValidation(
-        RelationshipMaterializationValidationEvidence evidence)
+    public RelationshipMaterializationGeneration ActiveGeneration { get; }
+
+    public RelationshipMaterializationGeneration CandidateGeneration { get; }
+}
+
+/// <summary>
+/// A provider-supplied opaque identity used to correlate one target key across deterministic
+/// dangling-reference diagnostics. The closed format carries an HMAC-SHA-256 result only; providers
+/// must derive it with a stable provider-owned secret over a domain-separated, unambiguously framed
+/// tuple of relationship route, generation, materialization fingerprint, target scope, and target
+/// comparison key. Providers must never pass raw values or unkeyed digests. Core validates the
+/// closed format only; the authoritative provider executor owns derivation and secret handling.
+/// </summary>
+public sealed class RelationshipMaterializationKeyCorrelationIdentity :
+    IEquatable<RelationshipMaterializationKeyCorrelationIdentity>
+{
+    public const string Scheme = "hmac-sha256-v1:";
+    private const int DigestLength = 64;
+
+    public RelationshipMaterializationKeyCorrelationIdentity(string value)
     {
-        ArgumentNullException.ThrowIfNull(evidence);
-        RequireStage(RelationshipMaterializationTransitionStage.Prepared, "complete validation");
-        if (!Equals(CandidateGeneration, evidence.Generation))
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+        if (value.Length != Scheme.Length + DigestLength ||
+            !value.StartsWith(Scheme, StringComparison.Ordinal) ||
+            !value.AsSpan(Scheme.Length).ContainsOnlyLowercaseHex())
         {
             throw new ArgumentException(
-                "Relationship materialization validation evidence does not bind the exact candidate generation and fingerprint.",
-                nameof(evidence));
+                $"A relationship key correlation identity must use '{Scheme}' followed by exactly {DigestLength} lowercase hexadecimal characters.",
+                nameof(value));
         }
 
-        return new RelationshipMaterializationTransition(
-            ActiveGeneration,
-            CandidateGeneration,
-            evidence.IsValid
-                ? RelationshipMaterializationTransitionStage.Validated
-                : RelationshipMaterializationTransitionStage.Rejected,
-            evidence,
-            null);
+        Value = value;
     }
 
-    /// <summary>
-    /// Records cancellation before cutover. Because instances are immutable, cancellation cannot
-    /// alter the generation that remains active for ordinary relationship maintenance.
-    /// </summary>
-    public RelationshipMaterializationTransition Cancel()
+    public string Value { get; }
+
+    public bool Equals(RelationshipMaterializationKeyCorrelationIdentity? other) =>
+        other is not null &&
+        string.Equals(Value, other.Value, StringComparison.Ordinal);
+
+    public override bool Equals(object? obj) => Equals(obj as RelationshipMaterializationKeyCorrelationIdentity);
+
+    public override int GetHashCode() => StringComparer.Ordinal.GetHashCode(Value);
+
+    public override string ToString() => Value;
+}
+
+/// <summary>
+/// A stable diagnostic for a legacy reference whose target does not exist. It exposes only the
+/// manifest-owned relationship route, exact candidate generation/fingerprint, and a provider-owned
+/// keyed correlation identity. Stored reference values, scopes, and comparison keys are absent.
+/// </summary>
+public sealed class RelationshipMaterializationDanglingReference :
+    IEquatable<RelationshipMaterializationDanglingReference>
+{
+    public const string DiagnosticCode = "GW-RELATIONSHIP-013";
+
+    public RelationshipMaterializationDanglingReference(
+        RelationshipMaterializationGeneration generation,
+        RelationshipMaterializationKeyCorrelationIdentity targetKeyCorrelationIdentity)
     {
-        RequireStage(RelationshipMaterializationTransitionStage.Prepared, "cancel");
-        return new RelationshipMaterializationTransition(
-            ActiveGeneration,
-            CandidateGeneration,
-            RelationshipMaterializationTransitionStage.Cancelled,
-            null,
-            null);
+        Generation = generation ?? throw new ArgumentNullException(nameof(generation));
+        TargetKeyCorrelationIdentity = targetKeyCorrelationIdentity ??
+            throw new ArgumentNullException(nameof(targetKeyCorrelationIdentity));
+        RelationshipRouteIdentity = generation.RelationshipIdentity;
+        CanonicalJson = SerializeCanonical(this);
     }
 
-    /// <summary>
-    /// Atomically advances the contract to the validated candidate. Provider executors must make
-    /// their physical activation match this state change; rejected or incomplete candidates cannot
-    /// call this method.
-    /// </summary>
-    public RelationshipMaterializationTransition CutOver()
-    {
-        if (Stage == RelationshipMaterializationTransitionStage.Rejected)
-            throw new RelationshipMaterializationTransitionRejectedException(ValidationEvidence!);
-        RequireStage(RelationshipMaterializationTransitionStage.Validated, "cut over");
-        return new RelationshipMaterializationTransition(
-            CandidateGeneration,
-            CandidateGeneration,
-            RelationshipMaterializationTransitionStage.Activated,
-            ValidationEvidence,
-            ActiveGeneration);
-    }
+    public RelationshipMaterializationGeneration Generation { get; }
 
-    private void RequireStage(RelationshipMaterializationTransitionStage expected, string operation)
+    public string RelationshipRouteIdentity { get; }
+
+    public RelationshipMaterializationKeyCorrelationIdentity TargetKeyCorrelationIdentity { get; }
+
+    /// <summary>Canonical, unambiguously framed diagnostic payload for durable evidence.</summary>
+    public string CanonicalJson { get; }
+
+    public string Message => $"{DiagnosticCode}: {CanonicalJson}";
+
+    public bool Equals(RelationshipMaterializationDanglingReference? other) =>
+        other is not null &&
+        Equals(Generation, other.Generation) &&
+        Equals(TargetKeyCorrelationIdentity, other.TargetKeyCorrelationIdentity);
+
+    public override bool Equals(object? obj) => Equals(obj as RelationshipMaterializationDanglingReference);
+
+    public override int GetHashCode() => HashCode.Combine(Generation, TargetKeyCorrelationIdentity);
+
+    private static string SerializeCanonical(RelationshipMaterializationDanglingReference diagnostic)
     {
-        if (Stage != expected)
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
         {
-            throw new InvalidOperationException(
-                $"Relationship materialization transition cannot {operation} while in '{Stage}' state; '{expected}' is required.");
+            writer.WriteStartObject();
+            writer.WriteNumber("schemaVersion", 1);
+            writer.WriteString("code", DiagnosticCode);
+            writer.WriteString("relationshipRoute", diagnostic.RelationshipRouteIdentity);
+            writer.WriteString("generation", diagnostic.Generation.GenerationIdentity);
+            writer.WriteString(
+                "materializationFingerprint",
+                diagnostic.Generation.MaterializationFingerprint);
+            writer.WriteString(
+                "targetKeyCorrelationIdentity",
+                diagnostic.TargetKeyCorrelationIdentity.Value);
+            writer.WriteEndObject();
         }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+}
+
+internal static class RelationshipMaterializationKeyCorrelationIdentityFormat
+{
+    public static bool ContainsOnlyLowercaseHex(this ReadOnlySpan<char> value)
+    {
+        foreach (var character in value)
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+                return false;
+        }
+
+        return true;
     }
 }

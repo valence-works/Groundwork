@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Xunit;
@@ -7,123 +8,121 @@ namespace Groundwork.Tests;
 public sealed class RelationshipMaterializationTransitionTests
 {
     [Fact]
-    public void Complete_validation_keeps_the_previous_generation_active_until_atomic_cutover()
+    public void Transition_requirement_binds_exact_before_and_after_generations_without_activating_them()
     {
         var active = Generation("generation-active");
         var candidate = Generation("generation-candidate");
 
-        var prepared = RelationshipMaterializationTransition.Prepare(active, candidate);
-        var validated = prepared.CompleteValidation(
-            RelationshipMaterializationValidationEvidence.Succeeded(candidate));
-        var activated = validated.CutOver();
+        var requirement = new RelationshipMaterializationTransitionRequirement(active, candidate);
 
-        Assert.Equal(RelationshipMaterializationTransitionStage.Prepared, prepared.Stage);
-        Assert.Same(active, prepared.ActiveGeneration);
-        Assert.Equal(RelationshipMaterializationTransitionStage.Validated, validated.Stage);
-        Assert.Same(active, validated.ActiveGeneration);
-        Assert.Null(validated.PreviousGeneration);
-        Assert.Equal(RelationshipMaterializationTransitionStage.Activated, activated.Stage);
-        Assert.Same(candidate, activated.ActiveGeneration);
-        Assert.Same(active, activated.PreviousGeneration);
-        Assert.Same(candidate, activated.CandidateGeneration);
-    }
-
-    [Fact]
-    public void Failed_or_cancelled_validation_never_activates_the_candidate_generation()
-    {
-        var active = Generation("generation-active");
-        var candidate = Generation("generation-candidate");
-        var prepared = RelationshipMaterializationTransition.Prepare(active, candidate);
-        var dangling = RelationshipMaterializationDanglingReference.Create(
-            candidate,
-            "tenant-a",
-            "comparison-key-for-secret-reference");
-
-        var rejected = prepared.CompleteValidation(
-            RelationshipMaterializationValidationEvidence.Failed(candidate, [dangling]));
-        var cancelled = RelationshipMaterializationTransition.Prepare(active, candidate).Cancel();
-
-        Assert.Equal(RelationshipMaterializationTransitionStage.Rejected, rejected.Stage);
-        Assert.Same(active, rejected.ActiveGeneration);
-        Assert.Same(candidate, rejected.CandidateGeneration);
-        var cutover = Assert.Throws<RelationshipMaterializationTransitionRejectedException>(() => rejected.CutOver());
-        Assert.Same(rejected.ValidationEvidence, cutover.Evidence);
-        Assert.Contains(RelationshipMaterializationDanglingReference.DiagnosticCode, cutover.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("tenant-a", cutover.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("comparison-key-for-secret-reference", cutover.Message, StringComparison.Ordinal);
-        Assert.Equal(RelationshipMaterializationTransitionStage.Cancelled, cancelled.Stage);
-        Assert.Same(active, cancelled.ActiveGeneration);
-        Assert.Throws<InvalidOperationException>(() => cancelled.CutOver());
-    }
-
-    [Fact]
-    public void Dangling_reference_diagnostic_is_stable_and_redacts_stored_values()
-    {
-        var candidate = Generation("generation-candidate");
-        const string targetScope = "tenant-a";
-        const string storedReference = "top-secret-reference-value";
-
-        var first = RelationshipMaterializationDanglingReference.Create(
-            candidate,
-            targetScope,
-            storedReference);
-        var same = RelationshipMaterializationDanglingReference.Create(
-            candidate,
-            targetScope,
-            storedReference);
-
-        Assert.Equal(RelationshipMaterializationDanglingReference.DiagnosticCode, first.Message[..19]);
-        Assert.Equal(candidate.RelationshipIdentity, first.RelationshipRouteIdentity);
-        Assert.Equal(first, same);
-        Assert.StartsWith("sha256:", first.TargetKeyIdentity, StringComparison.Ordinal);
-        Assert.DoesNotContain(targetScope, first.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(storedReference, first.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(targetScope, first.TargetKeyIdentity, StringComparison.Ordinal);
-        Assert.DoesNotContain(storedReference, first.TargetKeyIdentity, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Validation_evidence_with_a_different_generation_or_fingerprint_is_rejected_before_cutover()
-    {
-        var active = Generation("generation-active");
-        var candidate = Generation("generation-candidate");
-        var prepared = RelationshipMaterializationTransition.Prepare(active, candidate);
-        var differentGeneration = Generation("generation-other");
-        var sameGenerationDifferentFingerprint = Generation(
-            "generation-candidate",
-            targetAccessPathIdentity: "reference-by-target-altered");
-        var wrongGenerationDiagnostic = RelationshipMaterializationDanglingReference.Create(
-            differentGeneration,
-            "tenant-a",
-            "comparison-key-for-secret-reference");
-
-        Assert.Throws<ArgumentException>(() => RelationshipMaterializationValidationEvidence.Failed(
-            candidate,
-            [wrongGenerationDiagnostic]));
-        Assert.Throws<ArgumentException>(() => prepared.CompleteValidation(
-            RelationshipMaterializationValidationEvidence.Succeeded(differentGeneration)));
-        Assert.Throws<ArgumentException>(() => prepared.CompleteValidation(
-            RelationshipMaterializationValidationEvidence.Succeeded(sameGenerationDifferentFingerprint)));
-        Assert.Same(active, prepared.ActiveGeneration);
-        Assert.Equal(RelationshipMaterializationTransitionStage.Prepared, prepared.Stage);
-    }
-
-    [Fact]
-    public void Illegal_lifecycle_transitions_are_rejected_and_candidate_generation_must_change()
-    {
-        var active = Generation("generation-active");
-        var candidate = Generation("generation-candidate");
-        var prepared = RelationshipMaterializationTransition.Prepare(active, candidate);
-
-        Assert.Throws<InvalidOperationException>(() => prepared.CutOver());
-        Assert.Throws<ArgumentException>(() => RelationshipMaterializationTransition.Prepare(
+        Assert.Same(active, requirement.ActiveGeneration);
+        Assert.Same(candidate, requirement.CandidateGeneration);
+        Assert.Throws<ArgumentException>(() => new RelationshipMaterializationTransitionRequirement(
             active,
             Generation("generation-active", targetAccessPathIdentity: "different-shape")));
+        Assert.Throws<ArgumentException>(() => new RelationshipMaterializationTransitionRequirement(
+            active,
+            Generation("generation-candidate", relationshipIdentity: "different-route")));
     }
+
+    [Fact]
+    public void Dangling_reference_diagnostic_uses_provider_keyed_identity_and_canonical_framing()
+    {
+        var candidate = Generation("generation-candidate");
+        var targetKey = KeyCorrelationIdentity('a');
+
+        var first = new RelationshipMaterializationDanglingReference(candidate, targetKey);
+        var same = new RelationshipMaterializationDanglingReference(
+            candidate,
+            new RelationshipMaterializationKeyCorrelationIdentity(targetKey.Value));
+
+        Assert.Equal(first, same);
+        Assert.Equal(first.CanonicalJson, same.CanonicalJson);
+        Assert.Equal(candidate.RelationshipIdentity, first.RelationshipRouteIdentity);
+        using var document = JsonDocument.Parse(first.CanonicalJson);
+        var root = document.RootElement;
+        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(RelationshipMaterializationDanglingReference.DiagnosticCode, root.GetProperty("code").GetString());
+        Assert.Equal(candidate.RelationshipIdentity, root.GetProperty("relationshipRoute").GetString());
+        Assert.Equal(candidate.GenerationIdentity, root.GetProperty("generation").GetString());
+        Assert.Equal(candidate.MaterializationFingerprint, root.GetProperty("materializationFingerprint").GetString());
+        Assert.Equal(targetKey.Value, root.GetProperty("targetKeyCorrelationIdentity").GetString());
+    }
+
+    [Fact]
+    public void Low_entropy_raw_unkeyed_and_delimiter_bearing_key_values_are_rejected()
+    {
+        var invalid = new[]
+        {
+            "1",
+            "secret",
+            "sha256:" + new string('a', 64),
+            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63),
+            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('A', 64),
+            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63) + ":",
+            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63) + "\u001e",
+            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63) + "\n"
+        };
+
+        Assert.All(invalid, value =>
+            Assert.Throws<ArgumentException>(() =>
+                new RelationshipMaterializationKeyCorrelationIdentity(value)));
+    }
+
+    [Fact]
+    public void Canonical_diagnostic_framing_preserves_route_delimiters_without_aliasing()
+    {
+        const string delimiterBearingRoute = "token\u001e\"authorization\nroute";
+        var delimited = new RelationshipMaterializationDanglingReference(
+            Generation("generation-candidate", relationshipIdentity: delimiterBearingRoute),
+            KeyCorrelationIdentity('b'));
+        var ordinary = new RelationshipMaterializationDanglingReference(
+            Generation("generation-candidate", relationshipIdentity: "token"),
+            KeyCorrelationIdentity('b'));
+
+        Assert.NotEqual(delimited.CanonicalJson, ordinary.CanonicalJson);
+        using var document = JsonDocument.Parse(delimited.CanonicalJson);
+        Assert.Equal(
+            delimiterBearingRoute,
+            document.RootElement.GetProperty("relationshipRoute").GetString());
+        Assert.DoesNotContain("\n", delimited.CanonicalJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u001e", delimited.CanonicalJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Public_transition_contract_exposes_no_success_receipt_or_activation_authority()
+    {
+        var transitionTypes = typeof(RelationshipMaterializationTransitionRequirement).Assembly
+            .GetExportedTypes()
+            .Where(type =>
+                type.Namespace == typeof(RelationshipMaterializationTransitionRequirement).Namespace &&
+                type.Name.StartsWith("RelationshipMaterialization", StringComparison.Ordinal))
+            .ToArray();
+        var forbiddenMethods = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Succeeded",
+            "CompleteValidation",
+            "Activate",
+            "CutOver",
+            "Cancel"
+        };
+
+        Assert.DoesNotContain(
+            transitionTypes.SelectMany(type => type.GetMethods()),
+            method => forbiddenMethods.Contains(method.Name));
+        Assert.DoesNotContain(
+            transitionTypes,
+            type => type.Name.Contains("ValidationEvidence", StringComparison.Ordinal) ||
+                    type.Name.Contains("TransitionStage", StringComparison.Ordinal));
+    }
+
+    private static RelationshipMaterializationKeyCorrelationIdentity KeyCorrelationIdentity(char value) =>
+        new(RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string(value, 64));
 
     private static RelationshipMaterializationGeneration Generation(
         string generationIdentity,
-        string targetAccessPathIdentity = "reference-by-target")
+        string targetAccessPathIdentity = "reference-by-target",
+        string relationshipIdentity = "token-authorization")
     {
         var reference = new PhysicalRelationshipReferenceMaterializationSchema(
             generationIdentity,
@@ -159,7 +158,7 @@ public sealed class RelationshipMaterializationTransitionTests
                     PhysicalRelationshipSidecarField.TargetComparisonKey
                 ]));
         return new RelationshipMaterializationGeneration(new PhysicalRelationshipMaterializationSchema(
-            "token-authorization",
+            relationshipIdentity,
             generationIdentity,
             reference,
             fence));
