@@ -234,7 +234,11 @@ public static class MongoDbPhysicalMutationRuntime
             ?? throw new InvalidOperationException(
                 $"Storage unit '{route.StorageUnit.Value}' has no physical mutation declarations.");
         var capabilities = store.GetMutationCapabilities(route, storage);
-        var compilation = PhysicalMutationPlanCompiler.Compile(route, storage, capabilities);
+        var compilation = PhysicalMutationPlanCompiler.Compile(
+            route,
+            storage,
+            capabilities,
+            supportsAtomicCollectionMaintenance: true);
         if (!compilation.IsValid)
         {
             throw new InvalidOperationException(string.Join(

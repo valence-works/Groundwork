@@ -110,6 +110,8 @@ public sealed class SqlitePhysicalDocumentStore : RelationalPhysicalDocumentStor
 
 internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocumentDialect
 {
+    public override bool SupportsAtomicCollectionMutationMaintenance => true;
+
     private const int ConstraintPrimaryKey = 1555;
     private const int ConstraintUnique = 2067;
 

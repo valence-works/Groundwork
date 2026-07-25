@@ -109,6 +109,9 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
 
     public IReadOnlyList<PhysicalMutationHandlerCertification> Certifications { get; }
 
+    public bool SupportsAtomicCollectionMaintenance =>
+        store.SupportsAtomicCollectionMutationMaintenance;
+
     public bool SupportsCompoundPredicates => true;
 
     public bool SupportsDisjunction => true;

@@ -81,6 +81,7 @@ public abstract class RelationalPhysicalDocumentDialect
     }
 
     public virtual ProviderIdentity? PhysicalSchemaProvider => null;
+    public virtual bool SupportsAtomicCollectionMutationMaintenance => false;
     public virtual string PhysicalSchemaAppliedStatePredicate =>
         "manifest_id = @manifestId AND provider_name = @providerName";
 
@@ -240,11 +241,8 @@ public abstract class RelationalPhysicalDocumentDialect
         string selectionTableExpression,
         IReadOnlyList<RelationalPhysicalIdentityJoinPart> exactIdentity,
         IReadOnlyList<RelationalPhysicalIdentityJoinPart> ownerKeyPrefix) =>
-        DeleteByMutationSelection(
-            tableExpression,
-            alias,
-            selectionTableExpression,
-            RenderIdentityJoin(exactIdentity));
+        throw new NotSupportedException(
+            $"Relational dialect '{GetType().Name}' has not certified atomic indexed collection maintenance.");
 
     /// <summary>Renders a retained-column identity join for provider-specific mutation DML.</summary>
     protected string RenderIdentityJoin(
@@ -869,6 +867,8 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
     internal string JsonValue(string expression, string path) => dialect.JsonValue(expression, path);
     internal string SetJsonValue(string expression, string pathParameter, string valueParameter) =>
         dialect.SetJsonValue(expression, pathParameter, valueParameter);
+    internal bool SupportsAtomicCollectionMutationMaintenance =>
+        dialect.SupportsAtomicCollectionMutationMaintenance;
     internal object ConvertMutationJsonPath(string stablePath) =>
         dialect.ConvertMutationJsonPath(stablePath);
     internal object ConvertMutationJsonValue(string value, Groundwork.Core.Indexing.IndexValueKind valueKind) =>

@@ -79,6 +79,8 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
 
     public IReadOnlyList<PhysicalMutationHandlerCertification> Certifications { get; }
 
+    public bool SupportsAtomicCollectionMaintenance => true;
+
     public bool SupportsCompoundPredicates => true;
 
     public bool SupportsDisjunction => true;

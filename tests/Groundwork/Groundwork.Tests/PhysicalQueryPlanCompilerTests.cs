@@ -2354,7 +2354,8 @@ public sealed class PhysicalQueryPlanCompilerTests
         var result = PhysicalMutationPlanCompiler.Compile(
             fixture.Route,
             fixture.Storage,
-            Capabilities(PhysicalQuerySourceKind.CollectionElements));
+            Capabilities(PhysicalQuerySourceKind.CollectionElements),
+            supportsAtomicCollectionMaintenance: true);
 
         Assert.False(result.IsValid);
         Assert.Empty(result.Plans);
@@ -2364,7 +2365,7 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void CollectionBearingRouteAdmitsScalarSelectedBoundedDeletionForAtomicProviderMaintenance()
+    public void CollectionBearingRouteRequiresProviderCertificationAndAdmitsCertifiedScalarDeletion()
     {
         var categoryIndex = new LogicalIndexDeclaration(
             "by-category",
@@ -2415,12 +2416,22 @@ public sealed class PhysicalQueryPlanCompilerTests
             ]);
         var fixture = Resolve(storage, null);
 
-        var result = PhysicalMutationPlanCompiler.Compile(
+        var uncertified = PhysicalMutationPlanCompiler.Compile(
             fixture.Route,
             fixture.Storage,
             Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns),
+            supportsAtomicCollectionMaintenance: true);
 
         Assert.NotEmpty(fixture.Route.CollectionElementStorages);
+        Assert.False(uncertified.IsValid);
+        Assert.Empty(uncertified.Plans);
+        Assert.Contains(uncertified.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-MUTATION-007" &&
+            diagnostic.Message.Contains("provider has not certified", StringComparison.Ordinal));
         Assert.True(result.IsValid, string.Join(Environment.NewLine, result.Diagnostics.Select(diagnostic => diagnostic.Message)));
         var plan = Assert.Single(result.Plans);
         Assert.Equal("delete-by-category", plan.MutationIdentity);

@@ -64,6 +64,8 @@ public sealed class PostgreSqlPhysicalDocumentStore : RelationalPhysicalDocument
 
 internal sealed class PostgreSqlPhysicalDocumentDialect : RelationalPhysicalDocumentDialect
 {
+    public override bool SupportsAtomicCollectionMutationMaintenance => true;
+
     public override ProviderIdentity PhysicalSchemaProvider => PostgreSqlGroundworkCapabilities.Provider;
     public override int MaxParameters => 65535;
     public override string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";

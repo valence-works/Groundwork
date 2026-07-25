@@ -54,7 +54,8 @@ public static class PhysicalMutationPlanCompiler
     public static PhysicalMutationPlanCompilationResult Compile(
         ExecutableStorageRoute route,
         StorageUnitPhysicalStorage storage,
-        PhysicalQueryPlannerCapabilities predicateCapabilities)
+        PhysicalQueryPlannerCapabilities predicateCapabilities,
+        bool supportsAtomicCollectionMaintenance = false)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(storage);
@@ -62,6 +63,18 @@ public static class PhysicalMutationPlanCompiler
 
         if (storage.BoundedMutations.Count == 0)
             return new([], []);
+
+        if (route.CollectionElementStorages.Count != 0 && !supportsAtomicCollectionMaintenance)
+        {
+            return new(
+                [],
+                storage.BoundedMutations.Select(mutation => GroundworkDiagnostic.Error(
+                    "GW-MUTATION-007",
+                    $"Bounded mutation '{mutation.Identity}' targets a route with collection elements, " +
+                    "but the provider has not certified atomic owner-and-element maintenance.",
+                    $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"))
+                    .ToArray());
+        }
 
         var predicateQueryIdentities = storage.BoundedMutations
             .Select(mutation => mutation.PredicateQueryIdentity)

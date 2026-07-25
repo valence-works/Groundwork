@@ -94,6 +94,8 @@ public sealed class SqlServerPhysicalDocumentStore : RelationalPhysicalDocumentS
 
 internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocumentDialect
 {
+    public override bool SupportsAtomicCollectionMutationMaintenance => true;
+
     private readonly SqlServerPhysicalIdentity identity;
     private readonly SqlServerPhysicalIdentityHash hash;
 
