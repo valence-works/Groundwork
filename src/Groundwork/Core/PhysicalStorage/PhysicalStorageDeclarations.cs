@@ -2,6 +2,7 @@ using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Queries;
 using System.Collections.Frozen;
+using System.Text.Json.Serialization;
 
 namespace Groundwork.Core.PhysicalStorage;
 
@@ -124,10 +125,15 @@ public sealed record StorageUnitPhysicalStorage
 public enum BoundedMutationActionKind
 {
     Transition,
-    Delete
+    Delete,
+    Assign
 }
 
 /// <summary>A fixed mutation effect selected by manifest code rather than runtime callers.</summary>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "$action")]
+[JsonDerivedType(typeof(BoundedDeleteMutationAction), "delete")]
+[JsonDerivedType(typeof(BoundedAssignMutationAction), "assign")]
+[JsonDerivedType(typeof(BoundedTransitionMutationAction), "transition")]
 public abstract class BoundedMutationAction : IEquatable<BoundedMutationAction>
 {
     protected BoundedMutationAction(BoundedMutationActionKind kind) => Kind = kind;
@@ -135,6 +141,9 @@ public abstract class BoundedMutationAction : IEquatable<BoundedMutationAction>
     public BoundedMutationActionKind Kind { get; }
 
     public static BoundedMutationAction Delete() => new BoundedDeleteMutationAction();
+
+    public static BoundedMutationAction Assign(string path, string targetValue) =>
+        new BoundedAssignMutationAction(path, targetValue);
 
     public static BoundedMutationAction Transition(
         string path,
@@ -155,6 +164,33 @@ public sealed class BoundedDeleteMutationAction() : BoundedMutationAction(Bounde
     public override bool Equals(BoundedMutationAction? other) => other is BoundedDeleteMutationAction;
 
     public override int GetHashCode() => (int)Kind;
+}
+
+/// <summary>Assigns one manifest-fixed scalar content field on every selected document.</summary>
+public sealed class BoundedAssignMutationAction : BoundedMutationAction
+{
+    public BoundedAssignMutationAction(string path, string targetValue)
+        : base(BoundedMutationActionKind.Assign)
+    {
+        Path = string.IsNullOrWhiteSpace(path)
+            ? throw new ArgumentException("An assignment stable path is required.", nameof(path))
+            : path;
+        TargetValue = string.IsNullOrWhiteSpace(targetValue)
+            ? throw new ArgumentException("An assignment target value is required.", nameof(targetValue))
+            : targetValue;
+    }
+
+    public string Path { get; }
+
+    public string TargetValue { get; }
+
+    public override bool Equals(BoundedMutationAction? other) =>
+        other is BoundedAssignMutationAction assignment &&
+        Path == assignment.Path &&
+        TargetValue == assignment.TargetValue;
+
+    public override int GetHashCode() =>
+        HashCode.Combine(Kind, StringComparer.Ordinal.GetHashCode(Path), StringComparer.Ordinal.GetHashCode(TargetValue));
 }
 
 /// <summary>Changes one stable field only from the declared source values to one declared target.</summary>

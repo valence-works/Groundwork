@@ -24,17 +24,29 @@ public sealed class SqliteBoundedMutationTests
         Assert.False(typeof(RelationalPhysicalDocumentMutationHandler).IsPublic);
     }
 
-    [Fact]
-    public async Task Public_runtime_explains_the_admitted_mutation_with_observed_native_index_evidence()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Public_runtime_explains_the_admitted_mutation_with_observed_native_index_evidence(
+        bool assignment)
     {
         await using var fixture = await CreateAsync();
-        await fixture.SaveAsync("evidence-target", "stale");
-        var request = Delete("native-evidence", "stale");
+        var request = assignment
+            ? AssignPriority("assignment-native-evidence", "assignment-evidence")
+            : Delete("native-evidence", "stale");
+        if (assignment)
+            await fixture.SaveJsonAsync("evidence-target", """{"category":"assignment-evidence","priority":7}""");
+        else
+            await fixture.SaveAsync("evidence-target", "stale");
         var mutations = Assert.IsAssignableFrom<IPhysicalDocumentMutationExplainer>(fixture.Mutations);
 
         var plan = mutations.ResolvePlan(request);
         var evidence = await mutations.ExplainAsync(request);
 
+        if (assignment)
+            Assert.IsType<PhysicalAssignMutationAction>(plan.Action);
+        else
+            Assert.IsType<PhysicalDeleteMutationAction>(plan.Action);
         Assert.Equal(plan, evidence.Plan);
         Assert.Equal(
             [
@@ -78,6 +90,12 @@ public sealed class SqliteBoundedMutationTests
                 command.RenderedCommand!,
                 command.PreparedRestrictionRowCount)),
             executed);
+        if (assignment)
+        {
+            Assert.Equal(
+                42,
+                Priority((await fixture.Documents.LoadAsync(DocumentKind, "evidence-target"))!.ContentJson));
+        }
     }
 
     [Theory]
@@ -164,6 +182,74 @@ public sealed class SqliteBoundedMutationTests
         Assert.Equal(2, await fixture.CountAsync("revoked"));
         Assert.Equal(0, await fixture.CountAsync("pending"));
         Assert.Equal(1, await fixture.CountAsync("active"));
+    }
+
+    [Fact]
+    public async Task Assignment_updates_every_route_selected_document_and_replays_the_exact_count()
+    {
+        await using var fixture = await CreateAsync();
+        await fixture.SaveJsonAsync("missing", """{"category":"assignment-batch"}""");
+        await fixture.SaveJsonAsync("extension", """{"category":"assignment-batch","priority":-17}""");
+        await fixture.SaveJsonAsync("different", """{"category":"assignment-batch","priority":7}""");
+        await fixture.SaveJsonAsync("already-target", """{"category":"assignment-batch","priority":42}""");
+        await fixture.SaveJsonAsync("unrelated", """{"category":"other","priority":7}""");
+        var request = AssignPriority("assign-priority-1", "assignment-batch");
+
+        var completed = await fixture.Mutations.ExecuteAsync(request);
+        var replayed = await fixture.Mutations.ExecuteAsync(request);
+
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 4), completed);
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Replayed, 4), replayed);
+        foreach (var id in new[] { "missing", "extension", "different", "already-target" })
+            Assert.Equal(42, Priority((await fixture.Documents.LoadAsync(DocumentKind, id))!.ContentJson));
+        Assert.Equal(7, Priority((await fixture.Documents.LoadAsync(DocumentKind, "unrelated"))!.ContentJson));
+    }
+
+    [Fact]
+    public async Task Assignment_failure_before_commit_rolls_back_value_projection_and_replay_ledger()
+    {
+        await using var fixture = await CreateAsync(point =>
+            point == RelationalPhysicalMutationExecutionPoint.BeforeCommit
+                ? ValueTask.FromException(new SimulatedMutationFailureException())
+                : ValueTask.CompletedTask);
+        await fixture.SaveJsonAsync("rollback-target", """{"category":"assignment-batch","priority":7}""");
+        var request = AssignPriority("assign-rollback-1", "assignment-batch");
+
+        await Assert.ThrowsAsync<SimulatedMutationFailureException>(() =>
+            fixture.Mutations.ExecuteAsync(request));
+
+        Assert.Equal(7, Priority((await fixture.Documents.LoadAsync(DocumentKind, "rollback-target"))!.ContentJson));
+        Assert.Equal(0, await fixture.CountMutationOperationsAsync());
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(request));
+        Assert.Equal(42, Priority((await fixture.Documents.LoadAsync(DocumentKind, "rollback-target"))!.ContentJson));
+    }
+
+    [Fact]
+    public async Task Assignment_acknowledgement_loss_replays_the_durable_matched_count()
+    {
+        var loseAcknowledgement = true;
+        await using var fixture = await CreateAsync(point =>
+        {
+            if (point == RelationalPhysicalMutationExecutionPoint.AfterCommitBeforeAcknowledgement &&
+                loseAcknowledgement)
+            {
+                loseAcknowledgement = false;
+                return ValueTask.FromException(new SimulatedMutationAcknowledgementLossException());
+            }
+            return ValueTask.CompletedTask;
+        });
+        await fixture.SaveJsonAsync("ack-loss-target", """{"category":"assignment-batch","priority":null}""");
+        var request = AssignPriority("assign-ack-loss-1", "assignment-batch");
+
+        await Assert.ThrowsAsync<SimulatedMutationAcknowledgementLossException>(() =>
+            fixture.Mutations.ExecuteAsync(request));
+
+        Assert.Equal(42, Priority((await fixture.Documents.LoadAsync(DocumentKind, "ack-loss-target"))!.ContentJson));
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Replayed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(request));
     }
 
     [Fact]
@@ -543,6 +629,35 @@ public sealed class SqliteBoundedMutationTests
     }
 
     [Fact]
+    public async Task Assignment_cancellation_before_commit_rolls_back_projection_and_ledger()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await using var fixture = await CreateAsync(point =>
+        {
+            if (point != RelationalPhysicalMutationExecutionPoint.BeforeCommit)
+                return ValueTask.CompletedTask;
+            cancellation.Cancel();
+            return ValueTask.FromCanceled(cancellation.Token);
+        });
+        await fixture.SaveJsonAsync("assignment-cancel", """{"category":"assignment-batch","priority":7}""");
+        var request = AssignPriority("assignment-cancel-1", "assignment-batch");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Mutations.ExecuteAsync(request, cancellation.Token));
+
+        Assert.Equal(
+            7,
+            Priority((await fixture.Documents.LoadAsync(DocumentKind, "assignment-cancel"))!.ContentJson));
+        Assert.Equal(0, await fixture.CountMutationOperationsAsync());
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await fixture.CreateMutationRuntime().ExecuteAsync(request));
+        Assert.Equal(
+            42,
+            Priority((await fixture.Documents.LoadAsync(DocumentKind, "assignment-cancel"))!.ContentJson));
+    }
+
+    [Fact]
     public async Task Retry_after_acknowledgement_loss_returns_original_exact_outcome()
     {
         var loseAcknowledgement = true;
@@ -627,6 +742,66 @@ public sealed class SqliteBoundedMutationTests
     }
 
     [Fact]
+    public async Task Assignment_restart_after_acknowledgement_loss_replays_the_durable_matched_count()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"groundwork-assignment-{Guid.NewGuid():N}.db");
+        try
+        {
+            var (manifest, target) = CreateModel();
+            var route = target.Routes.Single();
+            var request = AssignPriority("assignment-restart-ack-loss-1", "assignment-batch");
+            await using (var firstConnection = new SqliteConnection($"Data Source={databasePath}"))
+            {
+                await firstConnection.OpenAsync();
+                await PhysicalSchemaApplication.ApplyAsync(
+                    target,
+                    new SqlitePhysicalSchemaExecutor(firstConnection));
+                var firstStore = new SqlitePhysicalDocumentStore(
+                    firstConnection,
+                    manifest,
+                    target.Routes,
+                    DocumentStoreAccess.Global);
+                await SaveAsync(firstStore, "assignment-target", "assignment-batch", 7);
+                var mutations = SqlitePhysicalMutationRuntime.Create(
+                    firstStore,
+                    manifest,
+                    route,
+                    target.Provider,
+                    point => point == RelationalPhysicalMutationExecutionPoint.AfterCommitBeforeAcknowledgement
+                        ? ValueTask.FromException(new SimulatedMutationAcknowledgementLossException())
+                        : ValueTask.CompletedTask);
+
+                await Assert.ThrowsAsync<SimulatedMutationAcknowledgementLossException>(() =>
+                    mutations.ExecuteAsync(request));
+            }
+
+            await using var restartedConnection = new SqliteConnection($"Data Source={databasePath}");
+            await restartedConnection.OpenAsync();
+            var restartedStore = new SqlitePhysicalDocumentStore(
+                restartedConnection,
+                manifest,
+                target.Routes,
+                DocumentStoreAccess.Global);
+
+            var replay = await SqlitePhysicalMutationRuntime.Create(
+                    restartedStore,
+                    manifest,
+                    route,
+                    target.Provider)
+                .ExecuteAsync(request);
+
+            Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Replayed, 1), replay);
+            Assert.Equal(
+                42,
+                Priority((await restartedStore.LoadAsync(DocumentKind, "assignment-target"))!.ContentJson));
+        }
+        finally
+        {
+            File.Delete(databasePath);
+        }
+    }
+
+    [Fact]
     public async Task Provider_upgrade_after_acknowledgement_loss_replays_the_durable_outcome()
     {
         var databasePath = Path.Combine(Path.GetTempPath(), $"groundwork-mutation-{Guid.NewGuid():N}.db");
@@ -703,6 +878,38 @@ public sealed class SqliteBoundedMutationTests
             results.Select(result => result.Status).Order().ToArray());
         Assert.All(results, result => Assert.Equal(10, result.AffectedCount));
         Assert.Equal(10, await fixture.CountAsync("revoked"));
+    }
+
+    [Fact]
+    public async Task Concurrent_assignment_retries_preserve_matched_counts_for_same_and_distinct_operations()
+    {
+        await using var fixture = await CreateAsync();
+        for (var index = 0; index < 5; index++)
+        {
+            await fixture.SaveJsonAsync(
+                $"assignment-{index}",
+                $$"""{"category":"assignment-batch","priority":{{index}}}""");
+        }
+        var sameRequest = AssignPriority("assignment-concurrent-same", "assignment-batch");
+
+        var sameResults = await Task.WhenAll(
+            fixture.Mutations.ExecuteAsync(sameRequest),
+            fixture.Mutations.ExecuteAsync(sameRequest));
+
+        Assert.Equal(
+            [BoundedMutationStatus.Completed, BoundedMutationStatus.Replayed],
+            sameResults.Select(result => result.Status).Order().ToArray());
+        Assert.All(sameResults, result => Assert.Equal(5, result.AffectedCount));
+
+        var distinctResults = await Task.WhenAll(
+            fixture.Mutations.ExecuteAsync(AssignPriority("assignment-concurrent-first", "assignment-batch")),
+            fixture.Mutations.ExecuteAsync(AssignPriority("assignment-concurrent-second", "assignment-batch")));
+
+        Assert.All(distinctResults, result =>
+        {
+            Assert.Equal(BoundedMutationStatus.Completed, result.Status);
+            Assert.Equal(5, result.AffectedCount);
+        });
     }
 
     [Fact]
@@ -867,8 +1074,17 @@ public sealed class SqliteBoundedMutationTests
     private static DocumentMutation Transition(string operationId) =>
         new(DocumentKind, "revoke-pending", operationId);
 
+    private static DocumentMutation AssignPriority(string operationId, string category) =>
+        new(DocumentKind, "assign-priority", operationId,
+        [
+            DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", category))
+        ]);
+
     private static string Category(string json) =>
         JsonDocument.Parse(json).RootElement.GetProperty("category").GetString()!;
+
+    private static int Priority(string json) =>
+        JsonDocument.Parse(json).RootElement.GetProperty("priority").GetInt32();
 
     private static string Q(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
@@ -984,6 +1200,10 @@ public sealed class SqliteBoundedMutationTests
                                 "list-by-category",
                                 BoundedMutationAction.Transition("category", ["pending"], "revoked")),
                             new BoundedMutationDeclaration(
+                                "assign-priority",
+                                "list-by-category",
+                                BoundedMutationAction.Assign("priority", "42")),
+                            new BoundedMutationDeclaration(
                                 "prune-by-category-cutoff",
                                 "prune-by-category-cutoff",
                                 BoundedMutationAction.Delete())
@@ -1018,6 +1238,16 @@ public sealed class SqliteBoundedMutationTests
 
         public Task SaveCollectionAsync(string id, string category, string permission) =>
             SqliteBoundedMutationTests.SaveCollectionAsync(Documents, id, category, permission);
+
+        public async Task SaveJsonAsync(string id, string contentJson)
+        {
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await Documents.SaveAsync(new SaveDocumentRequest(
+                DocumentKind,
+                id,
+                "1",
+                contentJson,
+                ExpectedVersion: 0))).Status);
+        }
 
         public async Task ChangeLinkedIdentityEvidenceAsync(
             string originalId,

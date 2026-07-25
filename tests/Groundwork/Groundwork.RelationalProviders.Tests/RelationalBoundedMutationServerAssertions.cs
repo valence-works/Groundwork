@@ -89,6 +89,66 @@ internal static class RelationalBoundedMutationServerAssertions
         Assert.Equal("active", await ReadCategoryAsync(store, "active"));
     }
 
+    public static async Task AssignmentUpdatesEveryRouteSelectedDocumentAndReplaysExactCountAsync<TStore>(
+        RelationalMutationServerHarness<TStore> harness)
+        where TStore : RelationalPhysicalDocumentStore
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.DedicatedDocumentTable,
+            harness.Provider,
+            includePriority: true,
+            priorityNullable: true,
+            normalizer: harness.Normalizer,
+            mutationOptions: new(IncludePriorityAssignment: true));
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var route = model.Target.Routes.Single();
+        var store = harness.CreateStore(model.Manifest, model.Target.Routes);
+        await SaveJsonAsync(store, "missing", """{"category":"assignment-batch"}""");
+        await SaveJsonAsync(store, "null", """{"category":"assignment-batch","priority":null}""");
+        await SaveJsonAsync(store, "extension", """{"category":"assignment-batch","priority":-17,"extension":{"source":"retained"}}""");
+        await SaveJsonAsync(store, "different", """{"category":"assignment-batch","priority":7}""");
+        await SaveJsonAsync(store, "already-target", """{"category":"assignment-batch","priority":42}""");
+        await SaveJsonAsync(store, "unrelated", """{"category":"other","priority":7}""");
+        var request = new DocumentMutation(
+            "configurationDocument",
+            "assign-priority",
+            $"{harness.Provider.Name}-assign-priority",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "assignment-batch"))]);
+        var mutations = harness.CreateMutationRuntime(store, model.Manifest, route, model.Target.Provider);
+
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 5), await mutations.ExecuteAsync(request));
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Replayed, 5), await mutations.ExecuteAsync(request));
+        foreach (var id in new[] { "missing", "null", "extension", "different", "already-target" })
+        {
+            var selected = await store.LoadAsync("configurationDocument", id);
+            Assert.NotNull(selected);
+            using var json = JsonDocument.Parse(selected.ContentJson);
+            Assert.Equal(42, json.RootElement.GetProperty("priority").GetInt32());
+        }
+
+        var extension = await store.LoadAsync("configurationDocument", "extension");
+        Assert.NotNull(extension);
+        using (var json = JsonDocument.Parse(extension.ContentJson))
+            Assert.Equal("retained", json.RootElement.GetProperty("extension").GetProperty("source").GetString());
+        var unrelated = await store.LoadAsync("configurationDocument", "unrelated");
+        Assert.NotNull(unrelated);
+        using (var json = JsonDocument.Parse(unrelated.ContentJson))
+            Assert.Equal(7, json.RootElement.GetProperty("priority").GetInt32());
+
+        var queries = harness.CreateQueryRuntime(store, model.Manifest, route, model.Target.Provider);
+        Assert.Equal(5, await CountAsync(queries, "assignment-batch"));
+        var projected = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "find-by-category-priority",
+            [
+                DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "assignment-batch")),
+                DocumentQueryClause.Of(DocumentQueryComparison.Equal("priority", "42"))
+            ]));
+        Assert.Equal(
+            new[] { "already-target", "different", "extension", "missing", "null" },
+            projected.Documents.Select(document => document.Id).Order().ToArray());
+    }
+
     public static async Task ConcurrentRetryReplaysExactResultAsync<TStore>(
         RelationalMutationServerHarness<TStore> harness)
         where TStore : RelationalPhysicalDocumentStore
@@ -123,6 +183,38 @@ internal static class RelationalBoundedMutationServerAssertions
             Assert.Equal("revoked", await ReadCategoryAsync(firstStore, $"pending-{index}"));
     }
 
+    public static async Task ConcurrentAssignmentRetryReplaysExactResultAsync<TStore>(
+        RelationalMutationServerHarness<TStore> harness)
+        where TStore : RelationalPhysicalDocumentStore
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: true,
+            normalizer: harness.Normalizer,
+            mutationOptions: new(IncludePriorityAssignment: true));
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var firstStore = harness.CreateStore(model.Manifest, model.Target.Routes);
+        var secondStore = harness.CreateStore(model.Manifest, model.Target.Routes);
+        for (var index = 0; index < 5; index++)
+            await SaveJsonAsync(firstStore, $"assignment-{index}",
+                $"{{\"category\":\"assignment-batch\",\"priority\":{index + 1}}}");
+        var request = AssignPriority($"{harness.Provider.Name}-concurrent-assignment-retry", "assignment-batch");
+
+        var results = await Task.WhenAll(
+            harness.CreateMutationRuntime(firstStore, model.Manifest, model.Target.Routes.Single(), model.Target.Provider)
+                .ExecuteAsync(request),
+            harness.CreateMutationRuntime(secondStore, model.Manifest, model.Target.Routes.Single(), model.Target.Provider)
+                .ExecuteAsync(request));
+
+        Assert.Equal(
+            [BoundedMutationStatus.Completed, BoundedMutationStatus.Replayed],
+            results.Select(result => result.Status).Order().ToArray());
+        Assert.All(results, result => Assert.Equal(5, result.AffectedCount));
+        for (var index = 0; index < 5; index++)
+            Assert.Equal(42, await ReadPriorityAsync(firstStore, $"assignment-{index}"));
+    }
+
     public static async Task ConcurrentDistinctTransitionsSerializeSelectedSetAsync<TStore>(
         RelationalMutationServerHarness<TStore> harness)
         where TStore : RelationalPhysicalDocumentStore
@@ -138,6 +230,30 @@ internal static class RelationalBoundedMutationServerAssertions
         var firstStore = harness.CreateStore(model.Manifest, model.Target.Routes);
         var secondStore = harness.CreateStore(model.Manifest, model.Target.Routes);
         await AssertDistinctTransitionRaceAsync(
+            harness.Provider,
+            harness.HandlerPrefix,
+            model,
+            route,
+            firstStore,
+            secondStore,
+            harness.Contention);
+    }
+
+    public static async Task ConcurrentDistinctAssignmentsRetainMatchedCountsAsync<TStore>(
+        RelationalMutationServerHarness<TStore> harness)
+        where TStore : RelationalPhysicalDocumentStore
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: true,
+            normalizer: harness.Normalizer,
+            mutationOptions: new(IncludePriorityAssignment: true));
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var route = model.Target.Routes.Single();
+        var firstStore = harness.CreateStore(model.Manifest, model.Target.Routes);
+        var secondStore = harness.CreateStore(model.Manifest, model.Target.Routes);
+        await AssertDistinctAssignmentRaceAsync(
             harness.Provider,
             harness.HandlerPrefix,
             model,
@@ -227,6 +343,53 @@ internal static class RelationalBoundedMutationServerAssertions
 
         Assert.Equal(new long[] { 0, 1 }, results.Select(result => result.AffectedCount).Order().ToArray());
         Assert.Equal("revoked", await ReadCategoryAsync(firstStore, "distinct-transition-race"));
+    }
+
+    private static async Task AssertDistinctAssignmentRaceAsync<TStore>(
+        ProviderIdentity provider,
+        string handlerPrefix,
+        (StorageManifest Manifest, PhysicalSchemaTarget Target) model,
+        ExecutableStorageRoute route,
+        TStore firstStore,
+        TStore secondStore,
+        RelationalLockContentionProbe contention)
+        where TStore : RelationalPhysicalDocumentStore
+    {
+        await SaveJsonAsync(firstStore, "distinct-assignment-race",
+            "{\"category\":\"assignment-batch\",\"priority\":7}");
+        var firstSelected = NewSignal<int>();
+        var releaseFirst = NewSignal();
+        var secondAttempt = NewSignal<int>();
+        var firstRuntime = CreateRuntime(firstStore, model, route, provider, handlerPrefix, async (point, connection, transaction, ct) =>
+        {
+            if (point != RelationalPhysicalMutationExecutionPoint.AfterSelection)
+                return;
+            firstSelected.TrySetResult(await contention.ReadSessionId(connection, transaction, ct));
+            await releaseFirst.Task;
+        });
+        var secondRuntime = CreateRuntime(secondStore, model, route, provider, handlerPrefix, async (point, connection, transaction, ct) =>
+        {
+            if (point == RelationalPhysicalMutationExecutionPoint.BeforeSelection)
+                secondAttempt.TrySetResult(await contention.ReadSessionId(connection, transaction, ct));
+        });
+
+        var first = firstRuntime.ExecuteAsync(AssignPriority($"{provider.Name}-distinct-assignment-first", "assignment-batch"));
+        var blocker = await firstSelected.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var second = secondRuntime.ExecuteAsync(AssignPriority($"{provider.Name}-distinct-assignment-second", "assignment-batch"));
+        var blocked = await secondAttempt.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        try
+        {
+            await contention.WaitUntilBlockedAsync(blocked, blocker, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            releaseFirst.TrySetResult();
+        }
+        var results = await Task.WhenAll(first, second);
+
+        Assert.All(results, result => Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 1), result));
+        Assert.Equal(42, await ReadPriorityAsync(firstStore, "distinct-assignment-race"));
     }
 
     public static async Task ConcurrentDistinctDeletesSerializeSelectedSetAsync<TStore>(
@@ -1091,6 +1254,16 @@ internal static class RelationalBoundedMutationServerAssertions
         Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status);
     }
 
+    private static async Task SaveJsonAsync(IDocumentStore store, string id, string contentJson)
+    {
+        var result = await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument",
+            id,
+            "1",
+            contentJson));
+        Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status);
+    }
+
     private static async Task SaveCollectionAsync(
         IDocumentStore store,
         string id,
@@ -1122,6 +1295,14 @@ internal static class RelationalBoundedMutationServerAssertions
         var document = await store.LoadAsync("configurationDocument", id);
         Assert.NotNull(document);
         return Category(document);
+    }
+
+    private static async Task<int> ReadPriorityAsync(IDocumentStore store, string id)
+    {
+        var document = await store.LoadAsync("configurationDocument", id);
+        Assert.NotNull(document);
+        using var json = JsonDocument.Parse(document.ContentJson);
+        return json.RootElement.GetProperty("priority").GetInt32();
     }
 
     private static string Category(DocumentEnvelope document) =>
@@ -1166,6 +1347,13 @@ internal static class RelationalBoundedMutationServerAssertions
 
     private static DocumentMutation Transition(string operationId) =>
         new("configurationDocument", "revoke-pending", operationId);
+
+    private static DocumentMutation AssignPriority(string operationId, string category) =>
+        new(
+            "configurationDocument",
+            "assign-priority",
+            operationId,
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", category))]);
 
     private static DocumentMutation Delete(string operationId) =>
         new(

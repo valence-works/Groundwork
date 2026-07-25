@@ -18,9 +18,12 @@ ordered provider-native command plans. Explanation may execute bounded reads, na
 sanitized, and its pseudonymous invocation fingerprint is not a secrecy boundary. See
 [`Runtime plan explanation`](../../../docs/bounded-physical-query-plans.md#runtime-plan-explanation).
 
-Named update/delete lifecycle work uses `BoundedMutationDeclaration` and
-`PhysicalMutationDocumentStore`. Mutation declarations reuse a scale-bearing bounded query as their
-closed selector and fix either a field transition or deletion at manifest construction time. See
+Named lifecycle mutation work uses `BoundedMutationDeclaration` and
+`PhysicalMutationDocumentStore`. A declaration reuses a scale-bearing bounded query as its closed
+selector and fixes one of three effects at manifest construction time: `Delete`, finite-source
+`Transition`, or fixed-value `Assign`. `Assign` overwrites its declared scalar content projection
+for every selected row, including rows already at the target or carrying null, missing, or
+extension-defined values; its exact matched count is durable and replayed. See
 [`docs/bounded-document-mutations.md`](../../../docs/bounded-document-mutations.md).
 
 ## Versioned canonical JSON

@@ -26,6 +26,10 @@ var physicalStorage = new StorageUnitPhysicalStorage(
             "by-authorization-and-status",
             BoundedMutationAction.Transition("status", ["pending"], "revoked")),
         new BoundedMutationDeclaration(
+            "revoke-authorization",
+            "by-authorization",
+            BoundedMutationAction.Assign("status", "revoked")),
+        new BoundedMutationDeclaration(
             "prune-expired",
             "by-authorization-and-expiration",
             BoundedMutationAction.Delete())
@@ -35,11 +39,14 @@ var physicalStorage = new StorageUnitPhysicalStorage(
 `PhysicalMutationPlanCompiler` resolves each declaration through the existing physical-query plan
 compiler. A mutation is executable only when its predicate is scale-bearing and has a physical
 index. The compiled plan therefore carries the exact provider, route, object, index, scope,
-discriminator, field identifiers, operations, and handler identity. Transition paths must resolve
-to document content (canonical JSON, a content projection, or a provider-native content field);
-envelope and linked-relationship fields are immutable through this action, while delete predicates
-may still select by those intrinsic fields. Transition source values and the target value are
-compiled plan data and cannot be supplied or changed at runtime.
+discriminator, field identifiers, operations, and handler identity. `Delete` has no value effect.
+`Transition` changes one content path only from its finite manifest-declared source values to its
+manifest-declared target. `Assign` changes one manifest-declared scalar content projection to its
+manifest-declared target for every row selected by the admitted query; it does not add a
+source-value predicate, so already-target, null, missing, and extension-defined source values are
+all processed. Envelope and linked-relationship fields are immutable through either value action,
+while delete predicates may still select by those intrinsic fields. Fixed paths, sources, and target
+values are compiled plan data and cannot be supplied or changed at runtime.
 
 `PhysicalMutationDocumentStore` resolves the mutation name and validates its complete closed shape
 before provider I/O. There is no `IQueryable`, expression-tree, caller-supplied assignment, optional
@@ -60,7 +67,8 @@ A provider mutation handler must:
    or by using the same provider-native set-based selector for every affected physical object;
 4. change the canonical document, primary projections, linked projections/index rows, and durable
    operation ledger in one transaction;
-5. return the exact primary physical affected count and reject mismatched linked/projection counts;
+5. return the exact primary physical matched/processed count and reject mismatched
+   linked/projection counts; an `Assign` count includes rows already holding its target value;
 6. persist a canonical request fingerprint with that count;
 7. return `Replayed` with the original count for an identical retry, and throw
    `BoundedMutationOperationConflictException` when an operation identity is reused for a different
@@ -90,25 +98,25 @@ keeps lookup keys bounded without imposing a length limit on operation identitie
 ## Relational reference execution
 
 The relational handler renders the selector with the same SQL builder used by bounded reads. It
-inserts the selected document identities into a transaction-local table, applies the fixed delete or
-transition to primary and linked storage, and records the operation outcome before commit. This
-identity boundary prevents a linked-row change from changing which primary rows belong to the same
-operation.
+inserts the selected document identities into a transaction-local table, applies the fixed delete,
+finite-source transition, or fixed-value assignment to primary and linked storage, and records the
+operation outcome before commit. This identity boundary prevents a linked-row change from changing
+which primary rows belong to the same operation.
 
 SQLite, SQL Server, and PostgreSQL use the same internal relational mutation runtime and
 provider-bound public runtime factories. SQLite binds indexed selectors with `INDEXED BY`, changes
 canonical JSON with `json_set`, and starts direct-connection transactions at the immediate writer
 boundary. SQL Server uses indexed query sources, transaction-owned `sp_getapplock` operation locks,
 session-local selection tables, `JSON_MODIFY`, and retained-original plus persisted-hash identity
-joins. Its transition parameters preserve numbers and booleans as native JSON scalars while
-string, keyword, date-time, and GUID values remain JSON strings. PostgreSQL uses transaction-scoped
+joins. Its transition and assignment parameters preserve numbers and booleans as native JSON scalars
+while string, keyword, date-time, and GUID values remain JSON strings. PostgreSQL uses transaction-scoped
 advisory operation locks, `ON COMMIT DROP` selection tables, native `text[]` JSON paths with
 `jsonb_set`, and exact retained identity joins.
 
 All three providers provision and validate `groundwork_document_mutation_operations` alongside the
-physical-schema infrastructure. SQL Server and PostgreSQL conformance covers exact transition and
-delete joins for shared-document, dedicated-document, and physical-entity storage, compound
-relationship/range selection, scope isolation, same-operation concurrency, deterministic conflict,
+physical-schema infrastructure. SQL Server and PostgreSQL conformance covers exact transition,
+assignment, and delete joins for shared-document, dedicated-document, and physical-entity storage,
+compound relationship/range selection, scope isolation, same-operation concurrency, deterministic conflict,
 cancellation/failure rollback, restart and rolling-upgrade acknowledgement-loss replay, and native
 plan evidence for the declared selector index. SQLite additionally covers direct-connection writer
 serialization and cleanup-failure preservation.
@@ -132,8 +140,10 @@ selector-invisible documents. Additive mutation declarations compose their valid
 collections, and live schema validation proves each rule is still active. A bounded mutation can
 therefore execute one hinted `UpdateMany` or
 `DeleteMany` against each physical object without loading document identities or issuing per-document
-writes. Transitions update canonical BSON, native BSON, typed mirrors, ordinary projections, and
-versions in the same transaction as the durable operation outcome.
+writes. Transitions and assignments update canonical BSON, native BSON, typed mirrors, ordinary
+projections, and versions in the same transaction as the durable operation outcome. `Assign` uses
+MongoDB's matched count rather than its modified count, so rows already at the target retain their
+place in the exact durable replay result.
 
 MongoDB's canonical boundary retains JSON number lexemes that exceed BSON's native numeric envelope
 through a provider-owned raw-number tag and emits them as standard JSON numbers on read. Original

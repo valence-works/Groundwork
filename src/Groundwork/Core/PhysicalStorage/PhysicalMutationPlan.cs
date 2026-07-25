@@ -1,5 +1,5 @@
-using Groundwork.Core.Validation;
 using Groundwork.Core.Indexing;
+using Groundwork.Core.Validation;
 using Groundwork.Core.Manifests;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,12 +15,27 @@ public abstract record PhysicalMutationAction(BoundedMutationActionKind Kind);
 public sealed record PhysicalDeleteMutationAction() :
     PhysicalMutationAction(BoundedMutationActionKind.Delete);
 
+public interface IPhysicalValueMutationAction
+{
+    string Path { get; }
+
+    string TargetValue { get; }
+
+    PhysicalQueryField Field { get; }
+}
+
 public sealed record PhysicalTransitionMutationAction(
     string Path,
     IReadOnlyList<string> AllowedSourceValues,
     string TargetValue,
     PhysicalQueryField Field) :
-    PhysicalMutationAction(BoundedMutationActionKind.Transition);
+    PhysicalMutationAction(BoundedMutationActionKind.Transition), IPhysicalValueMutationAction;
+
+public sealed record PhysicalAssignMutationAction(
+    string Path,
+    string TargetValue,
+    PhysicalQueryField Field) :
+    PhysicalMutationAction(BoundedMutationActionKind.Assign), IPhysicalValueMutationAction;
 
 /// <summary>
 /// Immutable cross-route evidence compiled from a manifest relationship guard. Providers consume
@@ -90,6 +105,10 @@ public static class PhysicalMutationPlanFingerprint
                 transition.TargetValue,
                 .. transition.AllowedSourceValues.Order(StringComparer.Ordinal)
             ]),
+            PhysicalAssignMutationAction assignment => PhysicalCanonicalEncoding.Join(
+                "assign",
+                assignment.Path,
+                assignment.TargetValue),
             _ => throw new ArgumentOutOfRangeException(nameof(plan), plan.Action, null)
         };
         var predicates = plan.Predicate.Predicates
@@ -609,6 +628,9 @@ public static class PhysicalMutationPlanCompiler
         if (mutation.Action is BoundedDeleteMutationAction)
             return new PhysicalDeleteMutationAction();
 
+        if (mutation.Action is BoundedAssignMutationAction assignment)
+            return CompileAssignment(assignment, mutation, route, diagnostics);
+
         var transition = (BoundedTransitionMutationAction)mutation.Action;
         var field = predicate.Predicates.SingleOrDefault(candidate => candidate.Path == transition.Path);
         if (field is null)
@@ -673,5 +695,89 @@ public static class PhysicalMutationPlanCompiler
             transition.AllowedSourceValues,
             transition.TargetValue,
             field.Field);
+    }
+
+    private static PhysicalMutationAction? CompileAssignment(
+        BoundedAssignMutationAction assignment,
+        BoundedMutationDeclaration mutation,
+        ExecutableStorageRoute route,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        if (PhysicalDocumentFieldPaths.IsEnvelope(assignment.Path))
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MUTATION-005",
+                $"Assignment path '{assignment.Path}' must resolve to document content; " +
+                "envelope state is immutable mutation identity.",
+                $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
+            return null;
+        }
+
+        var projection = route.ProjectedColumns.SingleOrDefault(candidate =>
+            string.Equals(candidate.Definition.Path, assignment.Path, StringComparison.Ordinal));
+        if (projection is null)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MUTATION-009",
+                $"Assignment path '{assignment.Path}' must resolve to one declared projected content field.",
+                $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
+            return null;
+        }
+        if (projection.Definition.Cardinality == ProjectionCardinality.CollectionElements)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MUTATION-007",
+                $"Assignment path '{assignment.Path}' targets a collection projection. " +
+                "Collection assignment requires an atomic collection-replacement primitive.",
+                $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
+            return null;
+        }
+        if (!TryResolveValueKind(projection.Definition.Type, out var valueKind))
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-MUTATION-009",
+                $"Assignment path '{assignment.Path}' uses unsupported projected type '{projection.Definition.Type}'.",
+                $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}.action"));
+            return null;
+        }
+
+        var objectName = projection.Target == ExecutableStorageObjectRole.PrimaryStorage
+            ? route.PrimaryStorage.Name
+            : route.LinkedIndexStorage!.Name;
+        return new PhysicalAssignMutationAction(
+            assignment.Path,
+            assignment.TargetValue,
+            new PhysicalQueryField(
+                assignment.Path,
+                projection.Column.Identifier,
+                PhysicalQueryFieldSource.ProjectedColumn,
+                projection.Target,
+                objectName,
+                valueKind));
+    }
+
+    private static bool TryResolveValueKind(PortablePhysicalType type, out IndexValueKind valueKind)
+    {
+        switch (type)
+        {
+            case PortablePhysicalType.String:
+            case PortablePhysicalType.Guid:
+                valueKind = IndexValueKind.Keyword;
+                return true;
+            case PortablePhysicalType.Int32:
+            case PortablePhysicalType.Int64:
+            case PortablePhysicalType.Decimal:
+                valueKind = IndexValueKind.Number;
+                return true;
+            case PortablePhysicalType.Boolean:
+                valueKind = IndexValueKind.Boolean;
+                return true;
+            case PortablePhysicalType.DateTime:
+                valueKind = IndexValueKind.DateTime;
+                return true;
+            default:
+                valueKind = default;
+                return false;
+        }
     }
 }
