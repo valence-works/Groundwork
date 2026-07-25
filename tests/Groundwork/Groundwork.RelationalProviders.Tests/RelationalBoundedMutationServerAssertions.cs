@@ -332,6 +332,28 @@ internal static class RelationalBoundedMutationServerAssertions
         Assert.NotNull(await store.LoadAsync("configurationDocument", "delete"));
         Assert.Equal(3L, await CountCollectionElementsAsync(harness, elements));
 
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = RelationalPhysicalMutationRuntime.Create(
+            new RelationalPhysicalMutationRuntimeContext(
+                store,
+                model.Manifest,
+                route,
+                model.Target.Provider,
+                harness.Provider.Name,
+                harness.HandlerPrefix),
+            point =>
+            {
+                if (point != RelationalPhysicalMutationExecutionPoint.BeforeCommit)
+                    return ValueTask.CompletedTask;
+                cancellation.Cancel();
+                return ValueTask.FromCanceled(cancellation.Token);
+            });
+        var cancellationException = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            cancelled.ExecuteAsync(deletion));
+        Assert.Equal(cancellation.Token, cancellationException.CancellationToken);
+        Assert.NotNull(await store.LoadAsync("configurationDocument", "delete"));
+        Assert.Equal(3L, await CountCollectionElementsAsync(harness, elements));
+
         var mutations = harness.CreateMutationRuntime(store, model.Manifest, route, model.Target.Provider);
         Assert.Equal(
             new BoundedMutationResult(BoundedMutationStatus.Completed, 1),

@@ -1959,6 +1959,10 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             database,
             model,
             DocumentStoreAccess.Scoped(new("tenant-a")));
+        var foreignStore = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-b")));
         for (var index = 0; index < 130; index++)
         {
             Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
@@ -1969,6 +1973,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         }
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
             "workItem", "keep", "1", """{"category":"keep","tags":["retain"]}"""))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await foreignStore.SaveAsync(new SaveDocumentRequest(
+            "workItem", "foreign", "1", """{"category":"delete","tags":["foreign-retain"]}"""))).Status);
         var request = new DocumentMutation(
             "workItem",
             "delete-by-category",
@@ -1986,10 +1992,11 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         await Assert.ThrowsAsync<InjectedCollectionMutationFailure>(() => failed.ExecuteAsync(request));
         Assert.NotNull(await store.LoadAsync("workItem", "delete-0"));
         Assert.NotNull(await store.LoadAsync("workItem", "delete-129"));
-        Assert.Equal(131, await database.GetCollection<BsonDocument>(collection.Storage.Name.Identifier)
+        Assert.Equal(132, await database.GetCollection<BsonDocument>(collection.Storage.Name.Identifier)
             .CountDocumentsAsync(new BsonDocument()));
 
         using var cancellation = new CancellationTokenSource();
+        var cancelledBatches = 0;
         var cancelled = MongoDbPhysicalMutationRuntime.Create(
             store,
             model.Manifest,
@@ -1997,23 +2004,42 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             model.Provider,
             point =>
             {
-                if (point != MongoDbPhysicalMutationExecutionPoint.BeforeCommit)
+                if (point != MongoDbPhysicalMutationExecutionPoint.AfterCollectionElementDeleteBatch)
                     return ValueTask.CompletedTask;
+                cancelledBatches++;
                 cancellation.Cancel();
                 return ValueTask.FromCanceled(cancellation.Token);
             });
         var cancellationException = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled.ExecuteAsync(request));
         Assert.Equal(cancellation.Token, cancellationException.CancellationToken);
+        Assert.Equal(1, cancelledBatches);
         Assert.NotNull(await store.LoadAsync("workItem", "delete-0"));
-        Assert.Equal(131, await database.GetCollection<BsonDocument>(collection.Storage.Name.Identifier)
+        Assert.Equal(132, await database.GetCollection<BsonDocument>(collection.Storage.Name.Identifier)
             .CountDocumentsAsync(new BsonDocument()));
 
-        var mutations = MongoDbPhysicalMutationRuntime.Create(store, model.Manifest, route, model.Provider);
-        var evidence = await mutations.ExplainAsync(request);
+        var evidenceRuntime = MongoDbPhysicalMutationRuntime.Create(
+            store,
+            model.Manifest,
+            route,
+            model.Provider);
+        var evidence = await evidenceRuntime.ExplainAsync(request);
         var native = BsonDocument.Parse(evidence.NativePlan);
         var maintenance = Assert.Single(native["collectionMaintenance"].AsBsonArray).AsBsonDocument;
         Assert.Equal(collection.Storage.Name.Identifier, maintenance["collection"].AsString);
         Assert.Equal(collection.OwnerOrdinalKey.Name.Identifier, maintenance["winningPlanIndex"].AsString);
+
+        var completedBatches = 0;
+        var mutations = MongoDbPhysicalMutationRuntime.Create(
+            store,
+            model.Manifest,
+            route,
+            model.Provider,
+            point =>
+            {
+                if (point == MongoDbPhysicalMutationExecutionPoint.AfterCollectionElementDeleteBatch)
+                    completedBatches++;
+                return ValueTask.CompletedTask;
+            });
 
         Assert.Equal(
             new BoundedMutationResult(BoundedMutationStatus.Completed, 130),
@@ -2021,11 +2047,20 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         Assert.Equal(
             new BoundedMutationResult(BoundedMutationStatus.Replayed, 130),
             await mutations.ExecuteAsync(request));
+        Assert.Equal(2, completedBatches);
+        await Assert.ThrowsAsync<BoundedMutationOperationConflictException>(() =>
+            mutations.ExecuteAsync(new DocumentMutation(
+                "workItem",
+                "delete-by-category",
+                request.OperationId,
+                [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "keep"))])));
         Assert.Null(await store.LoadAsync("workItem", "delete-0"));
         Assert.Null(await store.LoadAsync("workItem", "delete-129"));
+        Assert.NotNull(await foreignStore.LoadAsync("workItem", "foreign"));
         Assert.Equal("keep", Assert.Single((await store.QueryAsync(CollectionQuery("retain"))).Documents).Id);
         Assert.Empty((await store.QueryAsync(CollectionQuery("orphan-check"))).Documents);
-        Assert.Equal(1, await database.GetCollection<BsonDocument>(collection.Storage.Name.Identifier)
+        Assert.Equal("foreign", Assert.Single((await foreignStore.QueryAsync(CollectionQuery("foreign-retain"))).Documents).Id);
+        Assert.Equal(2, await database.GetCollection<BsonDocument>(collection.Storage.Name.Identifier)
             .CountDocumentsAsync(new BsonDocument()));
     }
 

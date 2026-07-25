@@ -287,9 +287,9 @@ public static class MongoDbPhysicalMutationRuntime
     }
 
     /// <summary>
-    /// Produces native-plan evidence for the exact owner-key lookup used by every fixed-size
-    /// collection deletion batch. The sample key is intentionally synthetic: the plan proves the
-    /// stable indexed maintenance shape without exposing a live owner identity in diagnostics.
+    /// Produces native-plan evidence for the exact fixed-size DeleteMany command used by collection
+    /// maintenance. Synthetic keys preserve the production 128-owner OR shape without exposing live
+    /// identities in diagnostics.
     /// </summary>
     private static async Task<BsonDocument> ExplainCollectionMaintenanceAsync(
         MongoDbPhysicalDocumentStore store,
@@ -299,13 +299,16 @@ public static class MongoDbPhysicalMutationRuntime
         CancellationToken cancellationToken)
     {
         var collection = store.Database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier);
+        var owners = Enumerable.Range(0, MongoDbPhysicalDocumentMutationHandler.CollectionOwnerDeleteBatchSize)
+            .Select(index => new MongoDbCollectionMutationOwner(
+                new BsonString($"groundwork-evidence-owner-comparison-{index:D3}"),
+                new BsonString($"groundwork-evidence-owner-lookup-{index:D3}")))
+            .ToArray();
         var filter = MongoDbPhysicalDocumentMutationHandler.CollectionOwnerFilter(
             storage,
             route.Discriminator.Value,
             scope,
-            [new MongoDbCollectionMutationOwner(
-                new BsonString("groundwork-evidence-owner-comparison"),
-                new BsonString("groundwork-evidence-owner-lookup"))]);
+            owners);
         var rendered = filter.Render(new RenderArgs<BsonDocument>(
             collection.DocumentSerializer,
             BsonSerializer.SerializerRegistry));
@@ -314,9 +317,16 @@ public static class MongoDbPhysicalMutationRuntime
             {
                 ["explain"] = new BsonDocument
                 {
-                    ["find"] = storage.Storage.Name.Identifier,
-                    ["filter"] = rendered,
-                    ["hint"] = storage.OwnerOrdinalKey.Name.Identifier
+                    ["delete"] = storage.Storage.Name.Identifier,
+                    ["deletes"] = new BsonArray
+                    {
+                        new BsonDocument
+                        {
+                            ["q"] = rendered,
+                            ["limit"] = 0,
+                            ["hint"] = storage.OwnerOrdinalKey.Name.Identifier
+                        }
+                    }
                 },
                 ["verbosity"] = "queryPlanner"
             },
@@ -326,7 +336,12 @@ public static class MongoDbPhysicalMutationRuntime
             store.Database.DatabaseNamespace.DatabaseName,
             storage.Storage.Name.Identifier,
             storage.OwnerOrdinalKey.Name.Identifier,
-            rendered);
+            rendered,
+            [
+                storage.DocumentKind.Column.Identifier,
+                storage.StorageScope.Column.Identifier,
+                storage.IdLookupKey.Column.Identifier
+            ]);
     }
 
     private sealed record RuntimeBinding(
@@ -348,7 +363,8 @@ internal static class MongoDbNativeMutationPlanInspector
         string databaseName,
         string expectedCollection,
         string expectedIndex,
-        BsonDocument rendered)
+        BsonDocument rendered,
+        IReadOnlyList<string>? requiredConstrainedFields = null)
     {
         var winningPlan = MongoDbWinningPlanInspector.ExactWinningPlan(explanation);
         var observation = MongoDbWinningPlanInspector.Inspect(winningPlan);
@@ -365,10 +381,19 @@ internal static class MongoDbNativeMutationPlanInspector
             .Select(scan => scan.IndexName)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
+        var expectedScans = observation.IndexScans
+            .Where(scan => string.Equals(scan.IndexName, expectedIndex, StringComparison.Ordinal))
+            .ToArray();
+        var hasUnboundedRequiredConstraint =
+            expectedScans.Length == 0 ||
+            expectedScans.Any(scan => (requiredConstrainedFields ?? []).Any(field =>
+                !scan.Bounds.Any(bound =>
+                    string.Equals(bound.Field, field, StringComparison.Ordinal) && bound.IsConstrained)));
         if (!string.Equals(observedCollection, expectedCollection, StringComparison.Ordinal) ||
             observation.HasCollectionScan ||
             indexes.Length != 1 ||
-            indexes[0] != expectedIndex)
+            indexes[0] != expectedIndex ||
+            hasUnboundedRequiredConstraint)
         {
             throw new InvalidOperationException(
                 $"MongoDB bounded-mutation selector for '{expectedCollection}' did not use exact index '{expectedIndex}'.");
@@ -379,6 +404,8 @@ internal static class MongoDbNativeMutationPlanInspector
             ["indexName"] = expectedIndex,
             ["filter"] = rendered,
             ["winningPlanIndex"] = indexes[0],
+            ["requiredConstrainedFields"] = new BsonArray(
+                (requiredConstrainedFields ?? []).Select(BsonValue.Create)),
             ["winningPlan"] = winningPlan,
             ["nativeExplain"] = explanation
         };

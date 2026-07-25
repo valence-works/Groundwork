@@ -1487,13 +1487,20 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             collection.StorageScope.Column.Identifier,
             collection.IdLookupKey.Column.Identifier
         };
+        var expectedIndex = $"{collection.Storage.Name.Identifier}_pkey";
         var nodes = EnumeratePlanNodes(document.RootElement).ToArray();
+        if (nodes.Any(node =>
+                string.Equals(ReadPlanString(node, "Relation Name"), collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
+                string.Equals(ReadPlanString(node, "Node Type"), "Seq Scan", StringComparison.Ordinal)))
+            return false;
+
         return nodes.Any(node =>
-                   (string.Equals(ReadPlanString(node, "Node Type"), "Index Scan", StringComparison.Ordinal) ||
-                    string.Equals(ReadPlanString(node, "Node Type"), "Index Only Scan", StringComparison.Ordinal)) &&
-                   string.Equals(ReadPlanString(node, "Relation Name"), collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
-                   ownerColumns.All(column => ContainsPlanColumn(ReadPlanString(node, "Index Cond"), column))) &&
-               nodes.Any(node => ContainsPlanColumn(PlanNodeText(node), exactComparison));
+            (string.Equals(ReadPlanString(node, "Node Type"), "Index Scan", StringComparison.Ordinal) ||
+             string.Equals(ReadPlanString(node, "Node Type"), "Index Only Scan", StringComparison.Ordinal)) &&
+            string.Equals(ReadPlanString(node, "Relation Name"), collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
+            string.Equals(ReadPlanString(node, "Index Name"), expectedIndex, StringComparison.Ordinal) &&
+            ownerColumns.All(column => ContainsPlanColumn(ReadPlanString(node, "Index Cond"), column)) &&
+            ContainsPlanColumn(PlanNodeText(node), exactComparison));
     }
 
     private static IEnumerable<JsonElement> EnumeratePlanNodes(JsonElement element)
@@ -1549,21 +1556,67 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                 includeCollection: true,
                 mutationOptions: new(IncludeRangeDelete: true))
             .Target.Routes.Single().CollectionElementStorages.Single();
-        var nonOwnerIndexPlan = JsonSerializer.Serialize(new[]
-        {
-            new
+        Dictionary<string, object?> IndexNode(string indexName, string filter) =>
+            new()
             {
-                Plan = new Dictionary<string, string>
+                ["Node Type"] = "Index Scan",
+                ["Relation Name"] = collection.Storage.Name.Identifier,
+                ["Index Name"] = indexName,
+                ["Index Cond"] = string.Join(" AND ", new[]
                 {
-                    ["Node Type"] = "Index Scan",
-                    ["Relation Name"] = collection.Storage.Name.Identifier,
-                    ["Index Cond"] = $"{collection.DocumentKind.Column.Identifier} = s.kind AND {collection.IdLookupKey.Column.Identifier} = s.lookup",
-                    ["Filter"] = $"{collection.IdComparisonKey.Column.Identifier} = s.comparison"
+                    $"{collection.DocumentKind.Column.Identifier} = s.kind",
+                    $"{collection.StorageScope.Column.Identifier} = s.scope",
+                    $"{collection.IdLookupKey.Column.Identifier} = s.lookup"
+                }),
+                ["Filter"] = filter
+            };
+        var validIndexNode = IndexNode(
+            $"{collection.Storage.Name.Identifier}_pkey",
+            $"{collection.IdComparisonKey.Column.Identifier} = s.comparison");
+        var fixtures = new[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["Plan"] = IndexNode(
+                    "wrong_index",
+                    $"{collection.IdComparisonKey.Column.Identifier} = s.comparison")
+            },
+            new Dictionary<string, object?>
+            {
+                ["Plan"] = new Dictionary<string, object?>
+                {
+                    ["Node Type"] = "Nested Loop",
+                    ["Plans"] = new object[]
+                    {
+                        IndexNode($"{collection.Storage.Name.Identifier}_pkey", string.Empty),
+                        new Dictionary<string, object?>
+                        {
+                            ["Node Type"] = "Result",
+                            ["Filter"] = $"{collection.IdComparisonKey.Column.Identifier} = s.comparison"
+                        }
+                    }
+                }
+            },
+            new Dictionary<string, object?>
+            {
+                ["Plan"] = new Dictionary<string, object?>
+                {
+                    ["Node Type"] = "Nested Loop",
+                    ["Plans"] = new object[]
+                    {
+                        validIndexNode,
+                        new Dictionary<string, object?>
+                        {
+                            ["Node Type"] = "Seq Scan",
+                            ["Relation Name"] = collection.Storage.Name.Identifier
+                        }
+                    }
                 }
             }
-        });
+        };
 
-        Assert.False(UsesCollectionOwnerPrimaryKey(nonOwnerIndexPlan, collection));
+        Assert.All(fixtures, fixture =>
+            Assert.False(UsesCollectionOwnerPrimaryKey(JsonSerializer.Serialize(new[] { fixture }), collection)));
     }
 
     private async Task SeedPlanNoiseAsync(ExecutableStorageRoute route)

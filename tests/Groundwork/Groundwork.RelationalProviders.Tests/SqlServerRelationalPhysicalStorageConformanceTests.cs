@@ -1800,18 +1800,50 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             collection.IdLookupKey.Column.Identifier
         };
         var exactComparison = collection.IdComparisonKey.Column.Identifier;
+        var expectedIndex = SqlServerPhysicalName.Normalize($"PK_{collection.Storage.Name.Identifier}");
+        var collectionScans = document.Descendants().Where(node =>
+            string.Equals(node.Name.LocalName, "RelOp", StringComparison.Ordinal) &&
+            node.Attribute("PhysicalOp")?.Value.EndsWith("Scan", StringComparison.Ordinal) == true &&
+            node.Descendants().Any(candidate =>
+                string.Equals(candidate.Name.LocalName, "Object", StringComparison.Ordinal) &&
+                candidate.Attribute("Table")?.Value.Contains(collection.Storage.Name.Identifier, StringComparison.Ordinal) == true));
+        if (collectionScans.Any())
+            return false;
+
         return document.Descendants().Any(node =>
         {
             if (!string.Equals(node.Name.LocalName, "RelOp", StringComparison.Ordinal) ||
                 !string.Equals(node.Attribute("PhysicalOp")?.Value, "Index Seek", StringComparison.Ordinal))
                 return false;
 
-            var text = node.ToString(SaveOptions.DisableFormatting);
-            return text.Contains(collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
-                   ownerColumns.All(column => text.Contains($"Column=\"{column}\"", StringComparison.Ordinal));
-        }) && document.ToString(SaveOptions.DisableFormatting).Contains(
-            $"Column=\"{exactComparison}\"",
-            StringComparison.Ordinal);
+            var target = node.Descendants().FirstOrDefault(candidate =>
+                string.Equals(candidate.Name.LocalName, "Object", StringComparison.Ordinal) &&
+                candidate.Attribute("Table")?.Value.Contains(
+                    collection.Storage.Name.Identifier,
+                    StringComparison.Ordinal) == true);
+            if (target?.Attribute("Table")?.Value.Contains(
+                       collection.Storage.Name.Identifier,
+                       StringComparison.Ordinal) != true ||
+                target.Attribute("Index")?.Value.Contains(expectedIndex, StringComparison.Ordinal) != true)
+                return false;
+
+            var seekText = node.ToString(SaveOptions.DisableFormatting);
+            if (!ownerColumns.All(column =>
+                    seekText.Contains($"Column=\"{column}\"", StringComparison.Ordinal)))
+                return false;
+
+            return node.Ancestors()
+                .Where(ancestor => string.Equals(ancestor.Name.LocalName, "RelOp", StringComparison.Ordinal))
+                .Any(ancestor => ancestor.Descendants().Any(descendant =>
+                {
+                    if (!string.Equals(descendant.Name.LocalName, "RelOp", StringComparison.Ordinal) ||
+                        !string.Equals(descendant.Attribute("PhysicalOp")?.Value, "RID Lookup", StringComparison.Ordinal))
+                        return false;
+                    var lookupText = descendant.ToString(SaveOptions.DisableFormatting);
+                    return lookupText.Contains(collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
+                           lookupText.Contains($"Column=\"{exactComparison}\"", StringComparison.Ordinal);
+                }));
+        });
     }
 
     [Fact]
@@ -1825,11 +1857,26 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
                 includeCollection: true,
                 mutationOptions: new(IncludeRangeDelete: true))
             .Target.Routes.Single().CollectionElementStorages.Single();
-        var nonOwnerIndexPlan = $$"""
-            <ShowPlanXML><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" /><SeekPredicates><ColumnReference Column="[{{collection.DocumentKind.Column.Identifier}}]" /><ColumnReference Column="[{{collection.IdLookupKey.Column.Identifier}}]" /><ColumnReference Column="[{{collection.IdComparisonKey.Column.Identifier}}]" /></SeekPredicates></IndexScan></RelOp></ShowPlanXML>
+        var ownerColumns = $$"""
+            <ColumnReference Column="{{collection.DocumentKind.Column.Identifier}}" />
+            <ColumnReference Column="{{collection.StorageScope.Column.Identifier}}" />
+            <ColumnReference Column="{{collection.IdLookupKey.Column.Identifier}}" />
             """;
+        var comparison = $"<ColumnReference Column=\"{collection.IdComparisonKey.Column.Identifier}\" />";
+        var fixtures = new[]
+        {
+            $$"""
+              <ShowPlanXML><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" Index="[wrong_index]" /><SeekPredicates>{{ownerColumns}}{{comparison}}</SeekPredicates></IndexScan></RelOp></ShowPlanXML>
+              """,
+            $$"""
+              <ShowPlanXML><RelOp PhysicalOp="Nested Loops"><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" Index="[{{SqlServerPhysicalName.Normalize($"PK_{collection.Storage.Name.Identifier}")}}]" /><SeekPredicates>{{ownerColumns}}</SeekPredicates></IndexScan></RelOp><RelOp PhysicalOp="Compute Scalar">{{comparison}}</RelOp></RelOp></ShowPlanXML>
+              """,
+            $$"""
+              <ShowPlanXML><RelOp PhysicalOp="Nested Loops"><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" Index="[{{SqlServerPhysicalName.Normalize($"PK_{collection.Storage.Name.Identifier}")}}]" /><SeekPredicates>{{ownerColumns}}{{comparison}}</SeekPredicates></IndexScan></RelOp><RelOp PhysicalOp="Table Scan"><TableScan><Object Table="[{{collection.Storage.Name.Identifier}}]" /></TableScan></RelOp></RelOp></ShowPlanXML>
+              """
+        };
 
-        Assert.False(UsesCollectionOwnerPrimaryKey(nonOwnerIndexPlan, collection));
+        Assert.All(fixtures, fixture => Assert.False(UsesCollectionOwnerPrimaryKey(fixture, collection)));
     }
 
     private async Task SeedPlanNoiseAsync(ExecutableStorageRoute route)

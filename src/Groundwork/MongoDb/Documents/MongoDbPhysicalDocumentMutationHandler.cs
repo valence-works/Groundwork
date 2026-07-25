@@ -11,6 +11,7 @@ namespace Groundwork.MongoDb.Documents;
 /// <summary>Observable transaction boundaries used by MongoDB mutation conformance tests.</summary>
 internal enum MongoDbPhysicalMutationExecutionPoint
 {
+    AfterCollectionElementDeleteBatch,
     BeforeCommit,
     AfterCommitBeforeAcknowledgement
 }
@@ -25,7 +26,7 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
     // immutable owner identities from the already-indexed primary selector and removes dependent
     // rows in fixed-size, owner-key-indexed batches in the same snapshot transaction. This is not
     // client predicate evaluation and never materializes the selected owner set in memory.
-    private const int CollectionOwnerDeleteBatchSize = 128;
+    internal const int CollectionOwnerDeleteBatchSize = 128;
 
     private readonly MongoDbPhysicalDocumentStore store;
     private readonly ExecutableStorageRoute route;
@@ -253,6 +254,8 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
                             new DeleteOptions { Hint = storage.OwnerOrdinalKey.Name.Identifier },
                             cancellationToken);
                 }
+                if (intercept is not null)
+                    await intercept(MongoDbPhysicalMutationExecutionPoint.AfterCollectionElementDeleteBatch);
             }
         }
         return selectedOwnerCount;
