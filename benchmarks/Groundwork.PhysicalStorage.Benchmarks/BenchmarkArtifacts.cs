@@ -317,6 +317,9 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
 
     public async Task AppendSampleAsync(RawBenchmarkRecord record, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(record);
+        if (!record.Sample.HasValidDatabaseSignalEvidence())
+            throw new InvalidOperationException("Raw measurements require valid target-scoped database-signal evidence.");
         var line = JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions);
         await rawWriter.WriteLineAsync(line.AsMemory(), cancellationToken);
     }

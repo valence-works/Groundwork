@@ -36,6 +36,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
     public PhysicalStorageForm StorageForm { get; }
     public abstract string ProviderVersion { get; protected set; }
     public abstract IReadOnlyDictionary<string, string> ProviderConfiguration { get; }
+    public abstract DatabaseSignalTarget SignalTarget { get; }
 
     protected IDocumentStore TenantA { get; private set; } = null!;
     protected IDocumentStore TenantB { get; private set; } = null!;

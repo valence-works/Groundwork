@@ -39,6 +39,8 @@ public sealed class MongoDbBenchmarkTarget(
         ["factory"] = nameof(MongoDbDocumentStoreFactory.CreatePhysicalAsync)
     };
 
+    public override DatabaseSignalTarget SignalTarget => DatabaseSignalTarget.ForMongoDb(databaseName);
+
     private StorageManifest Manifest { get; set; } = null!;
     private MongoDbPhysicalStorageModel Model => tenantAHandle?.Model
         ?? throw new InvalidOperationException("MongoDB target is not initialized.");

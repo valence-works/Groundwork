@@ -281,8 +281,9 @@ public static class RegressionEvaluator
         sample.OperationLatencyNanoseconds is not null &&
         sample.OperationLatencyNanoseconds.Count == sample.Operations &&
         sample.OperationLatencyNanoseconds.All(latency => latency > 0) &&
+        sample.HasValidDatabaseSignalEvidence() &&
         sample.AllocatedBytes >= 0 &&
-        (!sample.RoundTrips.HasValue || sample.RoundTrips.Value >= 0) &&
+        (!sample.RoundTrips.HasValue || sample.RoundTrips.Value > 0) &&
         sample.LogicalPayloadBytes >= 0 &&
         sample.LogicalMutations >= 0 &&
         ValidStorage(sample.StorageBefore) &&

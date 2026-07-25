@@ -234,6 +234,30 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Measured_run_rejects_a_zero_round_trip_value_instead_of_treating_it_as_missing()
+    {
+        var environment = new RecordingEnvironment(zeroRoundTrips: true);
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            DatasetSize = 10,
+            MigrationDatasetSize = 1,
+            MeasurementIterations = 5,
+            OperationsPerIteration = 1,
+            Providers = [BenchmarkProvider.Sqlite],
+            StorageForms = [PhysicalStorageForm.SharedDocuments]
+        };
+        var runner = new BenchmarkRunner(null, () => environment);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
+            new BenchmarkRunRequest(
+                FindRepositoryRoot(), configuration, [BenchmarkWorkload.Insert], output, null,
+                AllowContainers: false, RegressionConfirmationRun: false),
+            CancellationToken.None));
+
+        Assert.Contains("positive round-trip count or null", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Measured_run_rejects_later_observable_result_drift_instead_of_reusing_the_first_vector()
     {
         var environment = new RecordingEnvironment(driftObservableResults: true);
@@ -276,7 +300,8 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         ManualTimeProvider? clock = null,
         TimeSpan? executionDuration = null,
         bool invalidOperationLatencies = false,
-        bool driftObservableResults = false) : IBenchmarkProviderEnvironment
+        bool driftObservableResults = false,
+        bool zeroRoundTrips = false) : IBenchmarkProviderEnvironment
     {
         public List<RecordingTarget> Targets { get; } = [];
 
@@ -299,7 +324,8 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
                 clock,
                 executionDuration,
                 invalidOperationLatencies,
-                driftObservableResults);
+                driftObservableResults,
+                zeroRoundTrips);
             Targets.Add(target);
             return target;
         }
@@ -314,12 +340,14 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         ManualTimeProvider? clock,
         TimeSpan? executionDuration,
         bool invalidOperationLatencies,
-        bool driftObservableResults) : IPhysicalStorageBenchmarkTarget
+        bool driftObservableResults,
+        bool zeroRoundTrips) : IPhysicalStorageBenchmarkTarget
     {
         public BenchmarkProvider Provider => provider;
         public PhysicalStorageForm StorageForm => storageForm;
         public string ProviderVersion => "test";
         public IReadOnlyDictionary<string, string> ProviderConfiguration { get; } = new Dictionary<string, string>();
+        public DatabaseSignalTarget SignalTarget { get; } = DatabaseSignalTarget.ForSqlite("recording-target.db");
         public string Instance => instance;
         public (int Seed, BenchmarkDataShape Shape) Seed { get; private set; }
         public int CorrectnessCalls { get; private set; }
@@ -372,7 +400,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
                 operations,
                 0,
                 0,
-                2,
+                zeroRoundTrips ? 0 : 2,
                 new Dictionary<string, long>(),
                 Enumerable.Repeat(100L, invalidOperationLatencies ? operations - 1 : operations).ToArray(),
                 BenchmarkObservableResultVector.Create(

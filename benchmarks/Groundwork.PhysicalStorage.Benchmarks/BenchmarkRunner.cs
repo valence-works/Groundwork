@@ -236,7 +236,7 @@ public sealed class BenchmarkRunner
                                 ? await target.CaptureStorageAsync(cancellationToken)
                                 : null;
                             var allocatedBefore = GC.GetTotalAllocatedBytes(precise: false);
-                            using var measurement = signals.BeginMeasurement();
+                            using var measurement = signals.BeginMeasurement(target.SignalTarget);
                             var timestamp = timeProvider.GetTimestamp();
                             var execution = await target.ExecuteAsync(
                                 workload,
@@ -275,7 +275,10 @@ public sealed class BenchmarkRunner
                                 storageBefore,
                                 storageAfter,
                                 Merge(execution.ProviderWork, signalSnapshot.ToProviderWork()),
-                                execution.OperationLatencyNanoseconds);
+                                execution.OperationLatencyNanoseconds)
+                            {
+                                DatabaseSignal = signalSnapshot.Evidence
+                            };
                             samples.Add(sample);
                             measuredOperations += sample.Operations;
                             measuredElapsedNanoseconds += sample.ElapsedNanoseconds;
@@ -394,6 +397,11 @@ public sealed class BenchmarkRunner
 
     private static void ValidateExecution(WorkloadExecution execution, BenchmarkCase benchmarkCase)
     {
+        if (execution.RoundTrips is <= 0)
+        {
+            throw new InvalidOperationException(
+                $"[{benchmarkCase.Identity}] target must return a positive round-trip count or null when unobserved.");
+        }
         if (execution.Operations <= 0 ||
             execution.OperationLatencyNanoseconds is null ||
             execution.OperationLatencyNanoseconds.Count != execution.Operations ||

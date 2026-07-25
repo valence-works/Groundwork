@@ -42,6 +42,23 @@ public sealed class SqliteBenchmarkObservableEvidenceTests : IAsyncDisposable
         var benchmarkCase = Assert.Single(result.Report.Cases);
         Assert.NotNull(benchmarkCase.ObservableResults);
         Assert.NotEmpty(benchmarkCase.ObservableResults);
+        Assert.All(benchmarkCase.Samples, sample =>
+        {
+            Assert.Equal(sample.RoundTrips, sample.DatabaseSignal.ObservableRoundTrips);
+            if (sample.DatabaseSignal.Availability == DatabaseSignalAvailability.Observed)
+            {
+                Assert.True(sample.DatabaseSignal.ObservableRoundTrips > 0);
+                Assert.DoesNotContain(sample.ProviderWork, pair => pair.Value == 0);
+            }
+            else
+            {
+                Assert.Equal("no-target-scoped-provider-telemetry", sample.DatabaseSignal.Reason);
+                Assert.Null(sample.DatabaseSignal.CommandStarts);
+                Assert.Null(sample.DatabaseSignal.ClientActivities);
+                Assert.Null(sample.DatabaseSignal.ObservableRoundTrips);
+                Assert.Equal(1, sample.ProviderWork["target_scoped_provider_telemetry_unavailable"]);
+            }
+        });
         Assert.Contains(
             benchmarkCase.ObservableResults,
             item => item.Identity.StartsWith("iteration-000000/query-0000/match/seed-", StringComparison.Ordinal) &&

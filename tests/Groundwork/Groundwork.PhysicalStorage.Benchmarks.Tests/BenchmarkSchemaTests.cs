@@ -76,6 +76,32 @@ public sealed class BenchmarkSchemaTests
     }
 
     [Fact]
+    public void Raw_measurement_schema_requires_redacted_target_scoped_database_signal_evidence()
+    {
+        using var document = Read(
+            "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/raw-measurement.schema.json");
+        var definitions = document.RootElement.GetProperty("$defs");
+        var sample = definitions.GetProperty("sample");
+        var signal = definitions.GetProperty("databaseSignal");
+
+        Assert.Contains(
+            sample.GetProperty("required").EnumerateArray(),
+            property => property.GetString() == "databaseSignal");
+        Assert.Contains(
+            sample.GetProperty("required").EnumerateArray(),
+            property => property.GetString() == "roundTrips");
+        Assert.Equal("#/$defs/databaseSignal", sample.GetProperty("properties")
+            .GetProperty("databaseSignal").GetProperty("$ref").GetString());
+        Assert.True(signal.GetProperty("additionalProperties").GetBoolean() is false);
+        Assert.Equal(
+            ["availability", "source", "reason", "commandStarts", "clientActivities", "observableRoundTrips"],
+            signal.GetProperty("required").EnumerateArray().Select(property => property.GetString()));
+        Assert.Equal(1, signal.GetProperty("properties").GetProperty("commandStarts").GetProperty("minimum").GetInt32());
+        Assert.Equal(1, signal.GetProperty("properties").GetProperty("clientActivities").GetProperty("minimum").GetInt32());
+        Assert.Equal(1, signal.GetProperty("properties").GetProperty("observableRoundTrips").GetProperty("minimum").GetInt32());
+    }
+
+    [Fact]
     public void Serialized_manifest_satisfies_the_strict_v1_schema_contract()
     {
         var manifest = new BenchmarkRunManifest(

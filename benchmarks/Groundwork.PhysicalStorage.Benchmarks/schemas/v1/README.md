@@ -5,7 +5,11 @@ automation:
 
 - `run-manifest.schema.json` describes run status and artifact locations.
 - `raw-measurement.schema.json` describes one line of `raw/measurements.jsonl`, including the
-  directly timed per-operation latency observations used for percentiles and bootstraps.
+  directly timed per-operation latency observations used for percentiles and bootstraps, plus
+  target-scoped provider database-work telemetry. The telemetry captures only its source,
+  availability, and positive counts; it never includes connection values, database names, command
+  text, or provider secrets. A signal that cannot be observed is represented by `null` counts and
+  an explicit `unavailable` reason, never by a zero measurement.
 - `elsa-migration-evidence.schema.json` describes explicitly insufficient Groundwork-only evidence;
   it is not an Elsa migration decision.
 - `worker-invocation.schema.json` describes the immutable parent-to-worker subprocess request.

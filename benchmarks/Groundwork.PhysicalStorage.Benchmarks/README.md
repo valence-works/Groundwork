@@ -277,6 +277,23 @@ evidence report, and measured consumer-evidence report. The verifier rejects pat
 JSON members, identity mismatches, Git drift, and digest mismatches before a group can be used as a
 baseline. Connection strings and provider secrets remain excluded.
 
+## Target-scoped database-work signals
+
+Every measured raw sample now carries a sealed `databaseSignal` object. SQLite and SQL Server
+accept provider diagnostic command starts only when the command is bound to the disposable measured
+database target. PostgreSQL uses a target-specific `Application Name` on every production-path
+connection so its diagnostic commands cannot be confused with another schema sharing the same
+server database. MongoDB accepts client activity only when the driver reports the measured database
+namespace. The target selector and all connection values remain in memory; artifacts contain only
+the provider-neutral source, availability, and positive counts.
+
+These are observable client command/activity signals, not a claim that the harness has exact
+wire-level server round-trip accounting. If a provider does not expose the relevant public
+telemetry during a workload, `roundTrips` and every signal count are `null`, with an explicit
+`unavailable` reason and no synthetic zero. Raw measurement digests, artifact-integrity ledgers,
+consumer-evidence reconstruction, and scheduled-worker raw/summary equality bind those signals to
+the exact run group.
+
 Machine metadata records CPU model, memory, storage/filesystem capacity, and power/governor state
 when the host exposes them, otherwise the literal `unavailable`. Provider metadata distinguishes
 declared configuration from effective settings and explicitly marks settings unavailable when the
@@ -324,7 +341,9 @@ All three final verdicts were **CLEAN**:
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
   the 1K/100K/1M dataset matrix for the reviewed workload-bound payload profiles.
 - Capture exact-HEAD live evidence from SQLite, SQL Server, PostgreSQL, and MongoDB.
-- Complete reliable provider database-work/round-trip signals and concurrent-load evidence.
+- Exercise the target-scoped provider database-work signals under controlled live evidence for all
+  providers, then complete sustained concurrent-load evidence. The current observable client
+  signals do not by themselves close either acceptance item.
 - Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
 - Capture actual crash/failure recovery evidence required by issue #50. Client pool reset/reopen
   validation is not crash or failure recovery evidence and does not close that acceptance work.

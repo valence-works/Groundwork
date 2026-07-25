@@ -49,6 +49,19 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rejects_a_resealed_target_scoped_signal_change_that_is_not_bound_by_the_summary()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { TamperMeasuredRawDatabaseSignal = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("raw measurements", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Rejects_measured_workers_that_do_not_meet_the_authenticated_operation_and_duration_floors()
     {
         var fixture = await ScheduledGroupFixture.CreateAsync(
@@ -149,6 +162,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         public sealed record Options
         {
             public bool ForgeMeasuredConsumerResultDigest { get; init; }
+            public bool TamperMeasuredRawDatabaseSignal { get; init; }
             public bool GitDirty { get; init; }
             public bool WriteMeasuredIntegrityLedger { get; init; } = true;
             public int MeasuredSampleCount { get; init; } = 30;
@@ -309,7 +323,9 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                 await writer.WriteMachineAsync(machine, CancellationToken.None);
                 await writer.WriteProvidersAsync(providers, CancellationToken.None);
                 await writer.WriteConfigurationAsync(persistedConfiguration, CancellationToken.None);
-                foreach (var sample in samples)
+                foreach (var sample in options.TamperMeasuredRawDatabaseSignal && role == BenchmarkExecutionRole.Measured
+                             ? TamperFirstSignal(samples)
+                             : samples)
                     await writer.AppendSampleAsync(new RawBenchmarkRecord(benchmarkCase, sample), CancellationToken.None);
                 await writer.WriteReportAsync(report, CancellationToken.None);
                 if (role == BenchmarkExecutionRole.Measured)
@@ -399,6 +415,20 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     new Dictionary<string, long>(),
                     Enumerable.Repeat(100L, options.OperationsPerSample).ToArray()))
                 .ToArray();
+
+        private static IReadOnlyList<BenchmarkSample> TamperFirstSignal(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select((sample, index) => index == 0
+                ? sample with
+                {
+                    DatabaseSignal = new DatabaseSignalEvidence(
+                        DatabaseSignalAvailability.Observed,
+                        "target-scoped-diagnostic-command",
+                        null,
+                        1,
+                        null,
+                        1)
+                }
+                : sample).ToArray();
 
         private static BenchmarkRunReport CreateReport(
             BenchmarkExecutionRole role,

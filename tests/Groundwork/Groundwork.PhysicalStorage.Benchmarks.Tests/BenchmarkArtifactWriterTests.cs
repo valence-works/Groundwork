@@ -33,12 +33,50 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var reloaded = await BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None);
 
         Assert.Single(lines);
+        using var serialized = JsonDocument.Parse(lines[0]);
+        var serializedSample = serialized.RootElement.GetProperty("sample");
+        Assert.Equal(JsonValueKind.Null, serializedSample.GetProperty("roundTrips").ValueKind);
+        var serializedSignal = serializedSample.GetProperty("databaseSignal");
+        Assert.Equal(JsonValueKind.Null, serializedSignal.GetProperty("commandStarts").ValueKind);
+        Assert.Equal(JsonValueKind.Null, serializedSignal.GetProperty("clientActivities").ValueKind);
+        Assert.Equal(JsonValueKind.Null, serializedSignal.GetProperty("observableRoundTrips").ValueKind);
         var actual = Assert.Single(reloaded);
         Assert.Equal(record.Case, actual.Case);
         Assert.Equal(record.Sample.Iteration, actual.Sample.Iteration);
         Assert.Equal(record.Sample.ElapsedNanoseconds, actual.Sample.ElapsedNanoseconds);
         Assert.Equal([100L], actual.Sample.OperationLatencyNanoseconds);
         Assert.Empty(actual.Sample.ProviderWork);
+        Assert.Equal(DatabaseSignalAvailability.Unavailable, actual.Sample.DatabaseSignal.Availability);
+        Assert.Equal("no-target-scoped-provider-telemetry", actual.Sample.DatabaseSignal.Reason);
+        Assert.Null(actual.Sample.DatabaseSignal.CommandStarts);
+        Assert.Null(actual.Sample.DatabaseSignal.ClientActivities);
+        Assert.Null(actual.Sample.DatabaseSignal.ObservableRoundTrips);
+    }
+
+    [Fact]
+    public async Task Raw_measurements_reject_zero_or_ambiguous_database_signal_evidence()
+    {
+        var layout = new ArtifactLayout(root);
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, null, 0, 0, null, null, new Dictionary<string, long>(), [100])
+        {
+            DatabaseSignal = new DatabaseSignalEvidence(
+                DatabaseSignalAvailability.Observed,
+                "target-scoped-diagnostic-command",
+                null,
+                0,
+                null,
+                0)
+        };
+        await using var writer = new BenchmarkArtifactWriter(layout);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => writer.AppendSampleAsync(
+            new RawBenchmarkRecord(
+                new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+                sample),
+            CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal evidence", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

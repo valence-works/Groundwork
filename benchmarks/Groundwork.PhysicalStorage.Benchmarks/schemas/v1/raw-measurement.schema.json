@@ -47,9 +47,11 @@
         "operations",
         "elapsedNanoseconds",
         "allocatedBytes",
+        "roundTrips",
         "logicalPayloadBytes",
         "logicalMutations",
         "providerWork",
+        "databaseSignal",
         "operationLatencyNanoseconds",
         "throughputOperationsPerSecond",
         "allocatedBytesPerOperation"
@@ -59,12 +61,13 @@
         "operations": { "type": "integer", "minimum": 1 },
         "elapsedNanoseconds": { "type": "integer", "minimum": 1 },
         "allocatedBytes": { "type": "integer", "minimum": 0 },
-        "roundTrips": { "type": ["integer", "null"], "minimum": 0 },
+        "roundTrips": { "type": ["integer", "null"], "minimum": 1 },
         "logicalPayloadBytes": { "type": "integer", "minimum": 0 },
         "logicalMutations": { "type": "integer", "minimum": 0 },
         "storageBefore": { "oneOf": [{ "$ref": "#/$defs/storage" }, { "type": "null" }] },
         "storageAfter": { "oneOf": [{ "$ref": "#/$defs/storage" }, { "type": "null" }] },
         "providerWork": { "$ref": "#/$defs/integerMap" },
+        "databaseSignal": { "$ref": "#/$defs/databaseSignal" },
         "operationLatencyNanoseconds": {
           "type": "array",
           "minItems": 1,
@@ -84,6 +87,26 @@
         "primaryRows": { "type": "integer", "minimum": 0 },
         "linkedRows": { "type": "integer", "minimum": 0 },
         "providerValues": { "$ref": "#/$defs/integerMap" }
+      }
+    },
+    "databaseSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "availability",
+        "source",
+        "reason",
+        "commandStarts",
+        "clientActivities",
+        "observableRoundTrips"
+      ],
+      "properties": {
+        "availability": { "enum": ["observed", "unavailable"] },
+        "source": { "type": "string", "minLength": 1 },
+        "reason": { "type": ["string", "null"] },
+        "commandStarts": { "type": ["integer", "null"], "minimum": 1 },
+        "clientActivities": { "type": ["integer", "null"], "minimum": 1 },
+        "observableRoundTrips": { "type": ["integer", "null"], "minimum": 1 }
       }
     },
     "integerMap": {

@@ -34,6 +34,8 @@ public sealed class SqliteBenchmarkTarget(
         ["factory"] = nameof(SqliteDocumentStoreFactory.OpenPhysicalAsync)
     };
 
+    public override DatabaseSignalTarget SignalTarget => DatabaseSignalTarget.ForSqlite(databasePath);
+
     private string ConnectionString => new SqliteConnectionStringBuilder
     {
         DataSource = databasePath,
