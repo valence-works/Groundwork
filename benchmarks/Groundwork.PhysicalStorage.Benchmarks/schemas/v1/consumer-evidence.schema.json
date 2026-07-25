@@ -128,6 +128,7 @@
           },
           "then": {
             "properties": {
+              "workloadVersion": { "const": "1.2" },
               "concurrentLoadEvidenceDigest": { "$ref": "#/$defs/digest" }
             }
           },

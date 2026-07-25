@@ -140,6 +140,10 @@ public sealed class BenchmarkSchemaTests
             "groundwork.physical-storage/concurrent-create",
             result.GetProperty("allOf")[0].GetProperty("if").GetProperty("properties")
                 .GetProperty("workloadIdentity").GetProperty("const").GetString());
+        Assert.Equal(
+            "1.2",
+            result.GetProperty("allOf")[0].GetProperty("then").GetProperty("properties")
+                .GetProperty("workloadVersion").GetProperty("const").GetString());
     }
 
     [Fact]

@@ -840,6 +840,37 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         await Assert.ThrowsAsync<JsonException>(() => BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None));
     }
 
+    [Fact]
+    public void Raw_measurements_must_exactly_bind_summary_samples()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.Sqlite,
+            PhysicalStorageForm.SharedDocuments,
+            BenchmarkWorkload.ReusedClientPointReadBatch);
+        var summarySample = new BenchmarkSample(
+            0, 1, 100, 50, null, 0, 0, null, null, new Dictionary<string, long>(), [100]);
+        var report = new BenchmarkRunReport(
+            BenchmarkProfiles.SchemaVersion,
+            "test-run",
+            BenchmarkRunMode.Smoke,
+            [new BenchmarkCaseResult(
+                benchmarkCase,
+                new CorrectnessGateResult(true, true, true, true, true),
+                [],
+                BenchmarkSummarizer.Summarize(benchmarkCase.Identity, [summarySample]),
+                [summarySample])],
+            [],
+            new BaselineEligibility(false, ["fixture"]));
+        var rawSample = summarySample with { ElapsedNanoseconds = 101 };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.VerifyRawSamples(
+                report,
+                [new RawBenchmarkRecord(benchmarkCase, rawSample)]));
+
+        Assert.Contains("do not exactly bind", exception.Message, StringComparison.Ordinal);
+    }
+
     private static IReadOnlyList<BenchmarkObservableResult> ObservableResults(
         BenchmarkCase benchmarkCase,
         int operations) =>

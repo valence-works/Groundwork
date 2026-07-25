@@ -28,7 +28,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         };
         var runner = new BenchmarkRunner(null, () => environment);
 
-        await runner.RunAsync(
+        var result = await runner.RunAsync(
             new BenchmarkRunRequest(
                 FindRepositoryRoot(),
                 configuration,
@@ -54,7 +54,12 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         Assert.Equal(0, measured.PlanCalls);
         Assert.Equal(1, plans.PlanCalls);
         Assert.Equal([NativePlanAssertionMode.RequireDeclaredIndex], plans.PlanAssertionModes);
-        Assert.Equal(configuration.MeasurementIterations, measured.ExecuteCalls);
+        Assert.Equal(
+            configuration.WarmupIterations + configuration.MeasurementIterations,
+            measured.ExecuteCalls);
+        Assert.Equal(
+            configuration.MeasurementIterations,
+            Assert.Single(result.Report.Cases).Samples.Count);
         Assert.Equal(0, plans.ExecuteCalls);
         Assert.True(measured.Disposed);
         Assert.True(plans.Disposed);
@@ -228,7 +233,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
 
         var measured = Assert.Single(environment.Targets);
         var samples = Assert.Single(result.Report.Cases).Samples;
-        Assert.Equal(6, measured.ExecuteCalls);
+        Assert.Equal(configuration.WarmupIterations + 6, measured.ExecuteCalls);
         Assert.Equal(6, samples.Count);
         Assert.Equal(150, samples.Sum(sample => sample.Operations));
         Assert.Equal(150, samples.Sum(sample => sample.OperationLatencyNanoseconds.Count));

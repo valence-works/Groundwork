@@ -182,7 +182,7 @@ public sealed class BenchmarkRunner
                     {
                         var benchmarkCase = new BenchmarkCase(provider, form, workload);
                         var warmupOnly = request.Role == BenchmarkExecutionRole.UntimedWarmup;
-                        var warmupIterations = warmupOnly ? request.Configuration.WarmupIterations : 0;
+                        var warmupIterations = request.Configuration.WarmupIterations;
                         var measurementIterations = warmupOnly ? 0 : request.Configuration.MeasurementIterations;
                         progress(
                             $"[{benchmarkCase.Identity}] warmup {warmupIterations}, measure at least " +

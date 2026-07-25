@@ -420,6 +420,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         var evidence = await ReadJsonAsync<ElsaMigrationEvidenceReport>(Path.Combine(root, "reports", "elsa-migration-evidence.json"), cancellationToken);
         var report = await ReadJsonAsync<BenchmarkRunReport>(Path.Combine(root, "reports", "summary.json"), cancellationToken);
         VerifyReportSamples(report);
+        VerifyRawSamples(report, records);
         var consumer = manifest.ConsumerEvidence is null
             ? null
             : await ReadJsonAsync<BenchmarkConsumerEvidenceReport>(ResolveArtifact(layout, manifest.ConsumerEvidence), cancellationToken);
@@ -569,6 +570,40 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             {
                 throw new InvalidOperationException(
                     $"Summary for '{result.Case.Identity}' does not match its target-scoped raw samples.");
+            }
+        }
+    }
+
+    internal static void VerifyRawSamples(
+        BenchmarkRunReport report,
+        IReadOnlyList<RawBenchmarkRecord> records)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        ArgumentNullException.ThrowIfNull(records);
+
+        var expectedCases = report.Cases.Select(result => result.Case).ToHashSet();
+        var actualCases = records.Select(record => record.Case).ToHashSet();
+        if (!expectedCases.SetEquals(actualCases))
+        {
+            throw new InvalidOperationException(
+                "Raw measurements and summary do not contain the same benchmark cases.");
+        }
+
+        foreach (var result in report.Cases)
+        {
+            var rawSamples = records
+                .Where(record => record.Case == result.Case)
+                .Select(record => record.Sample)
+                .ToArray();
+            if (rawSamples.Length != result.Samples.Count ||
+                !rawSamples.Zip(result.Samples, static (raw, summary) =>
+                        CryptographicOperations.FixedTimeEquals(
+                            JsonSerializer.SerializeToUtf8Bytes(raw, BenchmarkJson.CompactOptions),
+                            JsonSerializer.SerializeToUtf8Bytes(summary, BenchmarkJson.CompactOptions)))
+                    .All(equal => equal))
+            {
+                throw new InvalidOperationException(
+                    $"Raw measurements for '{result.Case.Identity}' do not exactly bind its summary samples.");
             }
         }
     }

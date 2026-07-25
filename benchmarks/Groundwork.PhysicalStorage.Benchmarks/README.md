@@ -80,7 +80,7 @@ still requires controlled execution of the complete reviewed matrix, exact-HEAD 
 all four providers, and the Elsa-owned EF Core oracle.
 
 The GitHub workflow is named `Physical Storage Benchmark Evidence (Scaffolding)`. Pull requests run
-a deliberately narrow SQLite/shared-form smoke over six representative workloads. Weekly/manual
+a deliberately narrow SQLite/shared-form smoke over seven representative workloads. Weekly/manual
 runs split the four-provider scheduled scaffold into deterministic provider/form/dataset shards on
 the controlled self-hosted runner pool. Every artifact remains non-promotable; the workflow does
 not perform candidate promotion or migration-decision gating.
@@ -251,8 +251,10 @@ The v1 JSON Schemas live in [`schemas/v1`](schemas/v1). The evidence report deli
 
 No artifact in this slice is a migration decision or baseline-promotion authorization.
 
-Measured workers do not repeat warm-up iterations internally. The preceding warm-up worker executes
-the configured untimed warm-up iterations and emits no consumer evidence. Measured workers continue
+The preceding warm-up worker executes the configured untimed warm-up iterations as a preflight and
+emits no consumer evidence. Each independent measured worker also executes its own configured
+untimed warm-up iterations against the same target instance before timing begins, so process-local
+JIT and target state are warm without admitting warm-up samples. Measured workers continue
 writing whole raw samples until the iteration, operation-count, and steady-state execution-duration
 floors are all satisfied; setup, schema materialization, seeding, correctness, and validation time
 do not contribute to the duration floor.
@@ -295,6 +297,9 @@ gap. If a provider does not expose the relevant public telemetry during a worklo
 and every signal count are `null`, with an explicit `unavailable` reason and no synthetic zero.
 Raw measurement digests, artifact-integrity ledgers, consumer-evidence reconstruction, and
 scheduled-worker raw/summary equality bind those signals to the exact run group.
+Those hashes prove internal consistency and detect mutation relative to the retained ledger; they
+are not an authenticity root against an actor that can replace and re-seal the entire directory.
+Baseline promotion therefore still requires trusted external CI provenance or attestation.
 
 Machine metadata records CPU model, memory, storage/filesystem capacity, and power/governor state
 when the host exposes them, otherwise the literal `unavailable`. Provider metadata distinguishes
@@ -349,8 +354,8 @@ coverage. After remediation, the originating reviewers returned **PASS**:
   and their authoritative count must agree exactly with the persisted round-trip count; unavailable
   evidence cannot claim a count.
 - **Evidence integrity — addressed:** writer, reader, summarizer, report reconstruction, JSON
-  Schema validation, and fully resealed scheduled-group verification reject forged or internally
-  inconsistent signal counts.
+  Schema validation, and fully resealed scheduled-group verification reject internally
+  inconsistent signal counts. This is an internal-consistency claim, not external authenticity.
 - **Scope and test preservation — addressed:** SQL Server and PostgreSQL now have positive and
   negative selector coverage, all four provider runner paths are exercised without retaining
   selector values, no provider/workload/form declaration or worker protocol was removed, and live
