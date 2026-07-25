@@ -171,7 +171,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Concurrent_create_rejects_a_target_that_omits_sustained_load_evidence()
+    public async Task Concurrent_create_rejects_a_target_that_omits_synchronized_contention_evidence()
     {
         var environment = new RecordingEnvironment();
         var configuration = BenchmarkProfiles.Smoke with
@@ -198,7 +198,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
                 RegressionConfirmationRun: false),
             CancellationToken.None));
 
-        Assert.Contains("concurrent-create requires complete evidence", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("concurrent-create requires complete synchronized-contention evidence", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

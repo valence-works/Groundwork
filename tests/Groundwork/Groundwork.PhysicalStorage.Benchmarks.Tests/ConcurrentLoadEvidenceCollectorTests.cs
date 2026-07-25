@@ -5,7 +5,7 @@ namespace Groundwork.PhysicalStorage.Benchmarks.Tests;
 public sealed class ConcurrentLoadEvidenceCollectorTests
 {
     [Fact]
-    public async Task Pre_call_readiness_does_not_inflate_production_store_call_peak()
+    public async Task Released_together_demand_does_not_require_physical_call_overlap()
     {
         var collector = new ConcurrentLoadEvidenceCollector(requestedParallelism: 2);
         collector.BeginWave();
@@ -31,12 +31,12 @@ public sealed class ConcurrentLoadEvidenceCollectorTests
         });
 
         await Task.WhenAll(attempts);
-        collector.CompleteWave(successful: 1, conflicts: 1);
+        collector.CompleteWave(successful: 1, conflicts: 1, releasedTogether: ready == 2);
         var evidence = collector.Build();
 
         Assert.Equal(1, evidence.PeakInFlightProductionStoreCalls);
-        Assert.Equal(0, evidence.FullyParallelWaveCount);
-        Assert.False(evidence.MeetsConfiguredParallelism(2));
+        Assert.Equal(1, evidence.ReleasedTogetherWaveCount);
+        Assert.True(evidence.MeetsConfiguredContention(2));
     }
 
     [Fact]
@@ -48,11 +48,12 @@ public sealed class ConcurrentLoadEvidenceCollectorTests
         {
         }
 
-        Assert.Throws<InvalidOperationException>(() => collector.CompleteWave(successful: 1, conflicts: 1));
+        Assert.Throws<InvalidOperationException>(() =>
+            collector.CompleteWave(successful: 1, conflicts: 1, releasedTogether: true));
     }
 
     [Fact]
-    public void Under_parallel_wave_makes_sealed_evidence_ineligible()
+    public void Wave_not_released_together_makes_sealed_evidence_ineligible()
     {
         var collector = new ConcurrentLoadEvidenceCollector(requestedParallelism: 2);
         collector.BeginWave();
@@ -62,12 +63,12 @@ public sealed class ConcurrentLoadEvidenceCollectorTests
         using (collector.EnterProductionStoreCall())
         {
         }
-        collector.CompleteWave(successful: 1, conflicts: 1);
+        collector.CompleteWave(successful: 1, conflicts: 1, releasedTogether: false);
 
         var evidence = collector.Build();
 
         Assert.True(evidence.IsInternallyConsistent());
-        Assert.False(evidence.MeetsConfiguredParallelism(2));
+        Assert.False(evidence.MeetsConfiguredContention(2));
     }
 
     [Fact]
@@ -76,21 +77,21 @@ public sealed class ConcurrentLoadEvidenceCollectorTests
         var valid = new ConcurrentLoadEvidence(
             RequestedParallelism: 2,
             WaveCount: 2,
-            FullyParallelWaveCount: 2,
+            ReleasedTogetherWaveCount: 2,
             Attempts: 4,
             Completions: 4,
             SuccessfulOperations: 2,
             ConflictOperations: 2,
             PeakInFlightProductionStoreCalls: 2);
 
-        Assert.True(valid.MeetsConfiguredParallelism(2));
+        Assert.True(valid.MeetsConfiguredContention(2));
         Assert.False((valid with { Attempts = 3 }).IsInternallyConsistent());
-        Assert.False((valid with { FullyParallelWaveCount = 1 }).MeetsConfiguredParallelism(2));
+        Assert.False((valid with { ReleasedTogetherWaveCount = 1 }).MeetsConfiguredContention(2));
         Assert.False((valid with
         {
             RequestedParallelism = int.MaxValue,
             WaveCount = long.MaxValue,
-            FullyParallelWaveCount = long.MaxValue
+            ReleasedTogetherWaveCount = long.MaxValue
         }).IsInternallyConsistent());
     }
 }

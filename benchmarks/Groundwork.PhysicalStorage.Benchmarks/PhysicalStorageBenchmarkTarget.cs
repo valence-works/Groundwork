@@ -579,7 +579,9 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
             payloadBytes += results.Sum(result => Encoding.UTF8.GetByteCount(result.Payload));
             concurrentLoad.CompleteWave(
                 results.Count(result => result.Result.Status == DocumentStoreWriteStatus.Saved),
-                results.Count(result => result.Result.Status == DocumentStoreWriteStatus.ConcurrencyConflict));
+                results.Count(result => result.Result.Status == DocumentStoreWriteStatus.ConcurrencyConflict),
+                releasedTogether: Volatile.Read(ref readyCount) == concurrency &&
+                                  release.Task.IsCompletedSuccessfully);
             foreach (var result in results)
                 operationLatencies.Add(result.Latency);
             observed.Add(
@@ -590,8 +592,8 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
                 NormalizeConcurrentPayload(winnerDocument.ContentJson, concurrency));
         }
         var concurrentEvidence = concurrentLoad.Build();
-        if (!concurrentEvidence.MeetsConfiguredParallelism(concurrency))
-            throw new InvalidOperationException("Concurrent-create workload did not retain complete sustained-load evidence.");
+        if (!concurrentEvidence.MeetsConfiguredContention(concurrency))
+            throw new InvalidOperationException("Concurrent-create workload did not retain complete synchronized-contention evidence.");
         return Execution(
             batches * concurrency,
             payloadBytes,

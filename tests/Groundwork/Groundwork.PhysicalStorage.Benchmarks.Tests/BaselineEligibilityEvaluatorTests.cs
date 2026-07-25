@@ -26,7 +26,7 @@ public sealed class BaselineEligibilityEvaluatorTests
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("four providers", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("recovery", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("immutable-baseline", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Contains("sustained concurrent-load", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Contains("synchronized-contention", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -68,7 +68,7 @@ public sealed class BaselineEligibilityEvaluatorTests
                     ? new ConcurrentLoadEvidence(
                         RequestedParallelism: BenchmarkProfiles.Scheduled.Concurrency,
                         WaveCount: 10,
-                        FullyParallelWaveCount: 10,
+                        ReleasedTogetherWaveCount: 10,
                         Attempts: 160,
                         Completions: 160,
                         SuccessfulOperations: 10,

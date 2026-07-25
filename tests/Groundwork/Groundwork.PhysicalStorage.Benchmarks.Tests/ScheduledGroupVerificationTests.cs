@@ -527,7 +527,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                             ? new ConcurrentLoadEvidence(
                                 BenchmarkProfiles.Scheduled.Concurrency,
                                 WaveCount: 1,
-                                FullyParallelWaveCount: 1,
+                                ReleasedTogetherWaveCount: 1,
                                 Attempts: BenchmarkProfiles.Scheduled.Concurrency,
                                 Completions: BenchmarkProfiles.Scheduled.Concurrency,
                                 SuccessfulOperations: 1,

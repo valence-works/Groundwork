@@ -7,9 +7,10 @@ automation:
 - `raw-measurement.schema.json` describes one line of `raw/measurements.jsonl`, including the
   directly timed per-operation latency observations used for percentiles and bootstraps, plus
   target-scoped provider database-work telemetry and workload-conditioned concurrent-load
-  evidence. Concurrent-create records retain only counts (configured parallelism, complete and
-  fully parallel waves, attempts, completions, outcomes, and peak in-flight production-store
-  calls); they never infer overlap from configuration or retain payloads or connection values. The telemetry captures only its source,
+  evidence. Concurrent-create records retain only counts (configured parallelism, complete
+  released-together waves, attempts, completions, outcomes, and peak in-flight public
+  production-store calls). The peak is provider characterization, not a universal overlap gate;
+  records never infer physical overlap from configuration or retain payloads or connection values. The telemetry captures only its source,
   availability, and positive counts; it never includes connection values, database names, command
   text, or provider secrets. A signal that cannot be observed is represented by `null` counts and
   an explicit `unavailable` reason, never by a zero measurement.

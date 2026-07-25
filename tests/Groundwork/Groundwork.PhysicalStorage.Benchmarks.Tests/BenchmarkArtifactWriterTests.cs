@@ -378,7 +378,7 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             ConcurrentLoad = new ConcurrentLoadEvidence(
                 RequestedParallelism: 2,
                 WaveCount: 1,
-                FullyParallelWaveCount: 1,
+                ReleasedTogetherWaveCount: 1,
                 Attempts: 2,
                 Completions: 2,
                 SuccessfulOperations: 1,

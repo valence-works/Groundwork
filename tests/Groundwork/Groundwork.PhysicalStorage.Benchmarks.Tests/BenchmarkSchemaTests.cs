@@ -120,7 +120,7 @@ public sealed class BenchmarkSchemaTests
         Assert.Equal("object", concurrent.GetProperty("type").GetString());
         Assert.True(concurrent.GetProperty("additionalProperties").GetBoolean() is false);
         Assert.Equal(
-            ["requestedParallelism", "waveCount", "fullyParallelWaveCount", "attempts", "completions", "successfulOperations", "conflictOperations", "peakInFlightProductionStoreCalls"],
+            ["requestedParallelism", "waveCount", "releasedTogetherWaveCount", "attempts", "completions", "successfulOperations", "conflictOperations", "peakInFlightProductionStoreCalls"],
             concurrent.GetProperty("required").EnumerateArray().Select(property => property.GetString()));
         Assert.Equal(1, document.RootElement.GetProperty("allOf").GetArrayLength());
     }

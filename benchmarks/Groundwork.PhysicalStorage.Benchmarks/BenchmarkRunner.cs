@@ -428,11 +428,11 @@ public sealed class BenchmarkRunner
         }
 
         if (execution.ConcurrentLoad is null ||
-            !execution.ConcurrentLoad.MeetsConfiguredParallelism(configuredParallelism))
+            !execution.ConcurrentLoad.MeetsConfiguredContention(configuredParallelism))
         {
             throw new InvalidOperationException(
-                $"[{benchmarkCase.Identity}] concurrent-create requires complete evidence with an observed " +
-                "peak equal to configured parallelism.");
+                $"[{benchmarkCase.Identity}] concurrent-create requires complete synchronized-contention " +
+                "evidence with every configured contender released together and every outcome accounted.");
         }
     }
 

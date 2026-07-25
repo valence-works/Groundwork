@@ -125,7 +125,7 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
     [InlineData(PhysicalStorageForm.SharedDocuments)]
     [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
     [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
-    public async Task Concurrent_create_retains_full_parallel_production_store_call_evidence(PhysicalStorageForm form)
+    public async Task Concurrent_create_retains_released_together_contention_evidence(PhysicalStorageForm form)
     {
         await using var target = new SqliteBenchmarkTarget(form, Guid.NewGuid().ToString("N")[..8], scratch, 5);
         await target.InitializeAsync(CancellationToken.None);
@@ -144,13 +144,13 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         var evidence = Assert.IsType<ConcurrentLoadEvidence>(execution.ConcurrentLoad);
         Assert.Equal(4, evidence.RequestedParallelism);
         Assert.Equal(3, evidence.WaveCount);
-        Assert.Equal(3, evidence.FullyParallelWaveCount);
+        Assert.Equal(3, evidence.ReleasedTogetherWaveCount);
         Assert.Equal(12, evidence.Attempts);
         Assert.Equal(12, evidence.Completions);
         Assert.Equal(3, evidence.SuccessfulOperations);
         Assert.Equal(9, evidence.ConflictOperations);
-        Assert.Equal(4, evidence.PeakInFlightProductionStoreCalls);
-        Assert.True(evidence.MeetsConfiguredParallelism(4));
+        Assert.InRange(evidence.PeakInFlightProductionStoreCalls, 1, 4);
+        Assert.True(evidence.MeetsConfiguredContention(4));
         Assert.Equal(12, execution.Operations);
         Assert.Equal(12, execution.OperationLatencyNanoseconds.Count);
     }

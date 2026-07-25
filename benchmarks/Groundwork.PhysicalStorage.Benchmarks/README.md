@@ -168,7 +168,7 @@ database-reported version, isolation strategy, pooling behavior, and session lif
 | `mixed-compound-ordering` | Repeat equality queries with descending rank after ascending scope/status keys |
 | `insert`, `update`, `delete` | Repeat single-document mutations through the production store |
 | `unit-of-work` | Perform batched writes and one commit |
-| `concurrent-create` | Repeated released-together creates for one identity; each wave must record one winner, all remaining conflicts, and an observed peak of the configured number of overlapping production-store calls |
+| `concurrent-create` | Repeated synchronized-contention creates for one identity; every contender reaches the same barrier before release, and each wave records one winner plus all remaining conflicts. Public call-window overlap is provider characterization only |
 | `optimistic-concurrency` | Stale writes that must return concurrency conflicts |
 | `pagination-and-count` | Page and count operations with agreement asserted |
 | `backfill-migration` | Time materialization/backfill, then validate projection/query correctness outside timing |
@@ -198,7 +198,7 @@ An operation is the smallest semantically complete unit that the workload promis
 - point-read batch: the complete reused-client or reset-client batch (including reset when selected);
 - indexed/mixed query, insert, update, delete, stale write, and storage-growth: one store call;
 - unit of work: one begin/save-batch/commit transaction;
-- concurrent create: one competing create attempt. Every retained concurrent-create sample also seals its requested parallelism, wave count, fully parallel wave count, attempts, completions, successful/conflict outcomes, and observed peak in-flight production-store calls. Tasks waiting at the release barrier are not counted as in flight; a wave that does not reach the configured peak fails rather than being inferred from configuration;
+- concurrent create: one competing create attempt. Every retained concurrent-create sample seals its requested parallelism, wave count, released-together wave count, attempts, completions, successful/conflict outcomes, and observed peak in-flight public production-store calls. Every contender must reach the same barrier before release, every wave must release all contenders together, and every outcome must be accounted. The observed call-window peak is retained as provider characterization in `[1, N]`; it is not an eligibility gate and does not claim physical database overlap. Such an overlap claim requires provider-specific instrumentation at a lower execution boundary;
 - pagination and count: one page query or one count query;
 - backfill: one complete materialization/backfill application;
 - client restart validation: one client/factory/pool restart plus its durable-read validation batch.

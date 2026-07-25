@@ -217,7 +217,7 @@
       "required": [
         "requestedParallelism",
         "waveCount",
-        "fullyParallelWaveCount",
+        "releasedTogetherWaveCount",
         "attempts",
         "completions",
         "successfulOperations",
@@ -227,7 +227,7 @@
       "properties": {
         "requestedParallelism": { "type": "integer", "minimum": 1 },
         "waveCount": { "type": "integer", "minimum": 1 },
-        "fullyParallelWaveCount": { "type": "integer", "minimum": 0 },
+        "releasedTogetherWaveCount": { "type": "integer", "minimum": 0 },
         "attempts": { "type": "integer", "minimum": 1 },
         "completions": { "type": "integer", "minimum": 1 },
         "successfulOperations": { "type": "integer", "minimum": 1 },

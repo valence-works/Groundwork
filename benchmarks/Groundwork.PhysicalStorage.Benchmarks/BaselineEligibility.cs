@@ -63,7 +63,7 @@ public static class BaselineEligibilityEvaluator
         {
             diagnostics.Add(
                 "Future baseline activation also requires every concurrent-create sample to retain complete " +
-                "sustained concurrent-load evidence at configured parallelism.");
+                "synchronized-contention evidence at configured parallelism.");
         }
         if (cases.Any(result =>
                 result.PlanArtifacts.Count != BenchmarkPlanRequests.ForWorkloads([result.Case.Workload]).Count ||

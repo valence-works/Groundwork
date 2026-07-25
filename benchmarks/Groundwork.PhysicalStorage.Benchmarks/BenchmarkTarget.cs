@@ -73,15 +73,15 @@ public sealed record CorrectnessGateResult(
     bool MixedOrdering);
 
 /// <summary>
-/// Evidence emitted by one concurrent-create measurement. The in-flight value
-/// spans the call window immediately around the production store save; a
-/// start barrier makes its peak observable instead of inferring concurrency
-/// from configuration alone.
+/// Evidence emitted by one concurrent-create measurement. Released-together
+/// waves prove synchronized contention demand and exact outcomes. The in-flight
+/// value spans the public production-store call window and is retained only as
+/// provider characterization; it does not prove physical database overlap.
 /// </summary>
 public sealed record ConcurrentLoadEvidence(
     int RequestedParallelism,
     long WaveCount,
-    long FullyParallelWaveCount,
+    long ReleasedTogetherWaveCount,
     long Attempts,
     long Completions,
     long SuccessfulOperations,
@@ -92,8 +92,8 @@ public sealed record ConcurrentLoadEvidence(
     {
         if (RequestedParallelism <= 0 ||
             WaveCount <= 0 ||
-            FullyParallelWaveCount < 0 ||
-            FullyParallelWaveCount > WaveCount ||
+            ReleasedTogetherWaveCount < 0 ||
+            ReleasedTogetherWaveCount > WaveCount ||
             PeakInFlightProductionStoreCalls <= 0 ||
             PeakInFlightProductionStoreCalls > RequestedParallelism)
         {
@@ -116,12 +116,11 @@ public sealed record ConcurrentLoadEvidence(
         }
     }
 
-    public bool MeetsConfiguredParallelism(int configuredParallelism) =>
+    public bool MeetsConfiguredContention(int configuredParallelism) =>
         configuredParallelism > 0 &&
         IsInternallyConsistent() &&
         RequestedParallelism == configuredParallelism &&
-        FullyParallelWaveCount == WaveCount &&
-        PeakInFlightProductionStoreCalls == configuredParallelism;
+        ReleasedTogetherWaveCount == WaveCount;
 }
 
 /// <summary>
@@ -139,9 +138,8 @@ internal sealed class ConcurrentLoadEvidenceCollector
     private int inFlightProductionStoreCalls;
     private int peakInFlightProductionStoreCalls;
     private long waveCount;
-    private long fullyParallelWaveCount;
+    private long releasedTogetherWaveCount;
     private long attemptsAtWaveStart;
-    private int currentWavePeak;
     private bool waveActive;
 
     public ConcurrentLoadEvidenceCollector(int requestedParallelism)
@@ -156,7 +154,6 @@ internal sealed class ConcurrentLoadEvidenceCollector
         if (waveActive || Volatile.Read(ref inFlightProductionStoreCalls) != 0)
             throw new InvalidOperationException("A concurrent-load wave cannot start before the preceding call window closes.");
         attemptsAtWaveStart = Interlocked.Read(ref attempts);
-        Volatile.Write(ref currentWavePeak, 0);
         waveActive = true;
     }
 
@@ -165,11 +162,10 @@ internal sealed class ConcurrentLoadEvidenceCollector
         Interlocked.Increment(ref attempts);
         var observed = Interlocked.Increment(ref inFlightProductionStoreCalls);
         RecordPeak(ref peakInFlightProductionStoreCalls, observed);
-        RecordPeak(ref currentWavePeak, observed);
         return new ProductionStoreCall(this);
     }
 
-    public void CompleteWave(long successful, long conflicts)
+    public void CompleteWave(long successful, long conflicts, bool releasedTogether)
     {
         if (!waveActive || successful != 1 || conflicts != requestedParallelism - 1 ||
             Volatile.Read(ref inFlightProductionStoreCalls) != 0 ||
@@ -181,8 +177,8 @@ internal sealed class ConcurrentLoadEvidenceCollector
         Interlocked.Add(ref conflictOperations, conflicts);
         Interlocked.Add(ref completions, checked(successful + conflicts));
         Interlocked.Increment(ref waveCount);
-        if (Volatile.Read(ref currentWavePeak) == requestedParallelism)
-            Interlocked.Increment(ref fullyParallelWaveCount);
+        if (releasedTogether)
+            Interlocked.Increment(ref releasedTogetherWaveCount);
         waveActive = false;
     }
 
@@ -193,7 +189,7 @@ internal sealed class ConcurrentLoadEvidenceCollector
         return new(
             requestedParallelism,
             Interlocked.Read(ref waveCount),
-            Interlocked.Read(ref fullyParallelWaveCount),
+            Interlocked.Read(ref releasedTogetherWaveCount),
             Interlocked.Read(ref attempts),
             Interlocked.Read(ref completions),
             Interlocked.Read(ref successfulOperations),

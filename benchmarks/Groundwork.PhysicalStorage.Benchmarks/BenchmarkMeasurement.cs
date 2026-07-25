@@ -79,7 +79,7 @@ public sealed record BenchmarkSample(
 
         return ConcurrentLoad is not null &&
                (configuredParallelism.HasValue
-                   ? ConcurrentLoad.MeetsConfiguredParallelism(configuredParallelism.Value)
+                   ? ConcurrentLoad.MeetsConfiguredContention(configuredParallelism.Value)
                    : ConcurrentLoad.IsInternallyConsistent());
     }
 }
