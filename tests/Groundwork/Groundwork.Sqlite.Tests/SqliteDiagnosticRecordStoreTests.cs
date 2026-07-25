@@ -48,6 +48,7 @@ public sealed class SqliteDiagnosticRecordStoreTests : RelationalDiagnosticRecor
             snapshotHighWater: 42);
 
         Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("r.cursor <= @snapshot", command.CommandText, StringComparison.Ordinal);
         Assert.Contains("ORDER BY r.cursor DESC", command.CommandText, StringComparison.Ordinal);
         Assert.Contains("LIMIT @inputLimit", command.CommandText, StringComparison.Ordinal);
         Assert.Equal(2, command.Parameters["inputLimit"]);
@@ -73,28 +74,56 @@ public sealed class SqliteDiagnosticRecordStoreTests : RelationalDiagnosticRecor
             DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
             [
                 "id=1;parent=0;detail=MATERIALIZE reducer_0_ranked",
-                "id=2;parent=1;detail=SCAN CONSTANT ROW",
-                "id=3;parent=0;detail=SEARCH r USING COVERING INDEX sqlite_autoindex_groundwork_diagnostic_records_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
-                "id=4;parent=0;detail=SEARCH f USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)"
+                "id=2;parent=1;detail=CO-ROUTINE reducer-input",
+                "id=3;parent=2;detail=MATERIALIZE input_window",
+                "id=4;parent=3;detail=SEARCH r USING INDEX ix_groundwork_diagnostic_records_scope_cursor (tenant_id=? AND scope_id=? AND stream_id=? AND cursor<?)",
+                "id=5;parent=2;detail=SCAN r",
+                "id=6;parent=2;detail=USE TEMP B-TREE FOR ORDER BY",
+                "id=7;parent=0;detail=SEARCH g USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
+                "id=8;parent=0;detail=MATERIALIZE reducer_1",
+                "id=9;parent=8;detail=USE TEMP B-TREE FOR GROUP BY"
             ]);
 
         Assert.False(SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
     }
 
     [Fact]
-    public void Grouped_reduction_recognizer_rejects_scoped_reducer_without_aggregate_evidence()
+    public void Grouped_reduction_recognizer_rejects_input_window_without_a_connected_record_consumer()
     {
         var plan = new DiagnosticRecordNativePlan(
             "sqlite",
             DiagnosticRecordPlanOperation.GroupedQuery,
             DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
             [
-                "id=1;parent=0;detail=MATERIALIZE reducer_0",
-                "id=2;parent=1;detail=SEARCH r USING COVERING INDEX sqlite_autoindex_groundwork_diagnostic_records_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
-                "id=3;parent=1;detail=SEARCH f USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)"
+                "id=1;parent=0;detail=MATERIALIZE reducer_0_ranked",
+                "id=2;parent=1;detail=MATERIALIZE input_window",
+                "id=3;parent=2;detail=SEARCH r USING INDEX ix_groundwork_diagnostic_records_scope_cursor (tenant_id=? AND scope_id=? AND stream_id=? AND cursor<?)",
+                "id=4;parent=1;detail=SEARCH g USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
+                "id=5;parent=1;detail=USE TEMP B-TREE FOR ORDER BY",
+                "id=6;parent=0;detail=SCAN r"
             ]);
 
         Assert.False(SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_accepts_one_connected_bounded_reducer_lineage()
+    {
+        var plan = new DiagnosticRecordNativePlan(
+            "sqlite",
+            DiagnosticRecordPlanOperation.GroupedQuery,
+            DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
+            [
+                "id=1;parent=0;detail=MATERIALIZE reducer_0_ranked",
+                "id=2;parent=1;detail=CO-ROUTINE reducer-input",
+                "id=3;parent=2;detail=MATERIALIZE input_window",
+                "id=4;parent=3;detail=SEARCH r USING INDEX ix_groundwork_diagnostic_records_scope_cursor (tenant_id=? AND scope_id=? AND stream_id=? AND cursor<?)",
+                "id=5;parent=2;detail=SCAN r",
+                "id=6;parent=2;detail=SEARCH g USING INDEX sqlite_autoindex_groundwork_diagnostic_fields_1 (tenant_id=? AND scope_id=? AND stream_id=? AND cursor=?)",
+                "id=7;parent=2;detail=USE TEMP B-TREE FOR ORDER BY"
+            ]);
+
+        Assert.True(SqliteDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
     }
 }
 
@@ -1185,27 +1214,39 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
             return false;
         var rowsById = rows.ToDictionary(row => row.Id);
 
-        var hasBoundedInputWindow = rows
-            .Where(row => row.Detail.Equals("MATERIALIZE input_window", StringComparison.Ordinal))
-            .Any(window => rows
-                .Where(row => IsDescendantOrSelf(row, window.Id, rowsById))
-                .Select(row => row.Detail)
-                .Any(line =>
-                line.Contains("SEARCH r ", StringComparison.Ordinal) &&
-                line.Contains("groundwork_diagnostic_records", StringComparison.Ordinal) &&
-                HasScopeConstraints(line)));
-        var hasScopedFieldAccess = rows.Select(row => row.Detail).Any(line =>
-                line.Contains("SEARCH ", StringComparison.Ordinal) &&
-                line.Contains("groundwork_diagnostic_fields", StringComparison.Ordinal) &&
-                HasScopeConstraints(line));
-        var hasAggregate = rows
-            .Where(row => row.Detail.StartsWith("MATERIALIZE reducer_", StringComparison.Ordinal))
-            .Any(reduction => rows
-                .Where(row => IsDescendantOrSelf(row, reduction.Id, rowsById))
-                .Select(row => row.Detail)
-                .Any(line => line.Equals("USE TEMP B-TREE FOR GROUP BY", StringComparison.Ordinal)));
+        return rows
+            .Where(row =>
+                row.Detail.StartsWith("MATERIALIZE reducer_", StringComparison.Ordinal) ||
+                row.Detail.Equals("MATERIALIZE group_keys_ranked", StringComparison.Ordinal))
+            .Any(reduction =>
+            {
+                var lineage = rows
+                    .Where(row => IsDescendantOrSelf(row, reduction.Id, rowsById))
+                    .ToArray();
+                var hasBoundedInputWindow = lineage
+                    .Where(row => row.Detail.Equals("MATERIALIZE input_window", StringComparison.Ordinal))
+                    .Any(window => rows
+                        .Where(row => IsDescendantOrSelf(row, window.Id, rowsById))
+                        .Select(row => row.Detail)
+                        .Any(line =>
+                            line.Contains("SEARCH r ", StringComparison.Ordinal) &&
+                            line.Contains("groundwork_diagnostic_records", StringComparison.Ordinal) &&
+                            HasScopeConstraints(line) &&
+                            HasCursorUpperBound(line)));
+                var consumesInputWindow = lineage.Any(row =>
+                    row.Detail.Equals("SCAN r", StringComparison.Ordinal));
+                var hasScopedGroupFieldAccess = lineage.Select(row => row.Detail).Any(line =>
+                    line.Contains("SEARCH g ", StringComparison.Ordinal) &&
+                    line.Contains("groundwork_diagnostic_fields", StringComparison.Ordinal) &&
+                    HasScopeConstraints(line));
+                var hasNativeReduction = lineage.Any(row =>
+                    row.Detail is "USE TEMP B-TREE FOR GROUP BY" or "USE TEMP B-TREE FOR ORDER BY");
 
-        return hasBoundedInputWindow && hasScopedFieldAccess && hasAggregate;
+                return hasBoundedInputWindow &&
+                       consumesInputWindow &&
+                       hasScopedGroupFieldAccess &&
+                       hasNativeReduction;
+            });
     }
 
     public ValueTask<IReadOnlyList<string>> ReadComparisonKeysAsync(
@@ -1237,6 +1278,10 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
         planLine.Contains("tenant_id=?", StringComparison.Ordinal) &&
         planLine.Contains("scope_id=?", StringComparison.Ordinal) &&
         planLine.Contains("stream_id=?", StringComparison.Ordinal);
+
+    private static bool HasCursorUpperBound(string planLine) =>
+        planLine.Contains("cursor<?", StringComparison.Ordinal) ||
+        planLine.Contains("cursor<=?", StringComparison.Ordinal);
 
     private static bool TryParsePlanRows(
         IReadOnlyList<string> rawPlans,

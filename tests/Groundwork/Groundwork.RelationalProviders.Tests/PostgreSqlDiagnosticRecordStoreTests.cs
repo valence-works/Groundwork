@@ -84,6 +84,7 @@ public sealed class PostgreSqlDiagnosticRecordStoreTests(PostgreSqlDiagnosticCon
             snapshotHighWater: 42);
 
         Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("r.cursor <= @snapshot", command.CommandText, StringComparison.Ordinal);
         Assert.Contains("ORDER BY r.cursor DESC", command.CommandText, StringComparison.Ordinal);
         Assert.Contains("LIMIT @inputLimit", command.CommandText, StringComparison.Ordinal);
         Assert.Equal(2, command.Parameters["inputLimit"]);
@@ -589,25 +590,7 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
         {
             if (element.TryGetProperty("Node Type", out var nodeType) &&
                 nodeType.GetString() == "Aggregate" &&
-                FindInPlanLineage(
-                    element,
-                    planRoot,
-                    candidate => IsScopedRelationAccess(
-                        candidate,
-                        RelationalDiagnosticRecordSchema.RecordsTable),
-                    []) &&
-                FindInPlanLineage(
-                    element,
-                    planRoot,
-                    candidate => IsScopedRelationAccess(
-                        candidate,
-                        RelationalDiagnosticRecordSchema.FieldsTable),
-                    []) &&
-                FindInPlanLineage(
-                    element,
-                    planRoot,
-                    candidate => IsBoundedScopedInputWindow(candidate, planRoot),
-                    []))
+                ConsumesConnectedBoundedBaseRecords(element, planRoot))
             {
                 return true;
             }
@@ -630,19 +613,140 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
         return false;
     }
 
-    private static bool IsBoundedScopedInputWindow(JsonElement element, JsonElement planRoot) =>
+    private static bool ConsumesConnectedBoundedBaseRecords(
+        JsonElement aggregate,
+        JsonElement planRoot) =>
+        ContainsCteScan(aggregate, "base_records") &&
+        TryFindCteProducer(planRoot, "base_records", out var baseRecords) &&
+        HasConnectedBoundedBaseRecordsJoin(baseRecords, planRoot);
+
+    private static bool HasConnectedBoundedBaseRecordsJoin(
+        JsonElement element,
+        JsonElement planRoot)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty("Node Type", out var nodeType) &&
+                nodeType.GetString() is "Nested Loop" or "Hash Join" or "Merge Join" &&
+                element.TryGetProperty("Plans", out var plans) &&
+                plans.ValueKind == JsonValueKind.Array)
+            {
+                for (var inputIndex = 0; inputIndex < plans.GetArrayLength(); inputIndex++)
+                {
+                    if (!FindInPlanLineage(
+                            plans[inputIndex],
+                            planRoot,
+                            IsBoundedScopedInputWindow,
+                            []))
+                    {
+                        continue;
+                    }
+
+                    for (var fieldIndex = 0; fieldIndex < plans.GetArrayLength(); fieldIndex++)
+                    {
+                        if (fieldIndex != inputIndex &&
+                            FindInPlanLineage(
+                                plans[fieldIndex],
+                                planRoot,
+                                candidate => IsScopedRelationAccess(
+                                    candidate,
+                                    RelationalDiagnosticRecordSchema.FieldsTable),
+                                []))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (HasConnectedBoundedBaseRecordsJoin(property.Value, planRoot))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (HasConnectedBoundedBaseRecordsJoin(item, planRoot))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsCteScan(JsonElement element, string cteName)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (HasPropertyValue(element, "Node Type", "CTE Scan") &&
+                HasPropertyValue(element, "CTE Name", cteName))
+            {
+                return true;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (ContainsCteScan(property.Value, cteName))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (ContainsCteScan(item, cteName))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsBoundedScopedInputWindow(JsonElement element) =>
         element.ValueKind == JsonValueKind.Object &&
         element.TryGetProperty("Node Type", out var nodeType) &&
         nodeType.GetString() == "Limit" &&
-        FindInPlanLineage(
-            element,
-            planRoot,
-            IsNewestScopedRecordAccess,
-            []);
+        ContainsNewestScopedRecordAccess(element);
 
-    private static bool IsNewestScopedRecordAccess(JsonElement element) =>
-        IsScopedRelationAccess(element, RelationalDiagnosticRecordSchema.RecordsTable) &&
-        HasPropertyValue(element, "Scan Direction", "Backward");
+    private static bool ContainsNewestScopedRecordAccess(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (IsScopedRelationAccess(element, RelationalDiagnosticRecordSchema.RecordsTable) &&
+                HasPropertyValue(element, "Scan Direction", "Backward") &&
+                HasCursorUpperBound(element))
+            {
+                return true;
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (ContainsNewestScopedRecordAccess(property.Value))
+                    return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (ContainsNewestScopedRecordAccess(item))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasCursorUpperBound(JsonElement element) =>
+        element.EnumerateObject().Any(property =>
+            property.Name is "Index Cond" or "Recheck Cond" or "Filter" &&
+            property.Value.ValueKind == JsonValueKind.String &&
+            property.Value.GetString() is { } predicate &&
+            ContainsExactIdentifier(predicate, "cursor") &&
+            predicate.Contains("<=", StringComparison.Ordinal));
 
     private static bool FindInPlanLineage(
         JsonElement element,
@@ -896,6 +1000,75 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
     }
 
     [Fact]
+    public void Grouped_reduction_recognizer_rejects_all_required_fragments_when_the_bounded_input_does_not_feed_the_field_join()
+    {
+        var plan = GroupedPlan(
+            $$"""
+              {
+                "Node Type": "Sort",
+                "Plans": [
+                  {
+                    "Node Type": "Limit",
+                    "Subplan Name": "CTE input_window",
+                    "Plans": [{{NewestRecordSeek()}}]
+                  },
+                  {
+                    "Node Type": "Append",
+                    "Subplan Name": "CTE base_records",
+                    "Plans": [
+                      {"Node Type": "CTE Scan", "CTE Name": "input_window"},
+                      {
+                        "Node Type": "Nested Loop",
+                        "Plans": [
+                          {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
+                          {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Node Type": "Aggregate",
+                    "Plans": [{"Node Type": "CTE Scan", "CTE Name": "base_records"}]
+                  }
+                ]
+              }
+              """);
+
+        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_a_forward_input_scan_even_with_disconnected_backward_evidence()
+    {
+        var plan = GroupedPlan(
+            $$"""
+              {
+                "Node Type": "Sort",
+                "Plans": [
+                  {
+                    "Node Type": "Nested Loop",
+                    "Subplan Name": "CTE base_records",
+                    "Plans": [
+                      {
+                        "Node Type": "Limit",
+                        "Plans": [{{NewestRecordSeek("Forward")}}]
+                      },
+                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
+                    ]
+                  },
+                  {{NewestRecordSeek()}},
+                  {
+                    "Node Type": "Aggregate",
+                    "Plans": [{"Node Type": "CTE Scan", "CTE Name": "base_records"}]
+                  }
+                ]
+              }
+              """);
+
+        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
     public void Grouped_reduction_recognizer_rejects_scope_predicates_disconnected_from_a_relation_access()
     {
         var plan = GroupedPlan(
@@ -1001,11 +1174,11 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
           }
           """;
 
-    private static string NewestRecordSeek() =>
+    private static string NewestRecordSeek(string scanDirection = "Backward") =>
         $$"""
           {
             "Node Type": "Index Scan",
-            "Scan Direction": "Backward",
+            "Scan Direction": "{{scanDirection}}",
             "Relation Name": "{{RelationalDiagnosticRecordSchema.RecordsTable}}",
             "Alias": "r",
             "Index Cond": "(r.tenant_id = 'tenant-a' AND r.scope_id = 'shell-a' AND r.stream_id = 'logs' AND r.cursor <= 10)"

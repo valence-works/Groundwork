@@ -805,7 +805,12 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
     {
         var fixture = CreateFixture();
         var store = OpenStore(fixture);
-        var append = Batch("trim-mid-transaction-seed", "record-1", "record-2", "record-3");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        var append = Batch(
+            "trim-mid-transaction-seed",
+            GroupedRecord("record-1", occurredAt, "old", 1, "old", "old"),
+            GroupedRecord("record-2", occurredAt.AddSeconds(1), "new-a", 1, "new", "new-a"),
+            GroupedRecord("record-3", occurredAt.AddSeconds(2), "new-b", 1, "new", "new-b"));
         await store.AppendAsync(append);
         var request = DiagnosticTrimRequest.Create(
             append.Scope,
@@ -820,12 +825,26 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
         var restarted = OpenStore(fixture);
         var afterFailure = await restarted.InspectAsync(new(request.Scope, request.Stream));
         var page = await restarted.QueryAsync(new(request.Scope, request.Stream, 10));
+        DiagnosticRecordGroupPage? groups = null;
+        if (restarted.Handlers.GroupedQuery.Capabilities.SupportsGroupedReduction)
+        {
+            groups = await restarted.QueryGroupsAsync(new(
+                request.Scope,
+                request.Stream,
+                "service-summary",
+                10,
+                new("start"),
+                InputRecordLimit: 2));
+        }
         var retry = await restarted.TrimAsync(request);
 
         Assert.Equal(3, afterFailure.RetainedCount.Value);
+        Assert.True(afterFailure.RetainedCount.Value > 2);
         Assert.Equal("3", afterFailure.MaxRetainedCursor.GetValueOrDefault().Value);
         Assert.Equal("3", afterFailure.LifetimeCommittedCursorHighWater.GetValueOrDefault().Value);
         Assert.Equal(["record-1", "record-2", "record-3"], page.Records.Select(x => x.RecordId));
+        if (groups is not null)
+            Assert.Equal(["new-a", "new-b"], groups.Groups.Select(group => group.GroupKey));
         Assert.Equal(DiagnosticTrimStatus.Completed, retry.Status);
         Assert.Equal(3, retry.ExaminedCount.Value);
         Assert.Equal(2, retry.DeletedCount.Value);
