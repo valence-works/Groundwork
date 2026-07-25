@@ -46,6 +46,7 @@ public sealed record DocumentStoreWriteResult(
         new(DocumentStoreWriteStatus.IdentityConflict, AuthoritativeId: authoritativeId);
     public static DocumentStoreWriteResult NotFound { get; } = new(DocumentStoreWriteStatus.NotFound);
     public static DocumentStoreWriteResult ConcurrencyConflict { get; } = new(DocumentStoreWriteStatus.ConcurrencyConflict);
+    public static DocumentStoreWriteResult RelationshipConflict { get; } = new(DocumentStoreWriteStatus.RelationshipConflict);
 }
 
 public enum DocumentStoreWriteStatus
@@ -54,7 +55,8 @@ public enum DocumentStoreWriteStatus
     Deleted,
     IdentityConflict,
     NotFound,
-    ConcurrencyConflict
+    ConcurrencyConflict,
+    RelationshipConflict
 }
 
 public sealed class UndeclaredDocumentIndexException(string documentKind, string indexName)

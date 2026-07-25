@@ -16,6 +16,17 @@ public sealed class DocumentStoreResultTests
     }
 
     [Fact]
+    public void Relationship_conflict_is_a_stable_provider_neutral_write_outcome()
+    {
+        var result = DocumentStoreWriteResult.RelationshipConflict;
+
+        Assert.Equal(DocumentStoreWriteStatus.RelationshipConflict, result.Status);
+        Assert.Null(result.AuthoritativeId);
+        Assert.Null(result.Document);
+        Assert.Same(result, DocumentStoreWriteResult.RelationshipConflict);
+    }
+
+    [Fact]
     public void Lookup_collision_exposes_provider_neutral_diagnostic_identity()
     {
         var exception = new DocumentIdentityLookupCollisionException(
