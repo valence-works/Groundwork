@@ -143,7 +143,7 @@
             "availability": { "const": "observed" },
             "source": { "const": "target-scoped-client-activity" },
             "reason": { "type": "null" },
-            "commandStarts": { "type": ["integer", "null"], "minimum": 1 },
+            "commandStarts": { "type": "null" },
             "clientActivities": { "type": "integer", "minimum": 1 },
             "observableRoundTrips": { "type": "integer", "minimum": 1 }
           },

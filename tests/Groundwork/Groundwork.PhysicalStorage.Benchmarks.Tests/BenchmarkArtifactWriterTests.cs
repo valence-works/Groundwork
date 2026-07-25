@@ -116,6 +116,40 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Raw_writer_and_reader_reject_an_observed_count_that_disagrees_with_claimed_round_trips()
+    {
+        var layout = new ArtifactLayout(root);
+        layout.CreateDirectories();
+        var sample = new BenchmarkSample(
+            0, 1, 100, 50, 2, 0, 0, null, null, new Dictionary<string, long>(), [100])
+        {
+            DatabaseSignal = new DatabaseSignalEvidence(
+                DatabaseSignalAvailability.Observed,
+                "target-scoped-diagnostic-command",
+                null,
+                CommandStarts: 1,
+                ClientActivities: null,
+                ObservableRoundTrips: 2)
+        };
+        var record = new RawBenchmarkRecord(
+            new BenchmarkCase(BenchmarkProvider.Sqlite, PhysicalStorageForm.SharedDocuments, BenchmarkWorkload.Insert),
+            sample);
+        await using (var writer = new BenchmarkArtifactWriter(layout))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                writer.AppendSampleAsync(record, CancellationToken.None));
+        }
+
+        await File.WriteAllTextAsync(
+            layout.RawMeasurements,
+            JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions) + Environment.NewLine);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Report_includes_insufficient_Elsa_migration_evidence_without_a_decision_claim()
     {
         var layout = new ArtifactLayout(root);

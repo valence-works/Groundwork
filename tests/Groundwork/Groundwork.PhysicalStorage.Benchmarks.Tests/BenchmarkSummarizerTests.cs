@@ -18,6 +18,27 @@ public sealed class BenchmarkSummarizerTests
     }
 
     [Fact]
+    public void Summary_rejects_an_observed_source_count_that_disagrees_with_round_trips()
+    {
+        var sample = new BenchmarkSample(
+            0, 1, 1_000, 200, 2, 0, 0, null, null, new Dictionary<string, long>(), [100])
+        {
+            DatabaseSignal = new DatabaseSignalEvidence(
+                DatabaseSignalAvailability.Observed,
+                "target-scoped-diagnostic-command",
+                null,
+                CommandStarts: 1,
+                ClientActivities: null,
+                ObservableRoundTrips: 2)
+        };
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            BenchmarkSummarizer.Summarize("case", [sample]));
+
+        Assert.Contains("target-scoped database-signal evidence", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Summary_reports_raw_operation_latency_throughput_allocation_round_trips_and_write_amplification()
     {
         var before = new StorageSnapshot(1_000, 200, 10, 10, new Dictionary<string, long>());

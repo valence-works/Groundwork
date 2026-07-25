@@ -75,6 +75,19 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rejects_a_resealed_raw_and_summary_pair_with_a_forged_observed_count()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { ForgeMeasuredObservedCountMismatch = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("target-scoped database-signal invariant", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Rejects_measured_workers_that_do_not_meet_the_authenticated_operation_and_duration_floors()
     {
         var fixture = await ScheduledGroupFixture.CreateAsync(
@@ -177,6 +190,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             public bool ForgeMeasuredConsumerResultDigest { get; init; }
             public bool TamperMeasuredRawDatabaseSignal { get; init; }
             public bool ForgeMeasuredUnavailableRoundTrips { get; init; }
+            public bool ForgeMeasuredObservedCountMismatch { get; init; }
             public bool GitDirty { get; init; }
             public bool WriteMeasuredIntegrityLedger { get; init; } = true;
             public int MeasuredSampleCount { get; init; } = 30;
@@ -303,14 +317,19 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                 : [];
             var forgeUnavailableRoundTrips = options.ForgeMeasuredUnavailableRoundTrips &&
                                                 role == BenchmarkExecutionRole.Measured;
+            var forgeObservedCountMismatch = options.ForgeMeasuredObservedCountMismatch &&
+                                               role == BenchmarkExecutionRole.Measured;
             if (forgeUnavailableRoundTrips)
                 samples = ForgeUnavailableRoundTrips(samples);
+            else if (forgeObservedCountMismatch)
+                samples = ForgeObservedCountMismatch(samples);
+            var forgeDatabaseSignal = forgeUnavailableRoundTrips || forgeObservedCountMismatch;
             var benchmarkCase = new BenchmarkCase(
                 BenchmarkProvider.Sqlite,
                 PhysicalStorageForm.PhysicalEntityTable,
                 BenchmarkWorkload.Insert);
-            var report = forgeUnavailableRoundTrips
-                ? CreateForgedUnavailableRoundTripReport(samples, benchmarkCase, shape, workerRoot)
+            var report = forgeDatabaseSignal
+                ? CreateForgedDatabaseSignalReport(samples, benchmarkCase, shape, workerRoot)
                 : CreateReport(role, samples, benchmarkCase, shape, workerRoot);
             var runId = $"scheduled-fixture-{ordinalText}";
             var workerManifest = new BenchmarkRunManifest(
@@ -337,9 +356,9 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     : null,
                 ArtifactIntegrity: "reports/artifact-integrity.json");
 
-            if (forgeUnavailableRoundTrips)
+            if (forgeDatabaseSignal)
             {
-                await WriteForgedUnavailableRoundTripArtifactsAsync(
+                await WriteForgedDatabaseSignalArtifactsAsync(
                     layout,
                     workerManifest,
                     machine,
@@ -468,7 +487,20 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         private static IReadOnlyList<BenchmarkSample> ForgeUnavailableRoundTrips(IReadOnlyList<BenchmarkSample> samples) =>
             samples.Select(sample => sample with { RoundTrips = 1 }).ToArray();
 
-        private static BenchmarkRunReport CreateForgedUnavailableRoundTripReport(
+        private static IReadOnlyList<BenchmarkSample> ForgeObservedCountMismatch(IReadOnlyList<BenchmarkSample> samples) =>
+            samples.Select(sample => sample with
+            {
+                RoundTrips = 2,
+                DatabaseSignal = new DatabaseSignalEvidence(
+                    DatabaseSignalAvailability.Observed,
+                    "target-scoped-diagnostic-command",
+                    null,
+                    CommandStarts: 1,
+                    ClientActivities: null,
+                    ObservableRoundTrips: 2)
+            }).ToArray();
+
+        private static BenchmarkRunReport CreateForgedDatabaseSignalReport(
             IReadOnlyList<BenchmarkSample> samples,
             BenchmarkCase benchmarkCase,
             BenchmarkDataShape shape,
@@ -506,7 +538,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                 shape);
         }
 
-        private static async Task WriteForgedUnavailableRoundTripArtifactsAsync(
+        private static async Task WriteForgedDatabaseSignalArtifactsAsync(
             ArtifactLayout layout,
             BenchmarkRunManifest manifest,
             BenchmarkMachineMetadata machine,

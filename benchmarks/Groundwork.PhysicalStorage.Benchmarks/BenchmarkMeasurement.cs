@@ -54,8 +54,9 @@ public sealed record BenchmarkSample(
                 (DatabaseSignal.CommandStarts is null or > 0) &&
                 (DatabaseSignal.ClientActivities is null or > 0) &&
                 (DatabaseSignal.Source == "target-scoped-diagnostic-command"
-                    ? DatabaseSignal.CommandStarts is > 0
-                    : DatabaseSignal.ClientActivities is > 0),
+                    ? DatabaseSignal.CommandStarts == DatabaseSignal.ObservableRoundTrips
+                    : DatabaseSignal.CommandStarts is null &&
+                      DatabaseSignal.ClientActivities == DatabaseSignal.ObservableRoundTrips),
             DatabaseSignalAvailability.Unavailable =>
                 string.Equals(DatabaseSignal.Source, "unavailable", StringComparison.Ordinal) &&
                 !string.IsNullOrWhiteSpace(DatabaseSignal.Reason) &&

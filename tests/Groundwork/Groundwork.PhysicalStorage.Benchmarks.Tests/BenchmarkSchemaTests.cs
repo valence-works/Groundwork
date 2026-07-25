@@ -100,6 +100,10 @@ public sealed class BenchmarkSchemaTests
         Assert.Equal(1, signal.GetProperty("properties").GetProperty("clientActivities").GetProperty("minimum").GetInt32());
         Assert.Equal(1, signal.GetProperty("properties").GetProperty("observableRoundTrips").GetProperty("minimum").GetInt32());
         Assert.Equal(3, signal.GetProperty("oneOf").GetArrayLength());
+        Assert.Equal(
+            "null",
+            signal.GetProperty("oneOf")[1].GetProperty("properties")
+                .GetProperty("commandStarts").GetProperty("type").GetString());
         Assert.Equal(2, sample.GetProperty("allOf").GetArrayLength());
         Assert.Equal(
             "null",
