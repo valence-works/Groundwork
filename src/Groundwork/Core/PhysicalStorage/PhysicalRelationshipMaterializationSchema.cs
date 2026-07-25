@@ -117,6 +117,15 @@ public sealed class PhysicalRelationshipReferenceMaterializationSchema : IEquata
             isUnique: false,
             TargetSeekFields,
             nameof(targetSeekAccessPath));
+        if (string.Equals(
+                uniqueSourceAccessPath.Identity,
+                targetSeekAccessPath.Identity,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Relationship source and target access paths must have distinct identities.",
+                nameof(targetSeekAccessPath));
+        }
 
         StorageIdentity = storageIdentity;
         GenerationIdentity = generationIdentity;
@@ -243,11 +252,17 @@ public sealed class PhysicalRelationshipMaterializationSchema : IEquatable<Physi
         ArgumentException.ThrowIfNullOrWhiteSpace(generationIdentity);
         ArgumentNullException.ThrowIfNull(reference);
         ArgumentNullException.ThrowIfNull(fence);
-        if (!string.Equals(reference.GenerationIdentity, generationIdentity, StringComparison.Ordinal) ||
+        if (!string.Equals(reference.StorageIdentity, generationIdentity, StringComparison.Ordinal) ||
+            !string.Equals(reference.GenerationIdentity, generationIdentity, StringComparison.Ordinal) ||
             !string.Equals(fence.GenerationIdentity, generationIdentity, StringComparison.Ordinal))
         {
             throw new ArgumentException(
-                "Relationship reference and fence schemas must use one materialization generation.");
+                "Relationship reference and fence schemas must use one materialization generation, identified by the reference storage.");
+        }
+        if (string.Equals(reference.StorageIdentity, fence.StorageIdentity, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Relationship reference materialization and target-key fence must use distinct storage identities.");
         }
 
         RelationshipIdentity = relationshipIdentity;
