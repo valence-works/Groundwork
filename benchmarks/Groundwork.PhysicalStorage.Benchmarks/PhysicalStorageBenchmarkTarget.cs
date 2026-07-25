@@ -44,15 +44,6 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
 
     public abstract Task InitializeAsync(CancellationToken cancellationToken);
 
-    public virtual Task SeedAsync(int seed, int count, CancellationToken cancellationToken) =>
-        SeedAsync(
-            seed,
-            new BenchmarkDataShape(
-                count,
-                0,
-                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints),
-            cancellationToken);
-
     public virtual async Task SeedAsync(
         int seed,
         BenchmarkDataShape shape,

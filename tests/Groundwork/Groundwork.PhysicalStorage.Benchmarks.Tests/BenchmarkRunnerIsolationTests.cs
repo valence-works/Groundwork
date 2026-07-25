@@ -38,7 +38,11 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         var measured = Assert.Single(environment.Targets, target => target.Instance.Contains("measure", StringComparison.Ordinal));
         var plans = Assert.Single(environment.Targets, target => target.Instance.Contains("plan", StringComparison.Ordinal));
         Assert.NotEqual(measured.Instance, plans.Instance);
-        Assert.Equal((configuration.Seed, configuration.DatasetSize), measured.Seed);
+        Assert.Equal(configuration.Seed, measured.Seed.Seed);
+        Assert.Equal(configuration.DatasetSize, measured.Seed.Shape.DatasetSize);
+        Assert.Equal(
+            BenchmarkPayloadProfiles.For(BenchmarkWorkload.IndexedQuery),
+            measured.Seed.Shape.PayloadProfile);
         Assert.Equal(measured.Seed, plans.Seed);
         Assert.Equal(1, measured.CorrectnessCalls);
         Assert.Equal(0, plans.CorrectnessCalls);
@@ -317,7 +321,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         public string ProviderVersion => "test";
         public IReadOnlyDictionary<string, string> ProviderConfiguration { get; } = new Dictionary<string, string>();
         public string Instance => instance;
-        public (int Seed, int Count) Seed { get; private set; }
+        public (int Seed, BenchmarkDataShape Shape) Seed { get; private set; }
         public int CorrectnessCalls { get; private set; }
         public int PlanCalls { get; private set; }
         public List<NativePlanAssertionMode> PlanAssertionModes { get; } = [];
@@ -326,9 +330,9 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
 
         public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task SeedAsync(int seed, int count, CancellationToken cancellationToken)
+        public Task SeedAsync(int seed, BenchmarkDataShape shape, CancellationToken cancellationToken)
         {
-            Seed = (seed, count);
+            Seed = (seed, shape);
             return Task.CompletedTask;
         }
 

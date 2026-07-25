@@ -6,8 +6,8 @@ the three physical storage forms. It materializes real manifests, creates real s
 production sessions and bounded-query translation, and records provider-native query plans.
 
 It does **not** complete issue #50. The scheduled protocol now carries the ratified 1K/100K/1M
-dataset dimension, the accepted one-warm-up/three-measured-process scheduled protocol, a closed
-reviewed payload-profile binding, and a ratified selectivity policy: 10% is the mandatory
+dataset dimension, the accepted one-warm-up/three-measured-process scheduled protocol, closed
+reviewed payload-profile bindings, and a ratified selectivity policy: 10% is the mandatory
 indexed-query acceptance shape and 50% is a retained scan characterization. The harness contains no EF Core comparison, cannot promote
 baselines, and cannot make an Elsa migration go/no-go decision.
 
@@ -80,7 +80,7 @@ still requires controlled execution of the complete reviewed matrix, exact-HEAD 
 all four providers, and the Elsa-owned EF Core oracle.
 
 The GitHub workflow is named `Physical Storage Benchmark Evidence (Scaffolding)`. Pull requests run
-a deliberately narrow SQLite/shared-form smoke over five representative workloads. Weekly/manual
+a deliberately narrow SQLite/shared-form smoke over six representative workloads. Weekly/manual
 runs split the four-provider scheduled scaffold into deterministic provider/form/dataset shards on
 the controlled self-hosted runner pool. Every artifact remains non-promotable; the workflow does
 not perform candidate promotion or migration-decision gating.
@@ -88,7 +88,7 @@ not perform candidate promotion or migration-decision gating.
 The scheduled cardinality is calculated, not inferred:
 
 - `4 providers × 3 forms × 3 dataset sizes = 36` shards;
-- each shard has `2 selectivity shapes × 14 workloads × (1 untimed warm-up + 3 measured repetitions) = 112` workers; the reviewed payload profile is bound per workload, not multiplied into a second dimension;
+- each shard has `2 selectivity shapes × 14 workloads × (1 untimed warm-up + 3 measured repetitions) = 112` workers; the reviewed payload profiles are bound per workload, not multiplied into a second dimension;
 - the complete schedule therefore has `4,032` workers: `1,008` warm-up and `3,024` measured; and
 - the mandatory 30-second measured floor alone is `3,024 × 30 = 90,720 seconds`, or 25.2 aggregate
   measured hours before setup, seeding, validation, and artifact work.
@@ -306,10 +306,25 @@ request smoke remains deliberately narrow and every workflow artifact remains no
 The originating reviewers must re-verify the frozen remediation commit before merge. Their final
 verdicts and any further dispositions are recorded here when that gate completes.
 
+### Draft post-review dispositions (pending re-verification)
+
+These are author draft dispositions, not reviewer approvals. The originating reviewers have not
+yet re-verified this remediation commit.
+
+- **Payload-profile preservation — proposed addressed:** the benchmark target contract now requires
+  a complete `BenchmarkDataShape` for seeding, and the runner regression double records the full
+  shape for both the measured and isolated plan targets.
+- **PR smoke coverage — proposed addressed:** the SQLite/shared-form pull-request smoke now also
+  executes `storage-growth`.
+- **SQLite payload evidence — proposed addressed:** the SQLite target test checks the returned and
+  persisted storage-growth padding against the profile's exact UTF-8 byte count.
+- **Payload-profile documentation — proposed addressed:** the matrix and baseline-eligibility text
+  now describe the workload-bound reviewed payload profiles in the plural.
+
 ## Remaining issue #50 acceptance work
 
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
-  the 1K/100K/1M dataset matrix for one named, reviewed payload profile.
+  the 1K/100K/1M dataset matrix for the reviewed workload-bound payload profiles.
 - Capture exact-HEAD live evidence from SQLite, SQL Server, PostgreSQL, and MongoDB.
 - Complete reliable provider database-work/round-trip signals and concurrent-load evidence.
 - Define, approve, integrity-protect, and exercise the immutable-baseline workflow.

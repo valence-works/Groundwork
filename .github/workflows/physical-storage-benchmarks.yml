@@ -57,7 +57,7 @@ jobs:
             --profile smoke \
             --providers sqlite \
             --forms shared \
-            --workloads reused-client-point-read-batch,indexed-query,insert,optimistic-concurrency,pagination-and-count \
+            --workloads reused-client-point-read-batch,indexed-query,insert,optimistic-concurrency,pagination-and-count,storage-growth \
             --output "${RUNNER_TEMP}/physical-storage-smoke"
 
       - name: Upload non-promotable smoke evidence

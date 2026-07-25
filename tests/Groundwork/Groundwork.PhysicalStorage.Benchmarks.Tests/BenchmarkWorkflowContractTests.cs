@@ -225,7 +225,7 @@ public sealed class BenchmarkWorkflowContractTests
         Assert.Contains("--providers sqlite", workflow, StringComparison.Ordinal);
         Assert.Contains("--forms shared", workflow, StringComparison.Ordinal);
         Assert.Contains(
-            "--workloads reused-client-point-read-batch,indexed-query,insert,optimistic-concurrency,pagination-and-count",
+            "--workloads reused-client-point-read-batch,indexed-query,insert,optimistic-concurrency,pagination-and-count,storage-growth",
             workflow,
             StringComparison.Ordinal);
         Assert.DoesNotContain("--providers all", workflow, StringComparison.Ordinal);
