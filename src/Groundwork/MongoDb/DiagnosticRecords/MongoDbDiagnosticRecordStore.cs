@@ -313,7 +313,8 @@ public sealed class MongoDbDiagnosticRecordStore :
                     snapshot,
                     AssertSingleReducedValue(last, query.Order.Alias),
                     last.GroupKey,
-                    DiagnosticRequestFingerprint.ForGroupQuery(query with { Continuation = null }, _definition));
+                    DiagnosticRequestFingerprint.ForGroupQuery(query with { Continuation = null }, _definition),
+                    query.InputRecordLimit);
             }
             return new DiagnosticRecordGroupPage(Array.AsReadOnly(groups), continuation);
         }, cancellationToken);
@@ -755,7 +756,10 @@ public sealed class MongoDbDiagnosticRecordStore :
         {
             new("$match", Render(
                 ScopeFilter(query.Scope, query.Stream) &
-                Builders<BsonDocument>.Filter.Lte("cursor", snapshotCursor)))
+                Builders<BsonDocument>.Filter.Lte("cursor", snapshotCursor))),
+            new("$sort", new BsonDocument("cursor", -1)),
+            new("$limit", query.InputRecordLimit),
+            new("$sort", new BsonDocument("cursor", 1))
         };
         var projected = new BsonDocument
         {
@@ -871,7 +875,6 @@ public sealed class MongoDbDiagnosticRecordStore :
                     UnionPredicateMatchExpression($"${source}", binding.Predicate, output));
             }
         }
-        pipeline.Add(new("$sort", new BsonDocument("cursor", 1)));
         pipeline.Add(new("$set", projected));
         pipeline.Add(new("$match", new BsonDocument("_group.native", new BsonDocument("$ne", BsonNull.Value))));
         pipeline.Add(new("$group", grouped));
@@ -1105,6 +1108,8 @@ public sealed class MongoDbDiagnosticRecordStore :
                 { "stream_id", query.Stream.Value },
                 { "cursor", new BsonDocument("$lte", snapshotCursor) }
             }),
+            new BsonDocument("$sort", new BsonDocument("cursor", -1)),
+            new BsonDocument("$limit", query.InputRecordLimit),
             new BsonDocument("$set", new BsonDocument
             {
                 { "_lookup_group", QueryValueExpression(profile.GroupKeyField) },

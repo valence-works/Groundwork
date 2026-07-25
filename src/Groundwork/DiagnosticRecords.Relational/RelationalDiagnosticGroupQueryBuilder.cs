@@ -22,6 +22,7 @@ internal sealed class RelationalDiagnosticGroupQueryBuilder(
         AddNamed("scope", query.Scope.ScopeId);
         AddNamed("stream", query.Stream.Value);
         AddNamed("snapshot", snapshotHighWater);
+        AddNamed("inputLimit", query.InputRecordLimit);
         AddNamed("take", query.Take + 1);
         AddNamed("returnedTake", query.Take);
         AddNamed("groupField", profile.GroupKeyField);
@@ -31,19 +32,30 @@ internal sealed class RelationalDiagnosticGroupQueryBuilder(
         var ctes = new List<string>
         {
             $"""
+            input_window AS (
+                {dialect.ApplyLimit(
+                    $"""
+                    SELECT r.tenant_id, r.scope_id, r.stream_id, r.cursor, r.occurred_at_ticks
+                    FROM {dialect.TableReference(RelationalDiagnosticRecordSchema.RecordsTable, "r")}
+                    WHERE r.tenant_id = {dialect.Parameter("tenant")}
+                      AND r.scope_id = {dialect.Parameter("scope")}
+                      AND r.stream_id = {dialect.Parameter("stream")}
+                      AND r.cursor <= {dialect.Parameter("snapshot")}
+                    ORDER BY r.cursor DESC
+                    """,
+                    "inputLimit")}
+            )
+            """,
+            $"""
             base_records AS (
                 SELECT r.tenant_id, r.scope_id, r.stream_id, r.cursor, r.occurred_at_ticks,
                        g.canonical_value AS group_key, g.comparison_key AS group_key_order
-                FROM {dialect.TableReference(RelationalDiagnosticRecordSchema.RecordsTable, "r")}
+                FROM input_window r
                 JOIN {dialect.TableReference(RelationalDiagnosticRecordSchema.FieldsTable, "g")}
                   ON {FieldJoin("g", "r")}
                  AND g.field_name = {dialect.Parameter("groupField")}
                  AND g.field_type = {dialect.Parameter("groupFieldType")}
                  AND g.value_ordinal = 0
-                WHERE r.tenant_id = {dialect.Parameter("tenant")}
-                  AND r.scope_id = {dialect.Parameter("scope")}
-                  AND r.stream_id = {dialect.Parameter("stream")}
-                  AND r.cursor <= {dialect.Parameter("snapshot")}
             )
             """,
             """

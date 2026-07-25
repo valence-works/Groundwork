@@ -35,7 +35,7 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
                 CasePolicy: DiagnosticStringCasePolicy.UnicodeOrdinalIgnoreCase,
                 MaxStringBytes: 65_536)
         ],
-        Limits: new(MaxBatchRecords: 100, MaxPayloadBytes: 4_096, MaxRecordIdBytes: 128, MaxFieldsPerRecord: 8, MaxQueryLimit: 100, MaxPredicateNodes: 32, MaxPredicateValues: 9),
+        Limits: new(MaxBatchRecords: 100, MaxPayloadBytes: 4_096, MaxRecordIdBytes: 128, MaxFieldsPerRecord: 8, MaxQueryLimit: 100, MaxGroupedQueryInputRecords: 100, MaxPredicateNodes: 32, MaxPredicateValues: 9),
         MaxOperationClockSkew: TimeSpan.FromMinutes(5),
         AppendIdempotencyWindow: TimeSpan.FromDays(1),
         TrimIdempotencyWindow: TimeSpan.FromDays(1),
@@ -805,7 +805,12 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
     {
         var fixture = CreateFixture();
         var store = OpenStore(fixture);
-        var append = Batch("trim-mid-transaction-seed", "record-1", "record-2", "record-3");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        var append = Batch(
+            "trim-mid-transaction-seed",
+            GroupedRecord("record-1", occurredAt, "old", 1, "old", "old"),
+            GroupedRecord("record-2", occurredAt.AddSeconds(1), "new-a", 1, "new", "new-a"),
+            GroupedRecord("record-3", occurredAt.AddSeconds(2), "new-b", 1, "new", "new-b"));
         await store.AppendAsync(append);
         var request = DiagnosticTrimRequest.Create(
             append.Scope,
@@ -820,12 +825,26 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
         var restarted = OpenStore(fixture);
         var afterFailure = await restarted.InspectAsync(new(request.Scope, request.Stream));
         var page = await restarted.QueryAsync(new(request.Scope, request.Stream, 10));
+        DiagnosticRecordGroupPage? groups = null;
+        if (restarted.Handlers.GroupedQuery.Capabilities.SupportsGroupedReduction)
+        {
+            groups = await restarted.QueryGroupsAsync(new(
+                request.Scope,
+                request.Stream,
+                "service-summary",
+                10,
+                new("start"),
+                InputRecordLimit: 2));
+        }
         var retry = await restarted.TrimAsync(request);
 
         Assert.Equal(3, afterFailure.RetainedCount.Value);
+        Assert.True(afterFailure.RetainedCount.Value > 2);
         Assert.Equal("3", afterFailure.MaxRetainedCursor.GetValueOrDefault().Value);
         Assert.Equal("3", afterFailure.LifetimeCommittedCursorHighWater.GetValueOrDefault().Value);
         Assert.Equal(["record-1", "record-2", "record-3"], page.Records.Select(x => x.RecordId));
+        if (groups is not null)
+            Assert.Equal(["new-a", "new-b"], groups.Groups.Select(group => group.GroupKey));
         Assert.Equal(DiagnosticTrimStatus.Completed, retry.Status);
         Assert.Equal(3, retry.ExaminedCount.Value);
         Assert.Equal(2, retry.DeletedCount.Value);
@@ -1334,7 +1353,8 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
             "service-summary",
             1,
             new("start"),
-            predicate));
+            InputRecordLimit: 100,
+            Predicate: predicate));
         var api = Assert.Single(first.Groups);
         var apiStart = Assert.Single(api.Fields["start"]);
         var apiEnd = Assert.Single(api.Fields["end"]);
@@ -1363,8 +1383,9 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
             "service-summary",
             1,
             new("start"),
-            predicate,
-            first.Continuation));
+            InputRecordLimit: 100,
+            Predicate: predicate,
+            Continuation: first.Continuation));
         var worker = Assert.Single(second.Groups);
         var workerStart = Assert.Single(worker.Fields["start"]);
         var workerEnd = Assert.Single(worker.Fields["end"]);
@@ -1418,7 +1439,8 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
                 "service-summary",
                 1,
                 new("start"),
-                Continuation: continuation));
+                Continuation: continuation,
+                InputRecordLimit: 100));
             groupKeys.Add(Assert.Single(page.Groups).GroupKey);
             continuation = page.Continuation;
             if (pageIndex < 2)
@@ -1605,12 +1627,62 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
                 TestDefinition.Stream,
                 "service-summary",
                 10,
-                new("start")));
+                new("start"),
+                InputRecordLimit: 100));
 
         Assert.Equal(DiagnosticRecordPlanOperation.GroupedQuery, plan.Operation);
         Assert.True(
             fixture.HasNativeScopedGroupedReduction(plan),
             string.Join(Environment.NewLine, plan.RawPlans));
+    }
+
+    [Fact]
+    public async Task Grouped_reduction_uses_the_newest_committed_raw_window_before_reduction_and_continuation()
+    {
+        var fixture = CreateRelationalFixture();
+        var store = new BoundedDiagnosticRecordStore(fixture.OpenStore(TestDefinition));
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "newest-group-window-seed"),
+            [
+                GroupRecord("old-api", occurredAt, "old-api", 1, "old", "old-api"),
+                GroupRecord("old-worker", occurredAt.AddSeconds(1), "old-worker", 1, "old", "old-worker"),
+                GroupRecord("new-api", occurredAt.AddSeconds(2), "new-api", 1, "new", "new-api"),
+                GroupRecord("new-worker", occurredAt.AddSeconds(3), "new-worker", 1, "new", "new-worker")
+            ]));
+
+        var query = new DiagnosticRecordGroupQuery(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start"),
+            InputRecordLimit: 2);
+        var allNewest = await store.QueryGroupsAsync(query with { Take = 10 });
+
+        Assert.Equal(["new-api", "new-worker"], allNewest.Groups.Select(group => group.GroupKey));
+        Assert.Equal(4, (await store.InspectAsync(new(scope, TestDefinition.Stream))).RetainedCount.Value);
+
+        var first = await store.QueryGroupsAsync(query);
+        Assert.Equal("new-api", Assert.Single(first.Groups).GroupKey);
+        Assert.NotNull(first.Continuation);
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "newest-group-window-late-appends"),
+            [
+                GroupRecord("later", occurredAt.AddSeconds(4), "later", 1, "later", "later"),
+                GroupRecord("backdated", occurredAt.AddSeconds(-1), "backdated", 1, "backdated", "backdated")
+            ]));
+
+        var second = await store.QueryGroupsAsync(query with { Continuation = first.Continuation });
+
+        Assert.Equal("new-worker", Assert.Single(second.Groups).GroupKey);
+        Assert.Null(second.Continuation);
+        Assert.Equal(6, (await store.InspectAsync(new(scope, TestDefinition.Stream))).RetainedCount.Value);
     }
 
     [Fact]
@@ -1639,7 +1711,8 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
                 TestDefinition.Stream,
                 "service-summary",
                 10,
-                new("start"))).AsTask());
+                new("start"),
+                InputRecordLimit: 100)).AsTask());
 
         Assert.Contains(exception.Errors, error => error.Code == "group_query.union.too_large");
     }
@@ -1680,13 +1753,14 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
         var valid = await store.QueryGroupsAsync(new(
             scope,
             TestDefinition.Stream,
-            "service-summary",
-            1,
-            new("start"),
-            new DiagnosticRecordGroupPredicate.Comparison(
-                "tags",
-                DiagnosticPredicateOperator.Contains,
-                [DiagnosticFieldValue.String("valid-marker")])));
+                "service-summary",
+                1,
+                new("start"),
+                InputRecordLimit: 100,
+                Predicate: new DiagnosticRecordGroupPredicate.Comparison(
+                    "tags",
+                    DiagnosticPredicateOperator.Contains,
+                    [DiagnosticFieldValue.String("valid-marker")])));
 
         Assert.Equal("valid", Assert.Single(valid.Groups).GroupKey);
 
@@ -1697,7 +1771,8 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
                 "service-summary",
                 1,
                 new("start"),
-                new DiagnosticRecordGroupPredicate.Comparison(
+                InputRecordLimit: 100,
+                Predicate: new DiagnosticRecordGroupPredicate.Comparison(
                     "tags",
                     DiagnosticPredicateOperator.Contains,
                     [DiagnosticFieldValue.String("selected-8")]))).AsTask());
@@ -1733,9 +1808,10 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
         var first = await store.QueryGroupsAsync(new(
             scope,
             TestDefinition.Stream,
-            "service-summary",
-            1,
-            new("start")));
+                "service-summary",
+                1,
+                new("start"),
+                InputRecordLimit: 100));
 
         Assert.Equal("a-valid", Assert.Single(first.Groups).GroupKey);
         Assert.NotNull(first.Continuation);
@@ -1747,7 +1823,8 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
                 "service-summary",
                 1,
                 new("start"),
-                Continuation: first.Continuation)).AsTask());
+                Continuation: first.Continuation,
+                InputRecordLimit: 100)).AsTask());
 
         Assert.Contains(exception.Errors, error => error.Code == "group_query.union.too_large");
     }
@@ -1772,7 +1849,8 @@ public abstract class RelationalDiagnosticRecordStoreConformanceTests : Diagnost
             TestDefinition.Stream,
             "service-summary",
             10,
-            new("start")));
+            new("start"),
+            InputRecordLimit: 100));
     }
 
     private static DiagnosticRecordInput GroupRecord(

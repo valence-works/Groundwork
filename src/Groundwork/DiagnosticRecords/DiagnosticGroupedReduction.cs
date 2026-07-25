@@ -199,13 +199,18 @@ internal static class DiagnosticRecordGroupPredicateTraversal
     }
 }
 
-/// <summary>Query for one profile's provider-side reduced groups. Predicates run after reduction.</summary>
+/// <summary>
+/// Query for one profile's provider-side reduced groups. Providers select the newest committed
+/// raw records within <see cref="InputRecordLimit"/> before grouping, reduction, or reduced
+/// predicates run.
+/// </summary>
 public sealed record DiagnosticRecordGroupQuery(
     DiagnosticStorageScope Scope,
     DiagnosticStreamId Stream,
     string Profile,
     int Take,
     DiagnosticRecordGroupOrder Order,
+    int InputRecordLimit,
     DiagnosticRecordGroupPredicate? Predicate = null,
     DiagnosticRecordGroupContinuation? Continuation = null);
 
@@ -217,7 +222,8 @@ public sealed record DiagnosticRecordGroupContinuation(
     DiagnosticCursor SnapshotHighWater,
     DiagnosticFieldValue LastOrderValue,
     string LastGroupKey,
-    DiagnosticRequestFingerprint QueryFingerprint);
+    DiagnosticRequestFingerprint QueryFingerprint,
+    int InputRecordLimit);
 
 /// <summary>One reduced group; it deliberately has no payload or raw record identity.</summary>
 public sealed record DiagnosticRecordGroup(
@@ -415,6 +421,11 @@ public static class DiagnosticRecordGroupQueryValidator
             errors.Add(new("group_query.profile.undeclared", $"Grouped-reduction profile '{query.Profile}' is not declared.", "profile"));
         if (profile is not null && (query.Take <= 0 || query.Take > profile.MaxTake))
             errors.Add(new("group_query.take.invalid", $"Take must be between 1 and {profile.MaxTake} for profile '{profile.Name}'.", "take"));
+        if (query.InputRecordLimit <= 0 || query.InputRecordLimit > definition.Limits.MaxGroupedQueryInputRecords)
+            errors.Add(new(
+                "group_query.input_window.invalid",
+                $"InputRecordLimit must be between 1 and {definition.Limits.MaxGroupedQueryInputRecords} for stream '{definition.Stream.Value}'.",
+                "inputRecordLimit"));
         if (query.Order is null || profile is not null && !profile.OrderableAliases.Contains(query.Order.Alias))
             errors.Add(new("group_query.order.undeclared", "The reduced order alias is not declared by the selected profile.", "order"));
         var capabilities = handler.Capabilities ?? throw new ArgumentNullException(nameof(handler.Capabilities));
@@ -446,6 +457,8 @@ public static class DiagnosticRecordGroupQueryValidator
                 errors.Add(new("group_query.continuation.invalid", "Grouped continuation requires a snapshot high-water and last group key.", "continuation"));
             else if (!continuation.LastOrderValue.IsInitialized)
                 errors.Add(new("group_query.continuation.order_value.invalid", "Grouped continuation requires an initialized reduced order value.", "continuation.lastOrderValue"));
+            else if (continuation.InputRecordLimit != query.InputRecordLimit)
+                errors.Add(new("group_query.continuation.input_window_mismatch", "Grouped continuation must reuse the original newest-record input limit.", "continuation.inputRecordLimit"));
             else if (profile is not null && query.Order is not null && continuation.LastOrderValue.Type != DiagnosticGroupReductionProfileValidator.OutputType(definition, profile, query.Order.Alias))
                 errors.Add(new("group_query.continuation.order_type", "Grouped continuation has a different reduced order value type.", "continuation.lastOrderValue"));
             else if (continuation.QueryFingerprint != DiagnosticRequestFingerprint.ForGroupQuery(query with { Continuation = null }, definition))

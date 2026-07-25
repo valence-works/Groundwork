@@ -806,7 +806,8 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             "service-summary",
             1,
             new("start"),
-            new DiagnosticRecordGroupPredicate.Comparison(
+            InputRecordLimit: 100,
+            Predicate: new DiagnosticRecordGroupPredicate.Comparison(
                 "status",
                 DiagnosticPredicateOperator.RangeInclusive,
                 [DiagnosticFieldValue.Int64(2), DiagnosticFieldValue.Int64(3)])));
@@ -824,11 +825,12 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             "service-summary",
             1,
             new("start"),
-            new DiagnosticRecordGroupPredicate.Comparison(
+            InputRecordLimit: 100,
+            Predicate: new DiagnosticRecordGroupPredicate.Comparison(
                 "status",
                 DiagnosticPredicateOperator.RangeInclusive,
                 [DiagnosticFieldValue.Int64(2), DiagnosticFieldValue.Int64(3)]),
-            first.Continuation));
+            Continuation: first.Continuation));
 
         Assert.Equal("worker", Assert.Single(second.Groups).GroupKey);
         Assert.Null(second.Continuation);
@@ -863,7 +865,8 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             TestDefinition.Stream,
             "service-summary",
             1,
-            new("start")));
+            new("start"),
+            InputRecordLimit: 100));
         Assert.Equal("a-valid", Assert.Single(first.Groups).GroupKey);
         Assert.NotNull(first.Continuation);
 
@@ -874,6 +877,7 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
                 "service-summary",
                 1,
                 new("start"),
+                InputRecordLimit: 100,
                 Continuation: first.Continuation)).AsTask());
         Assert.Contains(union.Errors, error => error.Code == "group_query.union.too_large");
 
@@ -894,7 +898,8 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
                 TestDefinition.Stream,
                 "service-summary",
                 10,
-                new("start"))).AsTask());
+                new("start"),
+                InputRecordLimit: 100)).AsTask());
     }
 
     [Fact]
@@ -940,7 +945,8 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
                 "service-summary",
                 1,
                 new("start"),
-                new DiagnosticRecordGroupPredicate.Comparison(
+                InputRecordLimit: 100,
+                Predicate: new DiagnosticRecordGroupPredicate.Comparison(
                     "tags",
                     DiagnosticPredicateOperator.Contains,
                     [DiagnosticFieldValue.String("match")]))).AsTask());
@@ -1001,10 +1007,101 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             definition.Stream,
             "case-first",
             10,
-            new("firstService")));
+            new("firstService"),
+            InputRecordLimit: 100));
 
         var group = Assert.Single(page.Groups);
         Assert.Equal("a", Assert.Single(group.Fields["firstService"]).CanonicalValue);
+    }
+
+    [Fact]
+    public async Task Grouped_reduction_uses_the_newest_raw_window_and_preserves_it_across_continuation()
+    {
+        var fixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var store = fixture.OpenStore(TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "mongo-newest-group-window-seed"),
+            [
+                GroupRecord("old-api", occurredAt, "old-api", 1, "old", "old-api"),
+                GroupRecord("old-worker", occurredAt.AddSeconds(1), "old-worker", 1, "old", "old-worker"),
+                GroupRecord("new-api", occurredAt.AddSeconds(2), "new-api", 1, "new", "new-api"),
+                GroupRecord("new-worker", occurredAt.AddSeconds(3), "new-worker", 1, "new", "new-worker")
+            ]));
+
+        var query = new DiagnosticRecordGroupQuery(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            1,
+            new("start"),
+            InputRecordLimit: 2);
+        var newest = await store.QueryGroupsAsync(query with { Take = 10 });
+
+        Assert.Equal(["new-api", "new-worker"], newest.Groups.Select(group => group.GroupKey));
+        Assert.Equal(4, (await store.InspectAsync(new(scope, TestDefinition.Stream))).RetainedCount.Value);
+
+        var first = await store.QueryGroupsAsync(query);
+        Assert.Equal("new-api", Assert.Single(first.Groups).GroupKey);
+        Assert.NotNull(first.Continuation);
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "mongo-newest-group-window-late-appends"),
+            [
+                GroupRecord("later", occurredAt.AddSeconds(4), "later", 1, "later", "later"),
+                GroupRecord("backdated", occurredAt.AddSeconds(-1), "backdated", 1, "backdated", "backdated")
+            ]));
+
+        var second = await store.QueryGroupsAsync(query with { Continuation = first.Continuation });
+
+        Assert.Equal("new-worker", Assert.Single(second.Groups).GroupKey);
+        Assert.Null(second.Continuation);
+        Assert.Equal(6, (await store.InspectAsync(new(scope, TestDefinition.Stream))).RetainedCount.Value);
+    }
+
+    [Fact]
+    public async Task Grouped_set_union_results_and_predicates_do_not_reintroduce_rows_outside_the_raw_window()
+    {
+        var fixture = (MongoDbDiagnosticRecordStoreFixture)CreateFixture();
+        var store = fixture.OpenStore(TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
+        await store.AppendAsync(DiagnosticRecordBatch.Create(
+            scope,
+            TestDefinition.Stream,
+            new(fixture.GetUtcNow(), "mongo-union-window-seed"),
+            [
+                GroupRecord("old", occurredAt, "api", 1, "old", "old-only"),
+                GroupRecord("new-blue", occurredAt.AddSeconds(1), "api", 2, "new", "blue"),
+                GroupRecord("new-green", occurredAt.AddSeconds(2), "api", 3, "new", "green")
+            ]));
+
+        var query = new DiagnosticRecordGroupQuery(
+            scope,
+            TestDefinition.Stream,
+            "service-summary",
+            10,
+            new("start"),
+            InputRecordLimit: 2);
+        var page = await store.QueryGroupsAsync(query);
+        var group = Assert.Single(page.Groups);
+
+        Assert.Equal("api", group.GroupKey);
+        Assert.Equal(["blue", "green"], group.Fields["tags"].Select(value => value.CanonicalValue));
+
+        var oldOnly = await store.QueryGroupsAsync(query with
+        {
+            Predicate = new DiagnosticRecordGroupPredicate.Comparison(
+                "tags",
+                DiagnosticPredicateOperator.Contains,
+                [DiagnosticFieldValue.String("old-only")])
+        });
+
+        Assert.Empty(oldOnly.Groups);
     }
 
     [Fact]
@@ -1026,7 +1123,8 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
                 TestDefinition.Stream,
                 "service-summary",
                 10,
-                new("start")));
+                new("start"),
+                InputRecordLimit: 10));
 
             var command = Assert.Single(commands.Where(item =>
                 item.TryGetValue("explain", out var explain) &&
@@ -1040,6 +1138,9 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
                 stage => stage.TryGetValue("$lookup", out var lookup) &&
                          lookup["as"].AsString.StartsWith("_union_", StringComparison.Ordinal));
             Assert.True(unionLookupIndex > 0);
+            Assert.Equal(-1, pipeline[1]["$sort"]["cursor"].ToInt32());
+            Assert.Equal(10, pipeline[2]["$limit"].ToInt32());
+            Assert.True(Array.FindIndex(pipeline, stage => stage.Contains("$group")) > 2);
             Assert.Contains(
                 pipeline.Take(unionLookupIndex),
                 stage => stage.TryGetValue("$limit", out var limit) && limit.ToInt32() == 11);
@@ -1047,8 +1148,14 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             var boundedPipeline = unionLookup["pipeline"].AsBsonArray
                 .Select(stage => stage.AsBsonDocument)
                 .ToArray();
+            Assert.Equal(-1, boundedPipeline[1]["$sort"]["cursor"].ToInt32());
+            Assert.Equal(10, boundedPipeline[2]["$limit"].ToInt32());
+            Assert.True(Array.FindIndex(boundedPipeline, stage => stage.Contains("$set")) > 2);
             var windowIndex = Array.FindIndex(boundedPipeline, stage => stage.Contains("$setWindowFields"));
-            var limitIndex = Array.FindIndex(boundedPipeline, stage => stage.Contains("$limit"));
+            var limitIndex = Array.FindIndex(
+                boundedPipeline,
+                windowIndex + 1,
+                stage => stage.TryGetValue("$limit", out var limit) && limit.ToInt32() == 9);
 
             Assert.True(windowIndex >= 0);
             Assert.True(limitIndex > windowIndex);
@@ -1077,10 +1184,65 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             TestDefinition.Stream,
             "service-summary",
             10,
-            new("start")));
+            new("start"),
+            InputRecordLimit: 100));
 
         Assert.Contains("$group", explain.ToString());
         Assert.Contains("$facet", explain.ToString());
+    }
+
+    [Fact]
+    public async Task Native_grouped_explain_proves_scoped_cursor_selection_and_pre_aggregate_input_limit()
+    {
+        var commands = new ConcurrentQueue<BsonDocument>();
+        var settings = MongoClientSettings.FromConnectionString(replicaSet.ConnectionString);
+        settings.ClusterConfigurator = builder => builder.Subscribe<CommandStartedEvent>(started =>
+            commands.Enqueue(started.Command.DeepClone().AsBsonDocument));
+        using var client = new MongoClient(settings);
+        var database = client.GetDatabase($"groundwork_group_explain_{Guid.NewGuid():N}");
+        await MongoDbDiagnosticRecordMaterializer.MaterializeAsync(database, TestDefinition);
+        var store = new MongoDbDiagnosticRecordStore(database, TestDefinition);
+        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
+
+        try
+        {
+            await store.AppendAsync(DiagnosticRecordBatch.Create(
+                scope,
+                TestDefinition.Stream,
+                new(TimeProvider.System.GetUtcNow(), "mongo-grouped-explain"),
+                [
+                    GroupRecord("old", TimeProvider.System.GetUtcNow(), "api", 1, "old", "old"),
+                    GroupRecord("new", TimeProvider.System.GetUtcNow(), "api", 2, "new", "new")
+                ]));
+
+            var explain = await store.ExplainGroupedQueryAsync(new(
+                scope,
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"),
+                InputRecordLimit: 1));
+
+            Assert.Contains("ix_groundwork_diagnostic_records_scope_cursor", WinningIndexNames(explain));
+            var command = Assert.Single(commands.Where(item =>
+                item.TryGetValue("explain", out var explainCommand) &&
+                explainCommand.IsBsonDocument &&
+                explainCommand.AsBsonDocument.Contains("pipeline")));
+            var pipeline = command["explain"]["pipeline"].AsBsonArray
+                .Select(stage => stage.AsBsonDocument)
+                .ToArray();
+
+            Assert.Contains("tenant_id", pipeline[0].ToJson(), StringComparison.Ordinal);
+            Assert.Contains("scope_id", pipeline[0].ToJson(), StringComparison.Ordinal);
+            Assert.Contains("stream_id", pipeline[0].ToJson(), StringComparison.Ordinal);
+            Assert.Equal(-1, pipeline[1]["$sort"]["cursor"].ToInt32());
+            Assert.Equal(1, pipeline[2]["$limit"].ToInt32());
+            Assert.True(Array.FindIndex(pipeline, stage => stage.Contains("$group")) > 2);
+        }
+        finally
+        {
+            await client.DropDatabaseAsync(database.DatabaseNamespace.DatabaseName);
+        }
     }
 
     private static DiagnosticRecordInput GroupRecord(
