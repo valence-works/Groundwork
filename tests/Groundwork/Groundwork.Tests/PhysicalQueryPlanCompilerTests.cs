@@ -1641,15 +1641,23 @@ public sealed class PhysicalQueryPlanCompilerTests
             SharedDocumentStorages = fixture.Manifest.SharedDocumentStorages,
             Relationships = relationships
         };
+        var mutatedCallerCollections = false;
         var compilation = ManifestExecutableRouteSetCompiler.Compile(
             callerOwned,
-            PhysicalNamePolicy.Identity,
+            new DelegatePhysicalNamePolicy(context =>
+            {
+                if (!mutatedCallerCollections)
+                {
+                    units.Clear();
+                    relationships.Clear();
+                    mutatedCallerCollections = true;
+                }
+                return context.FeatureDefaultLogicalName;
+            }),
             ProviderPhysicalNameNormalizer.Identity);
         var routeSet = Assert.IsType<ManifestExecutableRouteSet>(compilation.RouteSet);
 
-        units.Clear();
-        relationships.Clear();
-
+        Assert.True(mutatedCallerCollections);
         var result = PhysicalRelationshipPlanCompiler.Compile(routeSet);
         Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
         Assert.Single(result.Plans);

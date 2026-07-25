@@ -161,7 +161,7 @@ public sealed class ManifestExecutableRouteSet
         IReadOnlyList<ExecutableStorageRoute> routes) =>
         new(manifest, routes);
 
-    private static StorageManifest Snapshot(StorageManifest manifest) =>
+    internal static StorageManifest Snapshot(StorageManifest manifest) =>
         new(
             manifest.Identity,
             manifest.Owner,
@@ -222,11 +222,12 @@ public static class ManifestExecutableRouteSetCompiler
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(namePolicy);
         ArgumentNullException.ThrowIfNull(providerNames);
-        var diagnostics = new StorageManifestValidator().Validate(manifest).Diagnostics.ToList();
+        var snapshot = ManifestExecutableRouteSet.Snapshot(manifest);
+        var diagnostics = new StorageManifestValidator().Validate(snapshot).Diagnostics.ToList();
         if (diagnostics.Any(diagnostic => diagnostic.IsError))
             return new(null, diagnostics);
 
-        var resolution = PhysicalStorageResolver.Resolve(manifest, namePolicy, providerNames);
+        var resolution = PhysicalStorageResolver.Resolve(snapshot, namePolicy, providerNames);
         diagnostics.AddRange(resolution.Diagnostics);
         if (!resolution.IsValid)
             return new(null, diagnostics);
@@ -234,7 +235,7 @@ public static class ManifestExecutableRouteSetCompiler
         var routes = ExecutableStorageRouteCompiler.Compile(resolution.Definitions);
         diagnostics.AddRange(routes.Diagnostics);
         return routes.IsValid
-            ? new(ManifestExecutableRouteSet.Create(manifest, routes.Routes), diagnostics)
+            ? new(ManifestExecutableRouteSet.Create(snapshot, routes.Routes), diagnostics)
             : new(null, diagnostics);
     }
 }
