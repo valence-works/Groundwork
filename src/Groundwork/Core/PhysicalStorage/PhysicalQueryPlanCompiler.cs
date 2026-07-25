@@ -774,7 +774,9 @@ public static class PhysicalQueryPlanCompiler
         if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
             predicates.Count == 0)
         {
-            var identityTieBreak = identityFields.ResolveOrderPath(PhysicalDocumentFieldPaths.Id);
+            var identityTieBreak = query.PagingSupport == QueryPagingSupport.Cursor
+                ? PhysicalDocumentIdentityFieldPaths.Lookup
+                : identityFields.ResolveOrderPath(PhysicalDocumentFieldPaths.Id);
             if (!sortPaths.Contains(identityTieBreak, StringComparer.Ordinal))
             {
                 sortPaths.Add(identityTieBreak);

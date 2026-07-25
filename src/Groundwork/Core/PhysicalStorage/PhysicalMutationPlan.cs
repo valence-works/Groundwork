@@ -121,6 +121,14 @@ public static class PhysicalMutationPlanCompiler
                     $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"));
                 continue;
             }
+            if (predicate.Predicates.Count == 0)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-MUTATION-008",
+                    $"Bounded mutation '{mutation.Identity}' cannot use unfiltered predicate query '{predicate.QueryIdentity}'.",
+                    $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"));
+                continue;
+            }
             if (!predicate.IsScaleBearing || predicate.IndexName is null)
             {
                 diagnostics.Add(GroundworkDiagnostic.Error(

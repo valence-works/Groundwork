@@ -1403,6 +1403,63 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
+    public void Explicitly_unfiltered_cursor_route_requires_the_lookup_tie_break()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Cursor,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "global_documents",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [
+                        new PhysicalIndexColumnDefinition("category", 0),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 1)
+                    ])
+            ]);
+        var manifest = WithPhysicalStorage(
+            SampleManifests.MetadataManifest() with
+            {
+                StorageUnits =
+                [
+                    SampleManifests.MetadataManifest().StorageUnits.Single() with
+                    {
+                        Tenancy = TenancyPolicy.Global
+                    }
+                ]
+            },
+            new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Explicit(definition),
+                [index],
+                [query]));
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-025");
+    }
+
+    [Fact]
     public void Omitted_identity_predicate_keeps_the_exact_lookup_and_comparison_key_requirement()
     {
         var result = ResolveExplicitIdentityIndex(

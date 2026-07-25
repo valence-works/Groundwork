@@ -1505,7 +1505,15 @@ public static class PhysicalStorageResolver
             predicates.Length == 0 &&
             !sortPaths.Contains(PhysicalDocumentFieldPaths.Id, StringComparer.Ordinal))
         {
-            sortPaths.Add(PhysicalDocumentFieldPaths.Id);
+            if (query.PagingSupport == QueryPagingSupport.Cursor)
+            {
+                if (indexPaths.Contains(PhysicalDocumentFieldPaths.Id, StringComparer.Ordinal))
+                    return false;
+            }
+            else
+            {
+                sortPaths.Add(PhysicalDocumentFieldPaths.Id);
+            }
         }
         return CompoundIndexOrdering.TryResolveSortStart(
                    indexPaths,

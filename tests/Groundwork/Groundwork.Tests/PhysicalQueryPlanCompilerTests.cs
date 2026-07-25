@@ -806,6 +806,54 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
+    public void Explicitly_unfiltered_cursor_route_uses_an_index_backed_lookup_tie_break()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Cursor,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "global_documents",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [
+                        new PhysicalIndexColumnDefinition("category", 0),
+                        new PhysicalIndexColumnDefinition("id_lookup_key", 1)
+                    ])
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [index],
+            [query]);
+        var fixture = Resolve(storage, binding: null, tenancy: TenancyPolicy.Global);
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)));
+
+        Assert.Equal(
+            ["category", "id_lookup_key"],
+            plan.Order.Select(order => order.Field.Identifier));
+        Assert.True(plan.Order[^1].IsIdentityTieBreak);
+    }
+
+    [Fact]
     public async Task RuntimeSeamPreservesQueryIdentityAndDispatchesTheCompiledHandler()
     {
         var fixture = CreateFixture(
@@ -1128,6 +1176,61 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.Equal(fixture.Route.Fingerprint, plan.RouteFingerprint);
         Assert.Equal(fixture.Route.ScopePolicy, plan.Predicate.Scope.Policy);
         Assert.True(plan.Predicate.Scope.IsMandatory);
+    }
+
+    [Fact]
+    public void NamedDeleteMutationRejectsAnExplicitlyUnfilteredPredicate()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-id",
+            [new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField(PhysicalDocumentFieldPaths.Id, PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "global_documents",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [new PhysicalIndexColumnDefinition("id_comparison_key", 0)])
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [index],
+            [query],
+            boundedMutations:
+            [
+                new BoundedMutationDeclaration(
+                    "unsafe-delete-all",
+                    query.Identity,
+                    BoundedMutationAction.Delete())
+            ]);
+        var fixture = Resolve(storage, binding: null, tenancy: TenancyPolicy.Global);
+
+        var result = PhysicalMutationPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryEnvelope));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(
+            result.Diagnostics,
+            diagnostic =>
+                diagnostic.Code == "GW-MUTATION-008" &&
+                diagnostic.Message.Contains("unfiltered", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
