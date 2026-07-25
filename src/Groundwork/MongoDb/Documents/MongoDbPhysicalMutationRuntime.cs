@@ -129,6 +129,25 @@ public static class MongoDbPhysicalMutationRuntime
         {
             evidence["linked"] = BsonNull.Value;
         }
+        if (plan.Action is PhysicalDeleteMutationAction &&
+            binding.Route.CollectionElementStorages.Count != 0)
+        {
+            var collectionMaintenance = new BsonArray();
+            foreach (var storage in binding.Route.CollectionElementStorages)
+            {
+                collectionMaintenance.Add(await ExplainCollectionMaintenanceAsync(
+                    store,
+                    binding.Route,
+                    storage,
+                    invocation.Scope.StorageKey!,
+                    cancellationToken));
+            }
+            evidence["collectionMaintenance"] = collectionMaintenance;
+        }
+        else
+        {
+            evidence["collectionMaintenance"] = new BsonArray();
+        }
         var selectors = new List<PhysicalDocumentMutationSelectorEvidence>
         {
             new(
@@ -263,6 +282,49 @@ public static class MongoDbPhysicalMutationRuntime
             rendered);
     }
 
+    /// <summary>
+    /// Produces native-plan evidence for the exact owner-key lookup used by every fixed-size
+    /// collection deletion batch. The sample key is intentionally synthetic: the plan proves the
+    /// stable indexed maintenance shape without exposing a live owner identity in diagnostics.
+    /// </summary>
+    private static async Task<BsonDocument> ExplainCollectionMaintenanceAsync(
+        MongoDbPhysicalDocumentStore store,
+        ExecutableStorageRoute route,
+        ExecutableCollectionElementStorageRoute storage,
+        string scope,
+        CancellationToken cancellationToken)
+    {
+        var collection = store.Database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier);
+        var filter = MongoDbPhysicalDocumentMutationHandler.CollectionOwnerFilter(
+            storage,
+            route.Discriminator.Value,
+            scope,
+            [new MongoDbCollectionMutationOwner(
+                new BsonString("groundwork-evidence-owner-comparison"),
+                new BsonString("groundwork-evidence-owner-lookup"))]);
+        var rendered = filter.Render(new RenderArgs<BsonDocument>(
+            collection.DocumentSerializer,
+            BsonSerializer.SerializerRegistry));
+        var explanation = await store.Database.RunCommandAsync<BsonDocument>(
+            new BsonDocument
+            {
+                ["explain"] = new BsonDocument
+                {
+                    ["find"] = storage.Storage.Name.Identifier,
+                    ["filter"] = rendered,
+                    ["hint"] = storage.OwnerOrdinalKey.Name.Identifier
+                },
+                ["verbosity"] = "queryPlanner"
+            },
+            cancellationToken: cancellationToken);
+        return MongoDbNativeMutationPlanInspector.InspectExactIndex(
+            explanation,
+            store.Database.DatabaseNamespace.DatabaseName,
+            storage.Storage.Name.Identifier,
+            storage.OwnerOrdinalKey.Name.Identifier,
+            rendered);
+    }
+
     private sealed record RuntimeBinding(
         ExecutableStorageRoute Route,
         StorageUnitPhysicalStorage Storage,
@@ -277,10 +339,11 @@ public static class MongoDbPhysicalMutationRuntime
 
 internal static class MongoDbNativeMutationPlanInspector
 {
-    internal static BsonDocument Inspect(
+    internal static BsonDocument InspectExactIndex(
         BsonDocument explanation,
         string databaseName,
-        MongoDbPhysicalMutationSelector selector,
+        string expectedCollection,
+        string expectedIndex,
         BsonDocument rendered)
     {
         var winningPlan = MongoDbWinningPlanInspector.ExactWinningPlan(explanation);
@@ -298,22 +361,36 @@ internal static class MongoDbNativeMutationPlanInspector
             .Select(scan => scan.IndexName)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        if (!string.Equals(observedCollection, selector.StorageObject.Identifier, StringComparison.Ordinal) ||
+        if (!string.Equals(observedCollection, expectedCollection, StringComparison.Ordinal) ||
             observation.HasCollectionScan ||
             indexes.Length != 1 ||
-            indexes[0] != selector.Index.Identifier)
+            indexes[0] != expectedIndex)
         {
             throw new InvalidOperationException(
-                $"MongoDB bounded-mutation selector for '{selector.StorageObject.Identifier}' did not use exact index '{selector.Index.Identifier}'.");
+                $"MongoDB bounded-mutation selector for '{expectedCollection}' did not use exact index '{expectedIndex}'.");
         }
         return new BsonDocument
         {
             ["collection"] = observedCollection,
-            ["indexName"] = selector.Index.Identifier,
+            ["indexName"] = expectedIndex,
             ["filter"] = rendered,
             ["winningPlanIndex"] = indexes[0],
             ["winningPlan"] = winningPlan,
             ["nativeExplain"] = explanation
         };
+    }
+
+    internal static BsonDocument Inspect(
+        BsonDocument explanation,
+        string databaseName,
+        MongoDbPhysicalMutationSelector selector,
+        BsonDocument rendered)
+    {
+        return InspectExactIndex(
+            explanation,
+            databaseName,
+            selector.StorageObject.Identifier,
+            selector.Index.Identifier,
+            rendered);
     }
 }

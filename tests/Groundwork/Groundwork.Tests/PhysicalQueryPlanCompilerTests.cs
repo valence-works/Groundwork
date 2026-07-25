@@ -2364,7 +2364,7 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void CollectionBearingRouteRejectsScalarSelectedBoundedDeletionBeforeElementRowsCanLeak()
+    public void CollectionBearingRouteAdmitsScalarSelectedBoundedDeletionForAtomicProviderMaintenance()
     {
         var categoryIndex = new LogicalIndexDeclaration(
             "by-category",
@@ -2421,11 +2421,11 @@ public sealed class PhysicalQueryPlanCompilerTests
             Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
 
         Assert.NotEmpty(fixture.Route.CollectionElementStorages);
-        Assert.False(result.IsValid);
-        Assert.Empty(result.Plans);
-        Assert.Contains(result.Diagnostics, diagnostic =>
-            diagnostic.Code == "GW-MUTATION-007" &&
-            diagnostic.Message.Contains("All collection-bearing", StringComparison.Ordinal));
+        Assert.True(result.IsValid, string.Join(Environment.NewLine, result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        var plan = Assert.Single(result.Plans);
+        Assert.Equal("delete-by-category", plan.MutationIdentity);
+        Assert.IsType<PhysicalDeleteMutationAction>(plan.Action);
+        Assert.NotEqual(PhysicalQueryAccessKind.CollectionElementsThenPrimary, plan.Predicate.AccessKind);
     }
 
     [Fact]

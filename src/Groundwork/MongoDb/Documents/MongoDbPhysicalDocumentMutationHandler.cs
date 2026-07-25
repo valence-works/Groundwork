@@ -21,6 +21,12 @@ internal enum MongoDbPhysicalMutationExecutionPoint
 /// </summary>
 internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocumentMutationHandler
 {
+    // MongoDB cannot issue one cross-collection delete. The provider therefore streams only
+    // immutable owner identities from the already-indexed primary selector and removes dependent
+    // rows in fixed-size, owner-key-indexed batches in the same snapshot transaction. This is not
+    // client predicate evaluation and never materializes the selected owner set in memory.
+    private const int CollectionOwnerDeleteBatchSize = 128;
+
     private readonly MongoDbPhysicalDocumentStore store;
     private readonly ExecutableStorageRoute route;
     private readonly IReadOnlyDictionary<string, MongoDbPhysicalMutationBinding> bindings;
@@ -164,6 +170,10 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
         MongoDbPhysicalMutationInvocation invocation,
         CancellationToken cancellationToken)
     {
+        var selectedOwnerCount = await DeleteSelectedCollectionElementsAsync(
+            session,
+            invocation,
+            cancellationToken);
         long? linkedCount = null;
         if (invocation.Binding.Schema.Linked is not null)
         {
@@ -183,7 +193,87 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
                 cancellationToken);
         if (linkedCount is { } actual)
             EnsureExactPhysicalCount("linked delete", primary.DeletedCount, actual);
+        if (selectedOwnerCount is not null)
+            EnsureExactPhysicalCount("collection owner selection", primary.DeletedCount, selectedOwnerCount.Value);
         return primary.DeletedCount;
+    }
+
+    /// <summary>
+    /// Maintains dependent collection-element storage for the exact indexed primary selector.
+    /// MongoDB has no cross-collection DELETE JOIN, so the production provider streams immutable
+    /// owner keys through a fixed-size cursor and issues one owner-key-indexed DeleteMany per
+    /// collection storage and batch. Predicate evaluation remains entirely in the primary filter;
+    /// all reads, dependent deletes, owner deletes, and durable operation recording are enclosed
+    /// by <see cref="MongoDbPhysicalDocumentStore.ExecutePhysicalMutationAsync"/>'s transaction.
+    /// </summary>
+    private async Task<long?> DeleteSelectedCollectionElementsAsync(
+        IClientSessionHandle session,
+        MongoDbPhysicalMutationInvocation invocation,
+        CancellationToken cancellationToken)
+    {
+        if (route.CollectionElementStorages.Count == 0)
+            return null;
+
+        var primary = store.Database.GetCollection<BsonDocument>(invocation.Binding.Schema.Primary.StorageObject.Identifier);
+        var projection = Builders<BsonDocument>.Projection
+            .Include(route.Envelope.Identity.ComparisonKey.Identifier)
+            .Include(route.Envelope.Identity.LookupKey.Identifier);
+        using var cursor = await primary.FindAsync(
+            session,
+            invocation.PrimaryFilter,
+            new FindOptions<BsonDocument, BsonDocument>
+            {
+                Projection = projection,
+                Hint = invocation.Binding.Schema.Primary.Index.Identifier,
+                BatchSize = CollectionOwnerDeleteBatchSize
+            },
+            cancellationToken);
+        long selectedOwnerCount = 0;
+        while (await cursor.MoveNextAsync(cancellationToken))
+        {
+            foreach (var batch in cursor.Current
+                         .Select(document => new MongoDbCollectionMutationOwner(
+                             document[route.Envelope.Identity.ComparisonKey.Identifier],
+                             document[route.Envelope.Identity.LookupKey.Identifier]))
+                         .Chunk(CollectionOwnerDeleteBatchSize))
+            {
+                selectedOwnerCount += batch.Length;
+                foreach (var storage in route.CollectionElementStorages)
+                {
+                    await store.Database.GetCollection<BsonDocument>(storage.Storage.Name.Identifier)
+                        .DeleteManyAsync(
+                            session,
+                            CollectionOwnerFilter(
+                                storage,
+                                route.Discriminator.Value,
+                                invocation.Scope.StorageKey!,
+                                batch),
+                            new DeleteOptions { Hint = storage.OwnerOrdinalKey.Name.Identifier },
+                            cancellationToken);
+                }
+            }
+        }
+        return selectedOwnerCount;
+    }
+
+    internal static FilterDefinition<BsonDocument> CollectionOwnerFilter(
+        ExecutableCollectionElementStorageRoute storage,
+        string discriminator,
+        string scope,
+        IReadOnlyList<MongoDbCollectionMutationOwner> owners)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        ArgumentException.ThrowIfNullOrWhiteSpace(discriminator);
+        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
+        ArgumentNullException.ThrowIfNull(owners);
+        if (owners.Count == 0)
+            return Builders<BsonDocument>.Filter.Eq("_groundwork_match_none", true);
+
+        return Builders<BsonDocument>.Filter.Or(owners.Select(owner =>
+            Builders<BsonDocument>.Filter.Eq(storage.DocumentKind.Column.Identifier, discriminator) &
+            Builders<BsonDocument>.Filter.Eq(storage.StorageScope.Column.Identifier, scope) &
+            Builders<BsonDocument>.Filter.Eq(storage.IdLookupKey.Column.Identifier, owner.LookupKey) &
+            Builders<BsonDocument>.Filter.Eq(storage.IdComparisonKey.Column.Identifier, owner.ComparisonKey)));
     }
 
     private async Task<long> TransitionAsync(
@@ -449,3 +539,6 @@ internal sealed record MongoDbPhysicalMutationInvocation(
     FilterDefinition<BsonDocument>? LinkedFilter,
     UpdateDefinition<BsonDocument>? PrimaryUpdate,
     UpdateDefinition<BsonDocument>? LinkedUpdate);
+
+/// <summary>Immutable owner identity passed between MongoDB's indexed primary selector and its dependent element deletion.</summary>
+internal sealed record MongoDbCollectionMutationOwner(BsonValue ComparisonKey, BsonValue LookupKey);

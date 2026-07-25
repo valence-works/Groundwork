@@ -229,6 +229,35 @@ public abstract class RelationalPhysicalDocumentDialect
         string exactIdentityJoin) =>
         $"DELETE FROM {tableExpression} AS {alias} WHERE EXISTS (" +
         $"SELECT 1 FROM {selectionTableExpression} AS s WHERE {exactIdentityJoin});";
+    /// <summary>
+    /// Deletes collection elements belonging to the already rechecked mutation selection. Providers
+    /// that can express an owner-key-driven delete override this so bounded collection maintenance
+    /// does not degrade into a scan of all element rows.
+    /// </summary>
+    public virtual string DeleteCollectionByMutationSelection(
+        string tableExpression,
+        string alias,
+        string selectionTableExpression,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> exactIdentity,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> ownerKeyPrefix) =>
+        DeleteByMutationSelection(
+            tableExpression,
+            alias,
+            selectionTableExpression,
+            RenderIdentityJoin(exactIdentity));
+
+    /// <summary>Renders a retained-column identity join for provider-specific mutation DML.</summary>
+    protected string RenderIdentityJoin(
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> parts,
+        string? leftAliasOverride = null)
+    {
+        ArgumentNullException.ThrowIfNull(parts);
+        return string.Join(
+            " AND ",
+            parts.Select(part =>
+                $"{leftAliasOverride ?? part.LeftAlias}.{QuoteIdentifier(part.LeftColumnIdentifier)} = " +
+                $"{part.RightAlias}.{QuoteIdentifier(part.RightColumnIdentifier)}"));
+    }
     public virtual string UpdateByMutationSelection(
         string tableExpression,
         string alias,
@@ -933,6 +962,18 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         string selectionTable,
         string exactIdentityJoin) =>
         dialect.DeleteByMutationSelection(table, alias, selectionTable, exactIdentityJoin);
+    internal string DeleteCollectionByMutationSelection(
+        string table,
+        string alias,
+        string selectionTable,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> exactIdentity,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> ownerKeyPrefix) =>
+        dialect.DeleteCollectionByMutationSelection(
+            table,
+            alias,
+            selectionTable,
+            exactIdentity,
+            ownerKeyPrefix);
     internal string UpdateByMutationSelection(
         string table,
         string alias,

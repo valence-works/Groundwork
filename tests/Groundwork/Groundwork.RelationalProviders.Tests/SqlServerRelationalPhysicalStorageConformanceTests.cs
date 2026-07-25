@@ -14,7 +14,9 @@ using Groundwork.SqlServer.Documents;
 using Groundwork.SqlServer.PhysicalStorage;
 using Groundwork.TestInfrastructure;
 using Microsoft.Data.SqlClient;
+using System.Data.Common;
 using System.Text;
+using System.Xml.Linq;
 using Testcontainers.MsSql;
 using Xunit;
 
@@ -620,6 +622,70 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     [Fact]
     public Task Concurrent_distinct_deletes_serialize_the_selected_set() =>
         RelationalBoundedMutationServerAssertions.ConcurrentDistinctDeletesSerializeSelectedSetAsync(MutationHarness());
+
+    [Fact]
+    public Task Collection_bearing_scalar_mutations_keep_element_storage_atomic() =>
+        RelationalBoundedMutationServerAssertions.CollectionBearingScalarMutationsMaintainElementsAtomicallyAsync(MutationHarness());
+
+    [Fact]
+    public async Task Collection_delete_uses_the_owner_primary_key_inside_the_mutation_transaction()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: true,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
+            includeCollection: true,
+            mutationOptions: new(IncludeRangeDelete: true));
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
+        var route = model.Target.Routes.Single();
+        var collection = Assert.Single(route.CollectionElementStorages);
+        var store = new SqlServerPhysicalDocumentStore(
+            container.GetConnectionString(), model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument",
+            "collection-native-plan",
+            "1",
+            """{"category":"authorization-a","priority":1,"permissions":["read","write","audit"]}"""));
+
+        string? plan = null;
+        var runtime = RelationalPhysicalMutationRuntime.CreateWithInterceptor(
+            new RelationalPhysicalMutationRuntimeContext(
+                store,
+                model.Manifest,
+                route,
+                model.Target.Provider,
+                SqlServerGroundworkCapabilities.Provider.Name,
+                "sqlserver"),
+            async (point, connection, transaction, cancellationToken) =>
+            {
+                if (point != RelationalPhysicalMutationExecutionPoint.AfterSelection)
+                    return;
+
+                var command = RelationalPhysicalDocumentMutationHandler.BuildCollectionDeleteCommand(
+                    store,
+                    collection,
+                    store.MutationSelectionTable(RelationalPhysicalDocumentMutationHandler.SelectionTable));
+                plan = await ExplainCollectionDeleteAsync(connection, transaction, command, cancellationToken);
+            });
+
+        var result = await runtime.ExecuteAsync(new DocumentMutation(
+            "configurationDocument",
+            "prune-by-category-cutoff",
+            "sqlserver-collection-native-plan",
+            [
+                DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "authorization-a")),
+                DocumentQueryClause.Of(DocumentQueryComparison.LessThan("priority", "10"))
+            ]));
+
+        Assert.Equal(1, result.AffectedCount);
+        Assert.True(
+            UsesCollectionOwnerPrimaryKey(plan, collection),
+            $"The exact production collection-delete command did not use the collection owner primary key. Native plan:{Environment.NewLine}{plan}");
+    }
 
     [Fact]
     public Task Ordinary_save_and_delete_serialize_with_the_selected_set() =>
@@ -1653,6 +1719,117 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         disable.CommandText = "SET STATISTICS XML OFF;";
         await disable.ExecuteNonQueryAsync();
         return Assert.Single(plans);
+    }
+
+    /// <summary>
+    /// Executes the exact production collection-delete DML under statistics XML in the live
+    /// mutation transaction, then rolls its savepoint back. This keeps the populated selection
+    /// table visible for an actual plan without stealing the handler's real delete.
+    /// </summary>
+    private static async ValueTask<string> ExplainCollectionDeleteAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        RelationalPhysicalQueryCommand rendered,
+        CancellationToken cancellationToken)
+    {
+        const string savepoint = "groundwork_collection_plan";
+        await ExecutePlanControlAsync(connection, transaction, $"SAVE TRANSACTION {savepoint};", cancellationToken);
+        try
+        {
+            await ExecutePlanControlAsync(connection, transaction, "SET STATISTICS XML ON;", cancellationToken);
+            try
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = rendered.CommandText;
+                foreach (var (name, value) in rendered.Parameters)
+                {
+                    var parameter = command.CreateParameter();
+                    parameter.ParameterName = $"@{name}";
+                    parameter.Value = value ?? DBNull.Value;
+                    command.Parameters.Add(parameter);
+                }
+
+                var plans = new List<string>();
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                do
+                {
+                    while (await reader.ReadAsync(cancellationToken))
+                        for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+                            if (reader.GetName(ordinal).Contains("XML Showplan", StringComparison.OrdinalIgnoreCase) ||
+                                reader.GetFieldType(ordinal) == typeof(System.Data.SqlTypes.SqlXml))
+                                plans.Add(reader.GetValue(ordinal).ToString() ?? string.Empty);
+                } while (await reader.NextResultAsync(cancellationToken));
+                return Assert.Single(plans);
+            }
+            finally
+            {
+                await ExecutePlanControlAsync(connection, transaction, "SET STATISTICS XML OFF;", cancellationToken);
+            }
+        }
+        finally
+        {
+            await ExecutePlanControlAsync(connection, transaction, $"ROLLBACK TRANSACTION {savepoint};", cancellationToken);
+        }
+    }
+
+    private static async ValueTask ExecutePlanControlAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string sql,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static bool UsesCollectionOwnerPrimaryKey(
+        string? nativePlan,
+        ExecutableCollectionElementStorageRoute collection)
+    {
+        if (string.IsNullOrWhiteSpace(nativePlan))
+            return false;
+
+        var document = XDocument.Parse(nativePlan);
+        var ownerColumns = new[]
+        {
+            collection.DocumentKind.Column.Identifier,
+            collection.StorageScope.Column.Identifier,
+            collection.IdLookupKey.Column.Identifier
+        };
+        var exactComparison = collection.IdComparisonKey.Column.Identifier;
+        return document.Descendants().Any(node =>
+        {
+            if (!string.Equals(node.Name.LocalName, "RelOp", StringComparison.Ordinal) ||
+                !string.Equals(node.Attribute("PhysicalOp")?.Value, "Index Seek", StringComparison.Ordinal))
+                return false;
+
+            var text = node.ToString(SaveOptions.DisableFormatting);
+            return text.Contains(collection.Storage.Name.Identifier, StringComparison.Ordinal) &&
+                   ownerColumns.All(column => text.Contains($"Column=\"{column}\"", StringComparison.Ordinal));
+        }) && document.ToString(SaveOptions.DisableFormatting).Contains(
+            $"Column=\"{exactComparison}\"",
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Collection_owner_primary_key_plan_recognition_rejects_non_owner_access()
+    {
+        var collection = RelationalPhysicalStorageTestModels.Create(
+                PhysicalStorageForm.PhysicalEntityTable,
+                SqlServerGroundworkCapabilities.Provider,
+                includePriority: true,
+                normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
+                includeCollection: true,
+                mutationOptions: new(IncludeRangeDelete: true))
+            .Target.Routes.Single().CollectionElementStorages.Single();
+        var nonOwnerIndexPlan = $$"""
+            <ShowPlanXML><RelOp PhysicalOp="Index Seek"><IndexScan><Object Table="[{{collection.Storage.Name.Identifier}}]" /><SeekPredicates><ColumnReference Column="[{{collection.DocumentKind.Column.Identifier}}]" /><ColumnReference Column="[{{collection.IdLookupKey.Column.Identifier}}]" /><ColumnReference Column="[{{collection.IdComparisonKey.Column.Identifier}}]" /></SeekPredicates></IndexScan></RelOp></ShowPlanXML>
+            """;
+
+        Assert.False(UsesCollectionOwnerPrimaryKey(nonOwnerIndexPlan, collection));
     }
 
     private async Task SeedPlanNoiseAsync(ExecutableStorageRoute route)

@@ -281,6 +281,16 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
         $"DELETE {alias} FROM {tableExpression} AS {alias} WHERE EXISTS (" +
         $"SELECT 1 FROM {selectionTableExpression} AS s WHERE {exactIdentityJoin});";
 
+    public override string DeleteCollectionByMutationSelection(
+        string tableExpression,
+        string alias,
+        string selectionTableExpression,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> exactIdentity,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> ownerKeyPrefix) =>
+        $"DELETE {alias} FROM {selectionTableExpression} AS s " +
+        $"INNER LOOP JOIN {tableExpression} AS {alias} WITH (FORCESEEK, UPDLOCK, HOLDLOCK) " +
+        $"ON {RenderIdentityJoin(exactIdentity)} OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);";
+
     public override string UpdateByMutationSelection(
         string tableExpression,
         string alias,
