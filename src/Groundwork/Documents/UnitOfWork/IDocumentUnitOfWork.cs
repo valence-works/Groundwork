@@ -41,8 +41,9 @@ public interface IDocumentSessionFactory
 /// <para>
 /// <b>Staging:</b> each <see cref="SaveAsync"/>/<see cref="DeleteAsync"/> executes against the open
 /// unit of work and returns its <see cref="DocumentStoreWriteResult"/> immediately. A non-success
-/// outcome (including optimistic-concurrency <c>ConcurrencyConflict</c>/<c>NotFound</c>) atomically
-/// rolls back and terminally poisons that unit of work; the caller must begin a new unit of work.
+/// outcome (including optimistic-concurrency <c>ConcurrencyConflict</c>/<c>NotFound</c> and
+/// relationship-integrity <see cref="DocumentStoreWriteStatus.RelationshipConflict"/>) atomically rolls
+/// back and terminally poisons that unit of work; the caller must begin a new unit of work.
 /// </para>
 /// <para>
 /// <b>All-or-nothing contract:</b> nothing is durable until <see cref="CommitAsync"/>. A non-successful
