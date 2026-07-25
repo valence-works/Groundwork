@@ -704,7 +704,7 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void Explicitly_unfiltered_route_without_declared_order_is_rejected_before_dispatch()
+    public void Explicitly_unfiltered_route_without_index_backed_identity_tie_break_is_rejected_before_dispatch()
     {
         var index = new LogicalIndexDeclaration(
             "by-category",
@@ -716,17 +716,9 @@ public sealed class PhysicalQueryPlanCompilerTests
             "list-all",
             index.Identity,
             new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-            QuerySortSupport.None,
+            QuerySortSupport.Ascending,
             QueryPagingSupport.Offset,
             BoundedQueryExecutionClass.ScaleBearing,
-            predicateFields: []);
-        var admittedQuery = new BoundedQueryDeclaration(
-            query.Identity,
-            query.IndexIdentity,
-            query.Operations,
-            QuerySortSupport.Ascending,
-            query.PagingSupport,
-            query.ExecutionClass,
             sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)],
             predicateFields: []);
         var definition = PhysicalTableDefinition.PhysicalEntityTable(
@@ -742,7 +734,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             StorageUnitProvisioningMode.Declared,
             PhysicalStoragePolicy.Explicit(definition),
             [index],
-            [admittedQuery]);
+            []);
         var fixture = Resolve(storage, binding: null, tenancy: TenancyPolicy.Global);
         var invalidStorage = new StorageUnitPhysicalStorage(
             fixture.Storage.ProvisioningMode,
@@ -760,8 +752,57 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.Contains(
             result.Diagnostics,
             diagnostic =>
-                diagnostic.Code == "GW-QUERY-006" &&
-                diagnostic.Message.Contains("must declare its provider-applied ordering", StringComparison.Ordinal));
+                diagnostic.Code == "GW-QUERY-005" &&
+                diagnostic.Message.Contains("no executable indexed server-side route", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Explicitly_unfiltered_route_accepts_an_index_backed_identity_tie_break()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category-id",
+            [new IndexField("category"), new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-all",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "global_documents",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    index.Identity,
+                    [
+                        new PhysicalIndexColumnDefinition("category", 0),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 1)
+                    ])
+            ]);
+        var storage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [index],
+            [query]);
+        var fixture = Resolve(storage, binding: null, tenancy: TenancyPolicy.Global);
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)));
+
+        Assert.Empty(plan.Predicates);
+        Assert.Equal(
+            ["category", "id_comparison_key"],
+            plan.Order.Select(order => order.Field.Identifier));
+        Assert.True(plan.Order[^1].IsIdentityTieBreak);
     }
 
     [Fact]

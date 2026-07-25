@@ -769,7 +769,18 @@ public static class PhysicalQueryPlanCompiler
 
         var sortPaths = query.SortFields
             .Select(field => identityFields.ResolveOrderPath(field.Path))
-            .ToArray();
+            .ToList();
+        var appendedIdentityTieBreak = false;
+        if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+            predicates.Count == 0)
+        {
+            var identityTieBreak = identityFields.ResolveOrderPath(PhysicalDocumentFieldPaths.Id);
+            if (!sortPaths.Contains(identityTieBreak, StringComparer.Ordinal))
+            {
+                sortPaths.Add(identityTieBreak);
+                appendedIdentityTieBreak = true;
+            }
+        }
         if (!CompoundIndexOrdering.TryResolveSortStart(
                 paths,
                 predicatePaths,
@@ -802,10 +813,12 @@ public static class PhysicalQueryPlanCompiler
                 identityFields.ResolveIndexPath(physicalIndex.Target, column.Column),
                 StringComparer.Ordinal))
             .Skip(start)
-            .Take(sortPaths.Length)
+            .Take(sortPaths.Count)
             .Select(column => column.Direction)
             .ToArray();
-        var requested = query.SortFields.Select(field => field.Direction).ToArray();
+        var requested = query.SortFields.Select(field => field.Direction).ToList();
+        if (appendedIdentityTieBreak)
+            requested.Add(PhysicalSortDirection.Ascending);
         if (!indexDirections.SequenceEqual(requested) &&
             !indexDirections.Select(Opposite).SequenceEqual(requested))
         {

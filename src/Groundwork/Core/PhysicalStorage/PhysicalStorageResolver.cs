@@ -1500,7 +1500,13 @@ public static class PhysicalStorageResolver
         if (query.SortSupport == QuerySortSupport.None)
             return false;
 
-        var sortPaths = query.SortFields.Select(field => field.Path).ToArray();
+        var sortPaths = query.SortFields.Select(field => field.Path).ToList();
+        if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
+            predicates.Length == 0 &&
+            !sortPaths.Contains(PhysicalDocumentFieldPaths.Id, StringComparer.Ordinal))
+        {
+            sortPaths.Add(PhysicalDocumentFieldPaths.Id);
+        }
         return CompoundIndexOrdering.TryResolveSortStart(
                    indexPaths,
                    predicatePaths,

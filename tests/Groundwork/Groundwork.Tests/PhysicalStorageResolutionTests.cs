@@ -1275,7 +1275,7 @@ public sealed class PhysicalStorageResolutionTests
     {
         var index = new LogicalIndexDeclaration(
             "by-category",
-            [new IndexField("category")],
+            [new IndexField("category"), new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
             MissingValueBehavior.Excluded);
@@ -1294,7 +1294,10 @@ public sealed class PhysicalStorageResolutionTests
             [
                 new PhysicalIndexDefinition(
                     index.Identity,
-                    [new PhysicalIndexColumnDefinition("category", 0)])
+                    [
+                        new PhysicalIndexColumnDefinition("category", 0),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 1)
+                    ])
             ]);
         var omitted = WithPhysicalStorage(
             SampleManifests.MetadataManifest() with
@@ -1352,7 +1355,7 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
-    public void Explicitly_unfiltered_route_requires_declared_provider_ordering()
+    public void Explicitly_unfiltered_route_requires_the_identity_tie_break_in_its_index()
     {
         var index = new LogicalIndexDeclaration(
             "by-category",
@@ -1364,9 +1367,10 @@ public sealed class PhysicalStorageResolutionTests
             "list-all",
             index.Identity,
             new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-            QuerySortSupport.None,
+            QuerySortSupport.Ascending,
             QueryPagingSupport.Offset,
             BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)],
             predicateFields: []);
         var manifest = WithPhysicalStorage(
             SampleManifests.MetadataManifest() with
