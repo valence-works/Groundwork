@@ -430,7 +430,8 @@ public sealed class DiagnosticRecordInstrumentationTests
         "profile-secret",
         25,
         new("start"),
-        new DiagnosticRecordGroupPredicate.Comparison(
+        InputRecordLimit: 25,
+        Predicate: new DiagnosticRecordGroupPredicate.Comparison(
             "status",
             DiagnosticPredicateOperator.Equal,
             [DiagnosticFieldValue.Int64(2)]));

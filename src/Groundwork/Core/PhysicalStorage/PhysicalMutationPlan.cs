@@ -54,7 +54,8 @@ public static class PhysicalMutationPlanCompiler
     public static PhysicalMutationPlanCompilationResult Compile(
         ExecutableStorageRoute route,
         StorageUnitPhysicalStorage storage,
-        PhysicalQueryPlannerCapabilities predicateCapabilities)
+        PhysicalQueryPlannerCapabilities predicateCapabilities,
+        bool supportsAtomicCollectionMaintenance = false)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(storage);
@@ -63,18 +64,14 @@ public static class PhysicalMutationPlanCompiler
         if (storage.BoundedMutations.Count == 0)
             return new([], []);
 
-        // A scalar-selected bulk delete can still orphan collection-element rows, and an old
-        // route cannot reconstruct or maintain a collection aggregate after its route changes.
-        // Until one atomic bulk owner-and-element primitive exists, reject every bounded mutation
-        // on a collection-bearing route rather than certifying a subset that looks safe.
-        if (route.CollectionElementStorages.Count != 0)
+        if (route.CollectionElementStorages.Count != 0 && !supportsAtomicCollectionMaintenance)
         {
             return new(
                 [],
                 storage.BoundedMutations.Select(mutation => GroundworkDiagnostic.Error(
                     "GW-MUTATION-007",
-                    $"Bounded mutation '{mutation.Identity}' targets a route with collection elements. " +
-                    "All collection-bearing bounded mutations require atomic owner-and-element maintenance.",
+                    $"Bounded mutation '{mutation.Identity}' targets a route with collection elements, " +
+                    "but the provider has not certified atomic owner-and-element maintenance.",
                     $"physicalMutations.{route.StorageUnit.Value}.{mutation.Identity}"))
                     .ToArray());
         }

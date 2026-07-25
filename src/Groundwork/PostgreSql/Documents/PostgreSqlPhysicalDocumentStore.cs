@@ -64,6 +64,8 @@ public sealed class PostgreSqlPhysicalDocumentStore : RelationalPhysicalDocument
 
 internal sealed class PostgreSqlPhysicalDocumentDialect : RelationalPhysicalDocumentDialect
 {
+    public override bool SupportsAtomicCollectionMutationMaintenance => true;
+
     public override ProviderIdentity PhysicalSchemaProvider => PostgreSqlGroundworkCapabilities.Provider;
     public override int MaxParameters => 65535;
     public override string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
@@ -150,6 +152,24 @@ internal sealed class PostgreSqlPhysicalDocumentDialect : RelationalPhysicalDocu
         $"{QuoteIdentifier(documentIncarnationColumn)} text COLLATE pg_catalog.\"C\" NOT NULL, " +
         $"PRIMARY KEY ({QuoteIdentifier(documentKindColumn)}, {QuoteIdentifier(storageScopeColumn)}, {QuoteIdentifier(documentIdLookupColumn)})) " +
         "ON COMMIT DROP;";
+
+    public override string DeleteCollectionByMutationSelection(
+        string tableExpression,
+        string alias,
+        string selectionTableExpression,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> exactIdentity,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> ownerKeyPrefix)
+    {
+        // PostgreSQL assigns a generic cardinality estimate to the transaction-local selection
+        // table. A simple DELETE ... USING can therefore hash it and scan every element row.
+        // The OFFSET keeps this lateral owner lookup parameterized, so the collection primary key
+        // (kind, scope, lookup, ordinal) remains the access path for every selected owner.
+        var candidateJoin = RenderIdentityJoin(exactIdentity, "candidate");
+        return $"DELETE FROM {tableExpression} AS {alias} WHERE {alias}.ctid IN (" +
+               $"SELECT matched.ctid FROM {selectionTableExpression} AS s CROSS JOIN LATERAL (" +
+               $"SELECT candidate.ctid FROM {tableExpression} AS candidate WHERE {candidateJoin} OFFSET 0" +
+               ") AS matched);";
+    }
 
     public override async Task AcquireMutationOperationLockAsync(
         DbConnection connection,

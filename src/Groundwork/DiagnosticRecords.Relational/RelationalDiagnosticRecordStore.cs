@@ -216,7 +216,8 @@ public sealed class RelationalDiagnosticRecordStore :
                         new(snapshot.ToString(CultureInfo.InvariantCulture)),
                         last.OrderValue,
                         last.GroupKey,
-                        DiagnosticRequestFingerprint.ForGroupQuery(query with { Continuation = null }, definition));
+                        DiagnosticRequestFingerprint.ForGroupQuery(query with { Continuation = null }, definition),
+                        query.InputRecordLimit);
                 }
                 return new DiagnosticRecordGroupPage(Array.AsReadOnly(groups), continuation);
             },

@@ -53,7 +53,11 @@ internal sealed class MongoDbPhysicalMutationBinding
         ProviderIdentity provider)
     {
         var capabilities = MongoDbPhysicalMutationCapabilities.Create(route, storage, provider);
-        var compilation = PhysicalMutationPlanCompiler.Compile(route, storage, capabilities);
+        var compilation = PhysicalMutationPlanCompiler.Compile(
+            route,
+            storage,
+            capabilities,
+            supportsAtomicCollectionMaintenance: true);
         if (!compilation.IsValid)
         {
             throw new InvalidOperationException(string.Join(

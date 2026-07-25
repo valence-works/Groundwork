@@ -164,6 +164,38 @@ public sealed class MongoDbPhysicalStorageModelTests
                 new BsonDocument()));
     }
 
+    [Fact]
+    public void Collection_maintenance_plan_rejects_an_unbounded_winning_index_scan()
+    {
+        var explanation = new BsonDocument
+        {
+            ["queryPlanner"] = new BsonDocument
+            {
+                ["namespace"] = "groundwork.collection_elements",
+                ["winningPlan"] = new BsonDocument
+                {
+                    ["stage"] = "IXSCAN",
+                    ["indexName"] = "owner_ordinal",
+                    ["indexBounds"] = new BsonDocument
+                    {
+                        ["document_kind"] = new BsonArray { "[MinKey, MaxKey]" },
+                        ["storage_scope"] = new BsonArray { "[\"tenant-a\", \"tenant-a\"]" },
+                        ["document_id_lookup_key"] = new BsonArray { "[\"owner\", \"owner\"]" }
+                    }
+                }
+            }
+        };
+
+        Assert.Throws<InvalidOperationException>(() =>
+            MongoDbNativeMutationPlanInspector.InspectExactIndex(
+                explanation,
+                "groundwork",
+                "collection_elements",
+                "owner_ordinal",
+                new BsonDocument(),
+                ["document_kind", "storage_scope", "document_id_lookup_key"]));
+    }
+
     [Theory]
     [InlineData(PortableQueryOperation.GreaterThan)]
     [InlineData(PortableQueryOperation.StartsWith)]

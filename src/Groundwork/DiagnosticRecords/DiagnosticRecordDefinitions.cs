@@ -53,6 +53,7 @@ public sealed record DiagnosticRecordLimits(
     int MaxRecordIdBytes = 256,
     int MaxFieldsPerRecord = 64,
     int MaxQueryLimit = 1_000,
+    int MaxGroupedQueryInputRecords = 100_000,
     int MaxPredicateNodes = 64,
     int MaxPredicateValues = 256,
     int MaxJsonDepth = 64);
@@ -146,7 +147,8 @@ public static class DiagnosticRecordStreamDefinitionValidator
             errors.Add(new("definition.limits.required", "Record-store limits are required.", "limits"));
         else if (definition.Limits.MaxBatchRecords <= 0 || definition.Limits.MaxPayloadBytes <= 0 ||
                  definition.Limits.MaxRecordIdBytes <= 0 || definition.Limits.MaxFieldsPerRecord <= 0 ||
-                 definition.Limits.MaxQueryLimit <= 0 || definition.Limits.MaxPredicateNodes <= 0 ||
+                 definition.Limits.MaxQueryLimit <= 0 || definition.Limits.MaxGroupedQueryInputRecords <= 0 ||
+                 definition.Limits.MaxPredicateNodes <= 0 ||
                  definition.Limits.MaxPredicateValues <= 0 ||
                  definition.Limits.MaxJsonDepth <= 0)
             errors.Add(new("definition.limit.invalid", "Every record-store limit must be positive.", "limits"));

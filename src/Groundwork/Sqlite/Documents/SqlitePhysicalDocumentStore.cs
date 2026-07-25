@@ -110,6 +110,8 @@ public sealed class SqlitePhysicalDocumentStore : RelationalPhysicalDocumentStor
 
 internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocumentDialect
 {
+    public override bool SupportsAtomicCollectionMutationMaintenance => true;
+
     private const int ConstraintPrimaryKey = 1555;
     private const int ConstraintUnique = 2067;
 
@@ -191,6 +193,26 @@ internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocument
         $"{QuoteIdentifier(documentVersionColumn)} INTEGER NOT NULL, " +
         $"{QuoteIdentifier(documentIncarnationColumn)} TEXT NOT NULL, " +
         $"PRIMARY KEY ({QuoteIdentifier(documentKindColumn)}, {QuoteIdentifier(storageScopeColumn)}, {QuoteIdentifier(documentIdLookupColumn)})) WITHOUT ROWID;";
+
+    public override string DeleteCollectionByMutationSelection(
+        string tableExpression,
+        string alias,
+        string selectionTableExpression,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> exactIdentity,
+        IReadOnlyList<RelationalPhysicalIdentityJoinPart> ownerKeyPrefix)
+    {
+        var ownerPrefix = string.Join(
+            ", ",
+            ownerKeyPrefix.Select(part =>
+                $"{part.LeftAlias}.{QuoteIdentifier(part.LeftColumnIdentifier)}"));
+        var selectionPrefix = string.Join(
+            ", ",
+            ownerKeyPrefix.Select(part =>
+                $"{part.RightAlias}.{QuoteIdentifier(part.RightColumnIdentifier)}"));
+        return $"DELETE FROM {tableExpression} AS {alias} " +
+               $"WHERE ({ownerPrefix}) IN (SELECT {selectionPrefix} FROM {selectionTableExpression} AS s) " +
+               $"AND EXISTS (SELECT 1 FROM {selectionTableExpression} AS s WHERE {RenderIdentityJoin(exactIdentity)});";
+    }
 
     public override ValueTask<DbTransaction> BeginMutationTransactionAsync(
         DbConnection connection,

@@ -40,6 +40,28 @@ public sealed class SqlServerDiagnosticRecordStoreTests(SqlServerDiagnosticConta
     }
 
     [Fact]
+    public void Grouped_query_command_selects_the_newest_scoped_records_before_reduction()
+    {
+        var fixture = (SqlServerDiagnosticRecordStoreFixture)CreateServerFixture();
+        var store = Assert.IsType<SqlServerDiagnosticRecordStore>(fixture.OpenStore(TestDefinition));
+        var command = store.Inner.BuildGroupQueryCommand(
+            new(
+                new("tenant-a", "shell-a"),
+                TestDefinition.Stream,
+                "service-summary",
+                10,
+                new("start"),
+                InputRecordLimit: 2),
+            snapshotHighWater: 42);
+
+        Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("SELECT TOP (@inputLimit)", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("r.[cursor] <= @snapshot", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY r.[cursor] DESC", command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(2, command.Parameters["inputLimit"]);
+    }
+
+    [Fact]
     public async Task Materializer_uses_native_binary_utf8_text_and_all_durable_tables()
     {
         var fixture = (SqlServerDiagnosticRecordStoreFixture)CreateServerFixture();
@@ -309,14 +331,7 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
                     "Aggregate",
                     StringComparison.Ordinal) == true))
             {
-                if (HasScopedTableAccess(
-                        aggregate,
-                        ns,
-                        RelationalDiagnosticRecordSchema.RecordsTable) &&
-                    HasScopedTableAccess(
-                        aggregate,
-                        ns,
-                        RelationalDiagnosticRecordSchema.FieldsTable))
+                if (HasConnectedBoundedReduction(aggregate, ns))
                 {
                     return true;
                 }
@@ -326,8 +341,61 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
         return false;
     }
 
+    private static bool HasConnectedBoundedReduction(XElement aggregate, XNamespace ns) =>
+        aggregate.Descendants(ns + "RelOp")
+            .Where(operation =>
+                operation.Attribute("LogicalOp")?.Value.Contains("Join", StringComparison.Ordinal) == true ||
+                operation.Attribute("PhysicalOp")?.Value.Contains("Join", StringComparison.Ordinal) == true ||
+                operation.Attribute("PhysicalOp")?.Value.Contains("Loops", StringComparison.Ordinal) == true)
+            .Any(join =>
+            {
+                var inputs = DirectRelOpInputs(join, ns).ToArray();
+                for (var inputIndex = 0; inputIndex < inputs.Length; inputIndex++)
+                {
+                    if (!HasBoundedScopedInputWindow(inputs[inputIndex], ns))
+                        continue;
+                    for (var fieldIndex = 0; fieldIndex < inputs.Length; fieldIndex++)
+                    {
+                        if (fieldIndex != inputIndex &&
+                            HasScopedTableAccess(
+                                inputs[fieldIndex],
+                                ns,
+                                RelationalDiagnosticRecordSchema.FieldsTable))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            });
+
+    private static IEnumerable<XElement> DirectRelOpInputs(XElement operation, XNamespace ns) =>
+        operation.Elements().SelectMany(element => element.Elements(ns + "RelOp"));
+
+    private static bool HasBoundedScopedInputWindow(XElement input, XNamespace ns) =>
+        input.DescendantsAndSelf(ns + "RelOp").Any(operation =>
+            operation.Attribute("LogicalOp")?.Value == "Top" &&
+            operation.Descendants(ns + "TopExpression").DescendantsAndSelf().Attributes().Any(attribute =>
+                attribute.Value.Contains("@inputLimit", StringComparison.Ordinal)) &&
+            HasNewestScopedSnapshotRecordAccess(operation, ns));
+
+    private static bool HasNewestScopedSnapshotRecordAccess(XElement operation, XNamespace ns) =>
+        operation.DescendantsAndSelf(ns + "RelOp").Any(access =>
+            HasScopedTableAccess(access, ns, RelationalDiagnosticRecordSchema.RecordsTable) &&
+            access.Descendants(ns + "IndexScan").Any(scan =>
+                scan.Attribute("ScanDirection")?.Value == "BACKWARD") &&
+            access.Descendants()
+                .Where(node => node.Name == ns + "SeekPredicates" || node.Name == ns + "Predicate")
+                .Any(predicate =>
+                {
+                    var columns = predicate.Descendants(ns + "ColumnReference")
+                        .Select(column => NormalizeSqlIdentifier(column.Attribute("Column")?.Value))
+                        .ToHashSet(StringComparer.Ordinal);
+                    return columns.Contains("cursor") && columns.Contains("@snapshot");
+                }));
+
     private static bool HasScopedTableAccess(XElement aggregate, XNamespace ns, string table) =>
-        aggregate.Descendants(ns + "RelOp").Any(operation =>
+        aggregate.DescendantsAndSelf(ns + "RelOp").Any(operation =>
         {
             var hasTable = operation.Descendants(ns + "Object")
                 .Any(node => NormalizeSqlIdentifier(node.Attribute("Table")?.Value) == table);
@@ -580,6 +648,73 @@ public sealed class SqlServerDiagnosticPlanRecognizerTests
         Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
     }
 
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_all_required_fragments_when_the_top_does_not_feed_the_field_join()
+    {
+        var plan = GroupedPlan(
+            $"""
+             <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
+               <StreamAggregate>
+                 <RelOp LogicalOp="Concatenation" PhysicalOp="Concatenation">
+                   <Concat>
+                     <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
+                       <NestedLoops>
+                         {BoundedRecordInput()}
+                         <RelOp LogicalOp="Constant Scan" PhysicalOp="Constant Scan" />
+                       </NestedLoops>
+                     </RelOp>
+                     <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
+                       <NestedLoops>
+                         <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
+                           <IndexScan>
+                             <Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" />
+                             <SeekPredicates>{RecordScopeColumns()}</SeekPredicates>
+                           </IndexScan>
+                         </RelOp>
+                         {ScopedFieldInput()}
+                       </NestedLoops>
+                     </RelOp>
+                   </Concat>
+                 </RelOp>
+               </StreamAggregate>
+             </RelOp>
+             """);
+
+        Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+    }
+
+    [Fact]
+    public void Grouped_reduction_recognizer_rejects_forward_or_snapshot_free_input_with_disconnected_valid_fragments()
+    {
+        foreach (var invalidInput in new[]
+                 {
+                     BoundedRecordInput(scanDirection: "FORWARD"),
+                     BoundedRecordInput(includeSnapshot: false)
+                 })
+        {
+            var plan = GroupedPlan(
+                $"""
+                 <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
+                   <StreamAggregate>
+                     <RelOp LogicalOp="Concatenation" PhysicalOp="Concatenation">
+                       <Concat>
+                         <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
+                           <NestedLoops>
+                             {invalidInput}
+                             {ScopedFieldInput()}
+                           </NestedLoops>
+                         </RelOp>
+                         {BoundedRecordInput()}
+                       </Concat>
+                     </RelOp>
+                   </StreamAggregate>
+                 </RelOp>
+                 """);
+
+            Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
+        }
+    }
+
     private static DiagnosticRecordNativePlan GroupedPlan(string operation) =>
         new(
             "sqlserver",
@@ -595,12 +730,33 @@ public sealed class SqlServerDiagnosticPlanRecognizerTests
 
     private static string ScopedInputs() =>
         $"""
-         <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
-           <IndexScan>
-             <Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" />
-             <SeekPredicates>{ScopeColumns()}</SeekPredicates>
-           </IndexScan>
+         <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
+           <NestedLoops>
+             {BoundedRecordInput()}
+             {ScopedFieldInput()}
+           </NestedLoops>
          </RelOp>
+         """;
+
+    private static string BoundedRecordInput(
+        string scanDirection = "BACKWARD",
+        bool includeSnapshot = true) =>
+        $"""
+         <RelOp LogicalOp="Top" PhysicalOp="Top">
+           <Top>
+             <TopExpression><ScalarOperator ScalarString="@inputLimit" /></TopExpression>
+             <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
+               <IndexScan ScanDirection="{scanDirection}">
+                 <Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" />
+                 <SeekPredicates>{RecordScopeColumns(includeSnapshot)}</SeekPredicates>
+               </IndexScan>
+             </RelOp>
+           </Top>
+         </RelOp>
+         """;
+
+    private static string ScopedFieldInput() =>
+        $"""
          <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
            <IndexScan>
              <Object Table="[{RelationalDiagnosticRecordSchema.FieldsTable}]" />
@@ -608,6 +764,13 @@ public sealed class SqlServerDiagnosticPlanRecognizerTests
            </IndexScan>
          </RelOp>
          """;
+
+    private static string RecordScopeColumns(bool includeSnapshot = true) =>
+        $"""
+        {ScopeColumns()}
+        <ColumnReference Column="[cursor]" />
+        {(includeSnapshot ? """<ColumnReference Column="@snapshot" />""" : "")}
+        """;
 
     private static string ScopeColumns() =>
         """

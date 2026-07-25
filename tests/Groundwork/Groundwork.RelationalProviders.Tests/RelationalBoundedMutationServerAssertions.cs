@@ -279,6 +279,102 @@ internal static class RelationalBoundedMutationServerAssertions
         Assert.Null(await firstStore.LoadAsync("configurationDocument", "distinct-delete-race"));
     }
 
+    public static async Task CollectionBearingScalarMutationsMaintainElementsAtomicallyAsync<TStore>(
+        RelationalMutationServerHarness<TStore> harness)
+        where TStore : RelationalPhysicalDocumentStore
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: true,
+            normalizer: harness.Normalizer,
+            includeCollection: true,
+            mutationOptions: new(IncludeCategoryTransition: true, IncludeRangeDelete: true));
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var route = Assert.Single(model.Target.Routes);
+        var elements = Assert.Single(route.CollectionElementStorages);
+        var store = harness.CreateStore(model.Manifest, model.Target.Routes);
+        await SaveCollectionAsync(store, "pending", "pending", "pending-element");
+        await SaveCollectionAsync(store, "delete", "authorization-a", "delete-element");
+        await SaveCollectionAsync(store, "keep", "authorization-b", "keep-element");
+
+        var transition = new DocumentMutation(
+            "configurationDocument",
+            "revoke-pending",
+            $"{harness.Provider.Name}-collection-transition");
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await harness.CreateMutationRuntime(store, model.Manifest, route, model.Target.Provider)
+                .ExecuteAsync(transition));
+        Assert.Equal("revoked", await ReadCategoryAsync(store, "pending"));
+        Assert.Equal(3L, await CountCollectionElementsAsync(harness, elements));
+
+        var deletion = new DocumentMutation(
+            "configurationDocument",
+            "prune-by-category-cutoff",
+            $"{harness.Provider.Name}-collection-delete",
+            [
+                DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "authorization-a")),
+                DocumentQueryClause.Of(DocumentQueryComparison.LessThan("priority", "10"))
+            ]);
+        var failed = RelationalPhysicalMutationRuntime.Create(
+            new RelationalPhysicalMutationRuntimeContext(
+                store,
+                model.Manifest,
+                route,
+                model.Target.Provider,
+                harness.Provider.Name,
+                harness.HandlerPrefix),
+            point => point == RelationalPhysicalMutationExecutionPoint.BeforeCommit
+                ? ValueTask.FromException(new SimulatedCollectionMutationFailureException())
+                : ValueTask.CompletedTask);
+        await Assert.ThrowsAsync<SimulatedCollectionMutationFailureException>(() => failed.ExecuteAsync(deletion));
+        Assert.NotNull(await store.LoadAsync("configurationDocument", "delete"));
+        Assert.Equal(3L, await CountCollectionElementsAsync(harness, elements));
+
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = RelationalPhysicalMutationRuntime.Create(
+            new RelationalPhysicalMutationRuntimeContext(
+                store,
+                model.Manifest,
+                route,
+                model.Target.Provider,
+                harness.Provider.Name,
+                harness.HandlerPrefix),
+            point =>
+            {
+                if (point != RelationalPhysicalMutationExecutionPoint.BeforeCommit)
+                    return ValueTask.CompletedTask;
+                cancellation.Cancel();
+                return ValueTask.FromCanceled(cancellation.Token);
+            });
+        var cancellationException = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            cancelled.ExecuteAsync(deletion));
+        Assert.Equal(cancellation.Token, cancellationException.CancellationToken);
+        Assert.NotNull(await store.LoadAsync("configurationDocument", "delete"));
+        Assert.Equal(3L, await CountCollectionElementsAsync(harness, elements));
+
+        var mutations = harness.CreateMutationRuntime(store, model.Manifest, route, model.Target.Provider);
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await mutations.ExecuteAsync(deletion));
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Replayed, 1),
+            await mutations.ExecuteAsync(deletion));
+        await Assert.ThrowsAsync<BoundedMutationOperationConflictException>(() =>
+            mutations.ExecuteAsync(new DocumentMutation(
+                deletion.DocumentKind,
+                deletion.MutationIdentity,
+                deletion.OperationId,
+                [
+                    DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "authorization-b")),
+                    DocumentQueryClause.Of(DocumentQueryComparison.LessThan("priority", "10"))
+                ])));
+        Assert.Null(await store.LoadAsync("configurationDocument", "delete"));
+        Assert.NotNull(await store.LoadAsync("configurationDocument", "keep"));
+        Assert.Equal(2L, await CountCollectionElementsAsync(harness, elements));
+    }
+
     public static async Task OrdinaryCrudSerializesWithSelectedSetAsync<TStore>(
         RelationalMutationServerHarness<TStore> harness)
         where TStore : RelationalPhysicalDocumentStore
@@ -806,12 +902,14 @@ internal static class RelationalBoundedMutationServerAssertions
         var model = RelationalPhysicalStorageTestModels.Create(
             PhysicalStorageForm.PhysicalEntityTable,
             harness.Provider,
-            includePriority: false,
+            includePriority: true,
             scoped: true,
             normalizer: harness.Normalizer,
-            mutationOptions: new(IncludeCategoryTransition: true));
+            includeCollection: true,
+            mutationOptions: new(IncludeRangeDelete: true));
         await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
         var route = model.Target.Routes.Single();
+        var elements = Assert.Single(route.CollectionElementStorages);
         var tenantA = harness.CreateStore(
             model.Manifest,
             model.Target.Routes,
@@ -820,18 +918,23 @@ internal static class RelationalBoundedMutationServerAssertions
             model.Manifest,
             model.Target.Routes,
             DocumentStoreAccess.Scoped(new StorageScope("tenant-b")));
-        await SaveAsync(tenantA, "same-id", "pending");
-        await SaveAsync(tenantB, "same-id", "pending");
+        await SaveCollectionAsync(tenantA, "same-id", "authorization-a", "tenant-a-element");
+        await SaveCollectionAsync(tenantB, "same-id", "authorization-a", "tenant-b-element");
 
         var result = await harness.CreateMutationRuntime(tenantA, model.Manifest, route, model.Target.Provider)
             .ExecuteAsync(new DocumentMutation(
                 "configurationDocument",
-                "revoke-pending",
-                $"{harness.Provider.Name}-tenant-a-transition"));
+                "prune-by-category-cutoff",
+                $"{harness.Provider.Name}-tenant-a-delete",
+                [
+                    DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "authorization-a")),
+                    DocumentQueryClause.Of(DocumentQueryComparison.LessThan("priority", "10"))
+                ]));
 
         Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 1), result);
-        Assert.Equal("revoked", await ReadCategoryAsync(tenantA, "same-id"));
-        Assert.Equal("pending", await ReadCategoryAsync(tenantB, "same-id"));
+        Assert.Null(await tenantA.LoadAsync("configurationDocument", "same-id"));
+        Assert.Equal("authorization-a", await ReadCategoryAsync(tenantB, "same-id"));
+        Assert.Equal(1L, await CountCollectionElementsAsync(harness, elements));
     }
 
     public static async Task FailureBeforeCommitRollsBackAndRetryCompletesAsync<TStore>(
@@ -843,11 +946,13 @@ internal static class RelationalBoundedMutationServerAssertions
             harness.Provider,
             includePriority: false,
             normalizer: harness.Normalizer,
+            includeCollection: true,
             mutationOptions: new(IncludeCategoryTransition: true));
         await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
         var route = model.Target.Routes.Single();
+        var elements = Assert.Single(route.CollectionElementStorages);
         var store = harness.CreateStore(model.Manifest, model.Target.Routes);
-        await SaveAsync(store, "pending", "pending");
+        await SaveCollectionAsync(store, "pending", "pending", "cancellation-element");
         var request = Transition($"{harness.Provider.Name}-rollback");
         var mutations = RelationalPhysicalMutationRuntime.Create(
             new RelationalPhysicalMutationRuntimeContext(
@@ -866,9 +971,11 @@ internal static class RelationalBoundedMutationServerAssertions
         Assert.Equal("pending", await ReadCategoryAsync(store, "pending"));
         Assert.Equal(1, await CountAsync(harness.CreateQueryRuntime(store, model.Manifest, route, model.Target.Provider), "pending"));
         Assert.Equal(0, await CountAsync(harness.CreateQueryRuntime(store, model.Manifest, route, model.Target.Provider), "revoked"));
+        Assert.Equal(1L, await CountCollectionElementsAsync(harness, elements));
         Assert.Equal(
             new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
             await harness.CreateMutationRuntime(store, model.Manifest, route, model.Target.Provider).ExecuteAsync(request));
+        Assert.Equal(1L, await CountCollectionElementsAsync(harness, elements));
     }
 
     public static async Task CancellationBeforeCommitRollsBackAndPreservesTokenAsync<TStore>(
@@ -880,11 +987,13 @@ internal static class RelationalBoundedMutationServerAssertions
             harness.Provider,
             includePriority: false,
             normalizer: harness.Normalizer,
+            includeCollection: true,
             mutationOptions: new(IncludeCategoryTransition: true));
         await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
         var route = model.Target.Routes.Single();
+        var elements = Assert.Single(route.CollectionElementStorages);
         var store = harness.CreateStore(model.Manifest, model.Target.Routes);
-        await SaveAsync(store, "pending", "pending");
+        await SaveCollectionAsync(store, "pending", "pending", "cancellation-element");
         var request = Transition($"{harness.Provider.Name}-cancellation");
         using var cancellation = new CancellationTokenSource();
         var mutations = RelationalPhysicalMutationRuntime.Create(
@@ -907,9 +1016,11 @@ internal static class RelationalBoundedMutationServerAssertions
 
         Assert.Equal(cancellation.Token, exception.CancellationToken);
         Assert.Equal("pending", await ReadCategoryAsync(store, "pending"));
+        Assert.Equal(1L, await CountCollectionElementsAsync(harness, elements));
         Assert.Equal(
             new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
             await harness.CreateMutationRuntime(store, model.Manifest, route, model.Target.Provider).ExecuteAsync(request));
+        Assert.Equal(1L, await CountCollectionElementsAsync(harness, elements));
     }
 
     public static async Task AcknowledgementLossRestartAndProviderUpgradeReplayAsync<TStore>(
@@ -978,6 +1089,32 @@ internal static class RelationalBoundedMutationServerAssertions
             "1",
             $"{{\"category\":\"{category}\",\"priority\":{priority}}}"));
         Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status);
+    }
+
+    private static async Task SaveCollectionAsync(
+        IDocumentStore store,
+        string id,
+        string category,
+        string permission)
+    {
+        var result = await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument",
+            id,
+            "1",
+            $"{{\"category\":\"{category}\",\"priority\":1,\"permissions\":[\"{permission}\"]}}"));
+        Assert.Equal(DocumentStoreWriteStatus.Saved, result.Status);
+    }
+
+    private static async Task<long> CountCollectionElementsAsync<TStore>(
+        RelationalMutationServerHarness<TStore> harness,
+        ExecutableCollectionElementStorageRoute storage)
+        where TStore : RelationalPhysicalDocumentStore
+    {
+        await using var connection = harness.CreateConnection();
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {harness.CreateDialect().QuoteIdentifier(storage.Storage.Name.Identifier)};";
+        return Convert.ToInt64(await command.ExecuteScalarAsync());
     }
 
     private static async Task<string> ReadCategoryAsync(IDocumentStore store, string id)
@@ -1102,4 +1239,6 @@ internal static class RelationalBoundedMutationServerAssertions
     private sealed class SimulatedMutationFailureException : Exception;
 
     private sealed class SimulatedMutationAcknowledgementLossException : Exception;
+
+    private sealed class SimulatedCollectionMutationFailureException : Exception;
 }
