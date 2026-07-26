@@ -9,7 +9,8 @@ automation:
   target-scoped provider database-work telemetry and workload-conditioned concurrent-load
   evidence. Concurrent-create records retain only counts (configured parallelism, complete
   released-together waves, attempts, completions, outcomes, and peak in-flight public
-  production-store calls). The peak is provider characterization, not a universal overlap gate;
+  production-store calls). Each sample's operations equal its attempts, its latency inventory,
+  and its configured wave count multiplied by parallelism. The peak is provider characterization, not a universal overlap gate;
   records never infer physical overlap from configuration or retain payloads or connection values. The telemetry captures only its source,
   availability, and positive counts; it never includes connection values, database names, command
   text, or provider secrets. A signal that cannot be observed is represented by `null` counts and

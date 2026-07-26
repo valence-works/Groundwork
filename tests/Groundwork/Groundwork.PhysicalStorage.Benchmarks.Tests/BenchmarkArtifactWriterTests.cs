@@ -55,6 +55,54 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Raw_measurement_reader_rejects_a_symbolic_link_inside_the_run_root()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // Creating symlinks can require elevated privileges on Windows CI.
+
+        _ = new ArtifactLayout(root);
+        var outside = Path.Combine(
+            Path.GetDirectoryName(root)!,
+            $"groundwork-artifact-outside-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(outside);
+            await File.WriteAllTextAsync(Path.Combine(outside, "measurements.jsonl"), string.Empty);
+            Directory.CreateSymbolicLink(Path.Combine(root, "raw"), outside);
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                BenchmarkArtifactWriter.ReadRawAsync(root, CancellationToken.None));
+
+            Assert.Contains("symbolic link", exception.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(outside))
+                Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Artifact_writer_rejects_a_dangling_symbolic_link_destination()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // Creating symlinks can require elevated privileges on Windows CI.
+
+        var layout = new ArtifactLayout(root);
+        Directory.CreateDirectory(Path.GetDirectoryName(layout.RawMeasurements)!);
+        File.CreateSymbolicLink(
+            layout.RawMeasurements,
+            Path.Combine(
+                Path.GetDirectoryName(root)!,
+                $"missing-outside-measurements-{Guid.NewGuid():N}.jsonl"));
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            layout.WritablePath(layout.RawMeasurements, "Raw measurements"));
+
+        Assert.Contains("symbolic link", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Raw_measurements_reject_zero_or_ambiguous_database_signal_evidence()
     {
         var layout = new ArtifactLayout(root);
@@ -87,6 +135,7 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var sample = new BenchmarkSample(
             0, 1, 100, 50, null, 0, 0, null, null, new Dictionary<string, long>(), [100]);
         await using var writer = new BenchmarkArtifactWriter(layout);
+        await writer.WriteConfigurationAsync(BenchmarkProfiles.Smoke, CancellationToken.None);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => writer.AppendSampleAsync(
             new RawBenchmarkRecord(
@@ -94,7 +143,7 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
                 sample),
             CancellationToken.None));
 
-        Assert.Contains("concurrent-create evidence", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("complete concurrent-create evidence", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -365,6 +414,7 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var configuration = BenchmarkProfiles.Smoke with
         {
             Concurrency = 2,
+            OperationsPerIteration = 1,
             Providers = [BenchmarkProvider.Sqlite],
             StorageForms = [PhysicalStorageForm.SharedDocuments]
         };
@@ -408,6 +458,9 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
 
         await using (var writer = new BenchmarkArtifactWriter(layout))
         {
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                writer.AppendSampleAsync(new RawBenchmarkRecord(benchmarkCase, sample), CancellationToken.None));
+            await writer.WriteConfigurationAsync(configuration, CancellationToken.None);
             await writer.AppendSampleAsync(new RawBenchmarkRecord(benchmarkCase, sample), CancellationToken.None);
             await writer.WriteConsumerEvidenceAsync(
                 BenchmarkConsumerEvidenceReport.Create(report, configuration, machine, providers, layout),
@@ -437,6 +490,14 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
                 providers,
                 layout,
                 tampered));
+
+        var underExecuted = configuration with { OperationsPerIteration = 2 };
+        Assert.False(sample.HasValidConcurrentLoadEvidence(
+            BenchmarkWorkload.ConcurrentCreate,
+            underExecuted.Concurrency,
+            underExecuted.OperationsPerIteration));
+        Assert.Throws<InvalidOperationException>(() =>
+            BenchmarkConsumerEvidenceReport.Create(report, underExecuted, machine, providers, layout));
     }
 
     [Fact]
@@ -604,7 +665,7 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
                 providers,
                 layout));
 
-        Assert.Contains("escapes the run root", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("non-canonical", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -652,7 +713,7 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
                 providers,
                 layout));
 
-        Assert.Contains("Native-plan evidence artifact", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Evidence artifact", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -855,6 +916,26 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         var mismatched = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             BenchmarkArtifactWriter.ReadBaselineAsync(root, CancellationToken.None));
         Assert.Contains("do not exactly bind", mismatched.Message, StringComparison.Ordinal);
+
+        await File.WriteAllTextAsync(
+            layout.RawMeasurements,
+            JsonSerializer.Serialize(
+                new RawBenchmarkRecord(benchmarkCase, sample),
+                BenchmarkJson.CompactOptions) + Environment.NewLine);
+        var nestedSummary = Path.Combine(root, "nested", "summary.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(nestedSummary)!);
+        await File.WriteAllTextAsync(
+            nestedSummary,
+            JsonSerializer.Serialize(report, BenchmarkJson.Options));
+        var decoyManifest = manifest with { Summary = "nested/summary.json" };
+        await File.WriteAllTextAsync(
+            layout.Manifest,
+            JsonSerializer.Serialize(decoyManifest, BenchmarkJson.Options));
+        await ResealArtifactIntegrityAsync(layout, decoyManifest);
+
+        var decoy = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkArtifactWriter.ReadBaselineAsync(root, CancellationToken.None));
+        Assert.Contains("canonical expected artifact path", decoy.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

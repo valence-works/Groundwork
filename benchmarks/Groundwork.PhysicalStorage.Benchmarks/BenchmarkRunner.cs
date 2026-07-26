@@ -248,7 +248,8 @@ public sealed class BenchmarkRunner
                             ValidateConcurrentLoadEvidence(
                                 execution,
                                 benchmarkCase,
-                                request.Configuration.Concurrency);
+                                request.Configuration.Concurrency,
+                                request.Configuration.OperationsPerIteration);
                             observableResultVector = RequireStableObservableResult(
                                 benchmarkCase,
                                 observableResultVector,
@@ -415,7 +416,8 @@ public sealed class BenchmarkRunner
     private static void ValidateConcurrentLoadEvidence(
         WorkloadExecution execution,
         BenchmarkCase benchmarkCase,
-        int configuredParallelism)
+        int configuredParallelism,
+        int operationsPerIteration)
     {
         if (benchmarkCase.Workload != BenchmarkWorkload.ConcurrentCreate)
         {
@@ -428,11 +430,16 @@ public sealed class BenchmarkRunner
         }
 
         if (execution.ConcurrentLoad is null ||
-            !execution.ConcurrentLoad.MeetsConfiguredContention(configuredParallelism))
+            execution.Operations != execution.ConcurrentLoad.Attempts ||
+            execution.OperationLatencyNanoseconds.Count != execution.Operations ||
+            !execution.ConcurrentLoad.MeetsConfiguredContention(
+                configuredParallelism,
+                operationsPerIteration))
         {
             throw new InvalidOperationException(
                 $"[{benchmarkCase.Identity}] concurrent-create requires complete synchronized-contention " +
-                "evidence with every configured contender released together and every outcome accounted.");
+                "evidence with every configured contender released together, every outcome accounted, " +
+                "and exactly one full wave per configured operation.");
         }
     }
 

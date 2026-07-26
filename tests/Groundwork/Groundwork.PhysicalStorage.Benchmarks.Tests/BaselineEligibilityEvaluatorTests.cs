@@ -59,7 +59,9 @@ public sealed class BaselineEligibilityEvaluatorTests
         var samples = Enumerable.Range(0, BenchmarkProfiles.Scheduled.MeasurementIterations)
             .Select(iteration =>
             {
-                var operations = benchmarkCase.Workload == BenchmarkWorkload.ConcurrentCreate ? 160 : 10;
+                var operations = benchmarkCase.Workload == BenchmarkWorkload.ConcurrentCreate
+                    ? BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration
+                    : 10;
                 return new BenchmarkSample(
                 iteration, operations, 1_000_000_000, 100, 1, 0, 0, null, null, new Dictionary<string, long>(),
                 Enumerable.Repeat(100L, operations).ToArray())
@@ -67,12 +69,12 @@ public sealed class BaselineEligibilityEvaluatorTests
                 ConcurrentLoad = benchmarkCase.Workload == BenchmarkWorkload.ConcurrentCreate
                     ? new ConcurrentLoadEvidence(
                         RequestedParallelism: BenchmarkProfiles.Scheduled.Concurrency,
-                        WaveCount: 10,
-                        ReleasedTogetherWaveCount: 10,
-                        Attempts: 160,
-                        Completions: 160,
-                        SuccessfulOperations: 10,
-                        ConflictOperations: 150,
+                        WaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        ReleasedTogetherWaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        Attempts: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        Completions: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        SuccessfulOperations: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        ConflictOperations: (BenchmarkProfiles.Scheduled.Concurrency - 1) * BenchmarkProfiles.Scheduled.OperationsPerIteration,
                         PeakInFlightProductionStoreCalls: BenchmarkProfiles.Scheduled.Concurrency)
                     : null
             }.WithObservedCommandSignal();

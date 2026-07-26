@@ -67,7 +67,7 @@ public sealed record BenchmarkConsumerEvidenceReport(
             machine.GitCommit,
             machine.GitDirty,
             layout.RelativePath(layout.RawMeasurements),
-            DigestFile(layout.RawMeasurements),
+            DigestFile(layout.ExistingPath(layout.RawMeasurements, "Raw measurements")),
             report.BaselineEligibility.Diagnostics
                 .Append("The external oracle join and accepted-shape verdict are required before promotion.")
                 .Distinct(StringComparer.Ordinal)
@@ -122,7 +122,8 @@ public sealed record BenchmarkConsumerEvidenceReport(
                 var concurrentLoadEvidenceDigest = ConcurrentLoadEvidenceDigest(
                     result.Case.Workload,
                     result.Samples,
-                    configuration.Concurrency);
+                    configuration.Concurrency,
+                    configuration.OperationsPerIteration);
                 var observableResultDigest = RequireObservableResultDigest(result);
                 var nativePlanArtifacts = result.PlanArtifacts
                     .SelectMany(artifact => new[] { artifact, $"{artifact}.assertions.json" })
@@ -247,13 +248,15 @@ public sealed record BenchmarkConsumerEvidenceReport(
     internal static string? ConcurrentLoadEvidenceDigest(
         BenchmarkWorkload workload,
         IReadOnlyList<BenchmarkSample> samples,
-        int configuredParallelism)
+        int configuredParallelism,
+        int operationsPerIteration)
     {
         var isConcurrentCreate = workload == BenchmarkWorkload.ConcurrentCreate;
         if (samples.Any(sample =>
                 !sample.HasValidConcurrentLoadEvidence(
                     workload,
-                    configuredParallelism)))
+                    configuredParallelism,
+                    operationsPerIteration)))
         {
             throw new InvalidOperationException(
                 "Consumer evidence has invalid concurrent-load evidence.");
@@ -273,6 +276,7 @@ public sealed record BenchmarkConsumerEvidenceReport(
 
     private static string DigestFile(string path)
     {
+        path = BenchmarkArtifactPaths.RequireExistingFile(path, "Evidence artifact");
         using var stream = File.OpenRead(path);
         return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
@@ -299,17 +303,7 @@ public sealed record BenchmarkConsumerEvidenceReport(
     }
 
     private static string ResolveArtifact(ArtifactLayout layout, string artifact)
-    {
-        if (Path.IsPathRooted(artifact))
-            throw new InvalidOperationException("Evidence artifact paths must be relative to the run root.");
-        var root = Path.GetFullPath(layout.Root);
-        var path = Path.GetFullPath(Path.Combine(
-            root,
-            artifact.Replace('/', Path.DirectorySeparatorChar)));
-        if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            throw new InvalidOperationException($"Evidence artifact '{artifact}' escapes the run root.");
-        return path;
-    }
+        => BenchmarkArtifactPaths.ResolveExisting(layout.Root, artifact, "Evidence artifact");
 
     private static string Digest<T>(T value)
     {

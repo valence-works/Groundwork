@@ -116,8 +116,9 @@ public sealed record ConcurrentLoadEvidence(
         }
     }
 
-    public bool MeetsConfiguredContention(int configuredParallelism) =>
+    public bool MeetsConfiguredContention(int configuredParallelism, int? expectedWaveCount = null) =>
         configuredParallelism > 0 &&
+        (!expectedWaveCount.HasValue || expectedWaveCount.Value > 0 && WaveCount == expectedWaveCount.Value) &&
         IsInternallyConsistent() &&
         RequestedParallelism == configuredParallelism &&
         ReleasedTogetherWaveCount == WaveCount;

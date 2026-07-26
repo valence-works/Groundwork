@@ -198,7 +198,7 @@ An operation is the smallest semantically complete unit that the workload promis
 - point-read batch: the complete reused-client or reset-client batch (including reset when selected);
 - indexed/mixed query, insert, update, delete, stale write, and storage-growth: one store call;
 - unit of work: one begin/save-batch/commit transaction;
-- concurrent create: one competing create attempt. Every retained concurrent-create sample seals its requested parallelism, wave count, released-together wave count, attempts, completions, successful/conflict outcomes, and observed peak in-flight public production-store calls. Every contender must reach the same barrier before release, every wave must release all contenders together, and every outcome must be accounted. The observed call-window peak is retained as provider characterization in `[1, N]`; it is not an eligibility gate and does not claim physical database overlap. Such an overlap claim requires provider-specific instrumentation at a lower execution boundary;
+- concurrent create: one competing create attempt. Every retained concurrent-create sample seals its requested parallelism, wave count, released-together wave count, attempts, completions, successful/conflict outcomes, and observed peak in-flight public production-store calls. Every contender must reach the same barrier before release, every wave must release all contenders together, and every outcome must be accounted. The sample operation count equals its attempts, the latency inventory equals that operation count, and the wave count equals the configured operations per iteration. The observed call-window peak is retained as provider characterization in `[1, N]`; it is not an eligibility gate and does not claim physical database overlap. Such an overlap claim requires provider-specific instrumentation at a lower execution boundary;
 - pagination and count: one page query or one count query;
 - backfill: one complete materialization/backfill application;
 - client restart validation: one client/factory/pool restart plus its durable-read validation batch.
@@ -276,8 +276,10 @@ domain code.
 The coordinator binds every worker request to the expected Git commit and worktree digest. The
 run-group manifest records SHA-256 digests for every request, response, worker manifest, Elsa
 evidence report, and measured consumer-evidence report. The verifier rejects path escapes, unknown
-JSON members, identity mismatches, Git drift, and digest mismatches before a group can be used as a
-baseline. Connection strings and provider secrets remain excluded.
+JSON members, non-canonical artifact slots, symbolic-link/reparse-point traversal, identity
+mismatches, Git drift, and digest mismatches before a group can be used as a baseline. Scheduled
+and regression consumers read the same canonical files that those digests bind. Connection strings
+and provider secrets remain excluded.
 
 ## Target-scoped database-work signals
 

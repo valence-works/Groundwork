@@ -592,7 +592,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
                 NormalizeConcurrentPayload(winnerDocument.ContentJson, concurrency));
         }
         var concurrentEvidence = concurrentLoad.Build();
-        if (!concurrentEvidence.MeetsConfiguredContention(concurrency))
+        if (!concurrentEvidence.MeetsConfiguredContention(concurrency, batches))
             throw new InvalidOperationException("Concurrent-create workload did not retain complete synchronized-contention evidence.");
         return Execution(
             batches * concurrency,

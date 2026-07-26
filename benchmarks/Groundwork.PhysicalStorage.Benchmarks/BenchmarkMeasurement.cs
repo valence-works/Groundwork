@@ -72,14 +72,22 @@ public sealed record BenchmarkSample(
         };
     }
 
-    public bool HasValidConcurrentLoadEvidence(BenchmarkWorkload workload, int? configuredParallelism = null)
+    public bool HasValidConcurrentLoadEvidence(
+        BenchmarkWorkload workload,
+        int? configuredParallelism = null,
+        int? expectedWaveCount = null)
     {
         if (workload != BenchmarkWorkload.ConcurrentCreate)
             return ConcurrentLoad is null;
 
         return ConcurrentLoad is not null &&
+               Operations == ConcurrentLoad.Attempts &&
+               OperationLatencyNanoseconds is not null &&
+               OperationLatencyNanoseconds.Count == Operations &&
                (configuredParallelism.HasValue
-                   ? ConcurrentLoad.MeetsConfiguredContention(configuredParallelism.Value)
+                   ? ConcurrentLoad.MeetsConfiguredContention(
+                       configuredParallelism.Value,
+                       expectedWaveCount)
                    : ConcurrentLoad.IsInternallyConsistent());
     }
 }

@@ -37,6 +37,8 @@ public sealed class ConcurrentLoadEvidenceCollectorTests
         Assert.Equal(1, evidence.PeakInFlightProductionStoreCalls);
         Assert.Equal(1, evidence.ReleasedTogetherWaveCount);
         Assert.True(evidence.MeetsConfiguredContention(2));
+        Assert.True(evidence.MeetsConfiguredContention(2, expectedWaveCount: 1));
+        Assert.False(evidence.MeetsConfiguredContention(2, expectedWaveCount: 2));
     }
 
     [Fact]

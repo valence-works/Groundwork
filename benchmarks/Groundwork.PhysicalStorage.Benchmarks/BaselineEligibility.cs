@@ -59,7 +59,10 @@ public static class BaselineEligibilityEvaluator
         }
         if (cases.Any(result => !AllPassed(result.Correctness)))
             diagnostics.Add("Future baseline activation also requires all correctness gates to pass.");
-        if (!HasSustainedConcurrentLoadEvidence(cases, configuration.Concurrency))
+        if (!HasSustainedConcurrentLoadEvidence(
+                cases,
+                configuration.Concurrency,
+                configuration.OperationsPerIteration))
         {
             diagnostics.Add(
                 "Future baseline activation also requires every concurrent-create sample to retain complete " +
@@ -117,7 +120,8 @@ public static class BaselineEligibilityEvaluator
 
     private static bool HasSustainedConcurrentLoadEvidence(
         IReadOnlyList<BenchmarkCaseResult> cases,
-        int configuredParallelism)
+        int configuredParallelism,
+        int operationsPerIteration)
     {
         var concurrentCases = cases
             .Where(result => result.Case.Workload == BenchmarkWorkload.ConcurrentCreate)
@@ -127,6 +131,7 @@ public static class BaselineEligibilityEvaluator
                                             result.Samples.All(sample =>
                                                 sample.HasValidConcurrentLoadEvidence(
                                                     BenchmarkWorkload.ConcurrentCreate,
-                                                    configuredParallelism)));
+                                                    configuredParallelism,
+                                                    operationsPerIteration)));
     }
 }

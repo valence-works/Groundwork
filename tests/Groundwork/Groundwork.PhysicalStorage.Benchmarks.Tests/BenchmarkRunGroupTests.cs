@@ -491,6 +491,10 @@ public sealed class BenchmarkRunGroupTests : IDisposable
         string semanticResult = "result")
     {
         var runId = $"{invocation.RunGroupId}-{invocation.Ordinal}";
+        var artifactIntegrityPath = Path.Combine(
+            Path.GetDirectoryName(manifestPath)!,
+            "reports",
+            "artifact-integrity.json");
         if (invocation.Role == BenchmarkExecutionRole.Measured)
         {
             var tuple = BenchmarkRunTuple.From(invocation);
@@ -548,7 +552,14 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                 Failure: null,
                 ConsumerEvidence: invocation.Role == BenchmarkExecutionRole.Measured
                     ? "reports/consumer-evidence.json"
-                    : null));
+                    : null,
+                ArtifactIntegrity: "reports/artifact-integrity.json"));
+        await WriteJsonAsync(
+            artifactIntegrityPath,
+            new BenchmarkArtifactIntegrity(
+                BenchmarkArtifactIntegrity.ContractVersion,
+                runId,
+                []));
     }
 
     private static BenchmarkMachineMetadata Machine(string commit, string treeDigest) => new(

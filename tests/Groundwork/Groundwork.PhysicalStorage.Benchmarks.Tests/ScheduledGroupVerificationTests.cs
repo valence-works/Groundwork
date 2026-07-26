@@ -163,7 +163,72 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
 
-        Assert.Contains("escapes the group root", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("canonical expected artifact path", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_nested_worker_manifest_decoy()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(scratch);
+        var groupPath = Path.Combine(fixture.Root, "run-group.json");
+        var group = await ReadJsonAsync<BenchmarkRunGroupManifest>(groupPath);
+        var originalEntry = group.Runs.Single(entry => entry.Ordinal == 2);
+        var workerRoot = Path.Combine(fixture.Root, "runs", "000002");
+        var canonicalManifestPath = Path.Combine(workerRoot, "manifest.json");
+        var decoyManifestPath = Path.Combine(workerRoot, "nested", "manifest.json");
+        var decoy = (await ReadJsonAsync<BenchmarkRunManifest>(canonicalManifestPath)) with
+        {
+            StartedAtUtc = DateTimeOffset.UnixEpoch.AddSeconds(1)
+        };
+        await WriteJsonAsync(decoyManifestPath, decoy);
+
+        var responsePath = Path.Combine(fixture.Root, originalEntry.Response.Replace('/', Path.DirectorySeparatorChar));
+        var response = await ReadJsonAsync<BenchmarkWorkerResponse>(responsePath);
+        response = response with
+        {
+            Artifacts = response.Artifacts! with
+            {
+                Manifest = "nested/manifest.json",
+                ManifestDigest = Digest(decoyManifestPath)
+            }
+        };
+        await WriteJsonAsync(responsePath, response);
+
+        var resealedEntry = originalEntry with
+        {
+            WorkerManifest = Relative(fixture.Root, decoyManifestPath),
+            WorkerManifestDigest = Digest(decoyManifestPath),
+            ResponseDigest = Digest(responsePath)
+        };
+        await WriteJsonAsync(groupPath, group with
+        {
+            Runs = group.Runs.Select(entry => entry.Ordinal == resealedEntry.Ordinal ? resealedEntry : entry).ToArray()
+        });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("canonical expected artifact path", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_run_group_artifact_path_that_crosses_a_symbolic_link()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // Creating symlinks can require elevated privileges on Windows CI.
+
+        var fixture = await ScheduledGroupFixture.CreateAsync(scratch);
+        var outside = Path.Combine(scratch, "outside");
+        Directory.CreateDirectory(outside);
+        await File.WriteAllTextAsync(Path.Combine(outside, "manifest.json"), "{}");
+        var canonicalManifest = Path.Combine(fixture.Root, "runs", "000001", "manifest.json");
+        File.Delete(canonicalManifest);
+        File.CreateSymbolicLink(canonicalManifest, Path.Combine(outside, "manifest.json"));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("symbolic link", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -200,6 +265,12 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         return await JsonSerializer.DeserializeAsync<T>(stream, BenchmarkJson.Options)
                ?? throw new InvalidOperationException($"Fixture JSON '{path}' is null.");
     }
+
+    private static string Digest(string path) =>
+        Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
+
+    private static string Relative(string root, string path) =>
+        Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
 
     private sealed class ScheduledGroupFixture
     {
@@ -508,7 +579,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                 .Select(iteration =>
                 {
                     var operations = workload == BenchmarkWorkload.ConcurrentCreate
-                        ? BenchmarkProfiles.Scheduled.Concurrency
+                        ? BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration
                         : options.OperationsPerSample;
                     return new BenchmarkSample(
                     iteration,
@@ -526,12 +597,12 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                         ConcurrentLoad = workload == BenchmarkWorkload.ConcurrentCreate
                             ? new ConcurrentLoadEvidence(
                                 BenchmarkProfiles.Scheduled.Concurrency,
-                                WaveCount: 1,
-                                ReleasedTogetherWaveCount: 1,
-                                Attempts: BenchmarkProfiles.Scheduled.Concurrency,
-                                Completions: BenchmarkProfiles.Scheduled.Concurrency,
-                                SuccessfulOperations: 1,
-                                ConflictOperations: BenchmarkProfiles.Scheduled.Concurrency - 1,
+                                WaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                ReleasedTogetherWaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                Attempts: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                Completions: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                SuccessfulOperations: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                ConflictOperations: (BenchmarkProfiles.Scheduled.Concurrency - 1) * BenchmarkProfiles.Scheduled.OperationsPerIteration,
                                 PeakInFlightProductionStoreCalls: BenchmarkProfiles.Scheduled.Concurrency)
                             : null
                     };
