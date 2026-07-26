@@ -47,6 +47,12 @@ public sealed record NativePlanEvidence(
 
 public static class NativePlanEvidenceAssertions
 {
+    private static readonly IReadOnlyList<string> ScanCharacterization =
+    [
+        "provider-native plan captured as a non-gating scan characterization",
+        "index selection is not required at this selectivity"
+    ];
+
     public static IReadOnlyList<string> For(
         NativePlanAssertionMode assertionMode,
         IReadOnlyList<string> acceptanceAssertions)
@@ -55,12 +61,95 @@ public static class NativePlanEvidenceAssertions
         return assertionMode switch
         {
             NativePlanAssertionMode.RequireDeclaredIndex => acceptanceAssertions,
-            NativePlanAssertionMode.ScanCharacterization =>
-            [
-                "provider-native plan captured as a non-gating scan characterization",
-                "index selection is not required at this selectivity"
-            ],
+            NativePlanAssertionMode.ScanCharacterization => ScanCharacterization,
             _ => throw new ArgumentOutOfRangeException(nameof(assertionMode), assertionMode, null)
+        };
+    }
+
+    public static IReadOnlyList<string> ForSqlite(
+        NativePlanAssertionMode assertionMode,
+        string indexName,
+        string nativePlan) =>
+        For(
+            assertionMode,
+            [
+                "indexed SEARCH is present",
+                $"index {indexName} is selected",
+                "linked and primary full-table SCAN stages are absent",
+                nativePlan.Contains("USE TEMP B-TREE", StringComparison.OrdinalIgnoreCase)
+                    ? "ordering remains server-side with a temporary B-tree for the stable identity suffix"
+                    : "ordering is satisfied directly by the selected index"
+            ]);
+
+    public static IReadOnlyList<string> ForMongoDb(
+        NativePlanAssertionMode assertionMode,
+        string indexName) =>
+        For(
+            assertionMode,
+            [
+                "winningPlan contains IXSCAN",
+                $"winningPlan selects index {indexName}",
+                "winningPlan contains no COLLSCAN"
+            ]);
+
+    public static IReadOnlyList<string> ForPostgreSql(
+        NativePlanAssertionMode assertionMode) =>
+        For(
+            assertionMode,
+            [
+                "declared index is selected on the predicate-bearing relation",
+                "the predicate-bearing relation is not sequentially scanned",
+                "an optimizer-selected scan of a separate primary payload relation is permitted for linked forms",
+                "query shape is rendered by the certified production handler"
+            ]);
+
+    public static IReadOnlyList<string> ForSqlServer(
+        NativePlanAssertionMode assertionMode) =>
+        For(
+            assertionMode,
+            [
+                "declared index is selected",
+                "table and index scans are absent",
+                "query shape is rendered by the certified production handler"
+            ]);
+
+    public static bool Matches(
+        NativePlanAssertionMode assertionMode,
+        BenchmarkProvider provider,
+        string indexName,
+        string physicalObject,
+        string nativePlan,
+        IReadOnlyList<string>? assertions)
+    {
+        if (string.IsNullOrWhiteSpace(indexName) ||
+            string.IsNullOrWhiteSpace(physicalObject) ||
+            string.IsNullOrWhiteSpace(nativePlan) ||
+            assertions is null)
+            return false;
+
+        var expected = provider switch
+        {
+            BenchmarkProvider.Sqlite => ForSqlite(assertionMode, indexName, nativePlan),
+            BenchmarkProvider.MongoDb => ForMongoDb(assertionMode, indexName),
+            BenchmarkProvider.PostgreSql => ForPostgreSql(assertionMode),
+            BenchmarkProvider.SqlServer => ForSqlServer(assertionMode),
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+        };
+        if (!expected.SequenceEqual(assertions, StringComparer.Ordinal))
+            return false;
+        if (assertionMode == NativePlanAssertionMode.ScanCharacterization)
+            return true;
+
+        return provider switch
+        {
+            BenchmarkProvider.Sqlite => SqliteBenchmarkTarget.UsesDeclaredIndexWithoutScanningRelations(nativePlan, indexName),
+            BenchmarkProvider.MongoDb => MongoDbBenchmarkTarget.UsesDeclaredIndex(nativePlan, indexName),
+            BenchmarkProvider.PostgreSql => PostgreSqlBenchmarkTarget.UsesDeclaredIndexWithoutScanningIndexedRelation(
+                nativePlan,
+                indexName,
+                physicalObject),
+            BenchmarkProvider.SqlServer => SqlServerBenchmarkTarget.UsesDeclaredIndex(nativePlan, indexName),
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
         };
     }
 }

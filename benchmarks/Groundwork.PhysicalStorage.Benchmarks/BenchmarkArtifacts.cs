@@ -358,12 +358,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             throw new InvalidOperationException(
                 $"Plan evidence for '{evidence.Request.Workload}' cannot be written for case '{benchmarkCase.Identity}'.");
         }
-        var extension = benchmarkCase.Provider switch
-        {
-            BenchmarkProvider.SqlServer => "xml",
-            BenchmarkProvider.PostgreSql or BenchmarkProvider.MongoDb => "json",
-            _ => "txt"
-        };
+        var extension = PlanExtension(benchmarkCase.Provider);
         var path = Layout.WritablePath(
             Layout.Plan(benchmarkCase, evidence.Request.Operation, extension),
             "Native-plan evidence");
@@ -445,6 +440,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         var report = await ReadJsonAsync<BenchmarkRunReport>(layout.ExistingPath(layout.SummaryJson, "Run summary"), cancellationToken);
         VerifyReportSamples(report, configuration);
         VerifyRawSamples(report, records, configuration);
+        await VerifyNativePlanEvidenceAsync(layout, manifest, report, configuration, cancellationToken);
         var consumer = manifest.ConsumerEvidence is null
             ? null
             : await ReadJsonAsync<BenchmarkConsumerEvidenceReport>(ResolveArtifact(layout, manifest.ConsumerEvidence), cancellationToken);
@@ -547,6 +543,131 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         }
     }
 
+    private static async Task VerifyNativePlanEvidenceAsync(
+        ArtifactLayout layout,
+        BenchmarkRunManifest manifest,
+        BenchmarkRunReport report,
+        BenchmarkRunConfiguration configuration,
+        CancellationToken cancellationToken)
+    {
+        var manifestPlans = manifest.PlanArtifacts ??
+            throw new InvalidOperationException("Baseline manifest native-plan artifacts are missing.");
+        if (manifestPlans.Any(string.IsNullOrWhiteSpace) ||
+            manifestPlans.Distinct(StringComparer.Ordinal).Count() != manifestPlans.Count)
+        {
+            throw new InvalidOperationException("Baseline manifest native-plan artifacts must be a distinct canonical set.");
+        }
+
+        var reportPlans = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var result in report.Cases)
+        {
+            var casePlans = result.PlanArtifacts ??
+                throw new InvalidOperationException($"Baseline case '{result.Case.Identity}' has no native-plan artifact collection.");
+            var canonicalRequests = BenchmarkPlanRequests.ForWorkloads([result.Case.Workload]);
+            if (canonicalRequests.Count == 0)
+            {
+                if (casePlans.Count != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' is not a query workload and must not contain native-plan artifacts.");
+                }
+                continue;
+            }
+
+            if (configuration.DataShape is null)
+            {
+                throw new InvalidOperationException(
+                    $"Baseline case '{result.Case.Identity}' requires configured data-shape native-plan semantics.");
+            }
+
+            if (casePlans.Count != canonicalRequests.Count ||
+                casePlans.Any(string.IsNullOrWhiteSpace) ||
+                casePlans.Distinct(StringComparer.Ordinal).Count() != casePlans.Count)
+            {
+                throw new InvalidOperationException(
+                    $"Baseline case '{result.Case.Identity}' does not have exactly one native-plan artifact for every canonical request.");
+            }
+
+            var assertionMode = BenchmarkSelectivityPolicy.PlanAssertionModeFor(configuration.DataShape);
+            var seenRequests = new HashSet<BenchmarkPlanRequest>();
+            foreach (var artifact in casePlans)
+            {
+                var path = ResolveArtifact(layout, artifact);
+                var sidecar = await ReadJsonAsync<NativePlanEvidence>(
+                    ResolveArtifact(layout, $"{artifact}.assertions.json"),
+                    cancellationToken);
+                if (sidecar.Request is null || !canonicalRequests.Contains(sidecar.Request) || !seenRequests.Add(sidecar.Request))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan artifacts do not bijectively map to canonical requests.");
+                }
+
+                var expectedArtifact = layout.RelativePath(
+                    layout.Plan(result.Case, sidecar.Request.Operation, PlanExtension(result.Case.Provider)));
+                if (!string.Equals(artifact, expectedArtifact, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan artifact does not use the canonical request path.");
+                }
+
+                if (!string.Equals(sidecar.Provider, result.Case.Provider.ToString(), StringComparison.Ordinal) ||
+                    !string.Equals(sidecar.StorageForm, result.Case.StorageForm.ToString(), StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan sidecar does not match its provider/storage tuple.");
+                }
+
+                var nativePlan = await File.ReadAllTextAsync(path, cancellationToken);
+                if (!string.Equals(nativePlan, sidecar.NativePlan, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan file and assertion sidecar differ.");
+                }
+
+                if (string.IsNullOrWhiteSpace(sidecar.QueryIdentity) ||
+                    string.IsNullOrWhiteSpace(sidecar.PhysicalObject) ||
+                    string.IsNullOrWhiteSpace(sidecar.IndexName) ||
+                    string.IsNullOrWhiteSpace(sidecar.NativePlan))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan evidence is missing physical, query, or index identity.");
+                }
+
+                if (!string.Equals(sidecar.QueryIdentity, BenchmarkModelFactory.QueryIdentity, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan evidence has an unexpected query identity.");
+                }
+
+                if (!NativePlanEvidenceAssertions.Matches(
+                        assertionMode,
+                        result.Case.Provider,
+                        sidecar.IndexName,
+                        sidecar.PhysicalObject,
+                        sidecar.NativePlan,
+                        sidecar.Assertions))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan assertions do not match configured data-shape semantics.");
+                }
+            }
+
+            if (!seenRequests.SetEquals(canonicalRequests))
+            {
+                throw new InvalidOperationException(
+                    $"Baseline case '{result.Case.Identity}' native-plan artifacts do not cover the canonical request set.");
+            }
+
+            reportPlans.UnionWith(casePlans);
+        }
+
+        if (!reportPlans.SetEquals(manifestPlans))
+        {
+            throw new InvalidOperationException(
+                "Baseline manifest native-plan artifacts do not exactly equal the union of report-case artifacts.");
+        }
+    }
+
     internal static void VerifyManifestArtifactPaths(
         ArtifactLayout layout,
         BenchmarkRunManifest manifest)
@@ -578,6 +699,13 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
 
     private static string ResolveArtifact(ArtifactLayout layout, string relative)
         => BenchmarkArtifactPaths.ResolveExisting(layout.Root, relative, "Artifact");
+
+    private static string PlanExtension(BenchmarkProvider provider) => provider switch
+    {
+        BenchmarkProvider.SqlServer => "xml",
+        BenchmarkProvider.PostgreSql or BenchmarkProvider.MongoDb => "json",
+        _ => "txt"
+    };
 
     private static string DigestFile(string path)
     {

@@ -161,6 +161,32 @@ public sealed class BenchmarkRunGroupTests : IDisposable
     }
 
     [Fact]
+    public async Task Comparison_rejects_a_fully_resealed_native_plan_sidecar_drift()
+    {
+        var baselineRoot = Path.Combine(scratch, "native-plan-baseline");
+        var candidateRoot = Path.Combine(scratch, "native-plan-candidate");
+        await WriteGroupAsync(baselineRoot, "baseline", 1_000);
+        var candidate = await WriteGroupAsync(candidateRoot, "candidate", 1_000);
+        var workerRoot = Path.Combine(candidateRoot, "runs", candidate.Runs[0].Ordinal.ToString("D6"));
+        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(Path.Combine(workerRoot, "manifest.json"));
+        var planPath = Path.Combine(
+            workerRoot,
+            manifest.PlanArtifacts[0].Replace('/', Path.DirectorySeparatorChar));
+        await File.WriteAllTextAsync(planPath, "SEARCH fixture_index with drift");
+        await ResealWorkerIntegrityAsync(workerRoot);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkRunGroupRegressionEvaluator.CompareAsync(
+                candidateRoot,
+                candidate,
+                baselineRoot,
+                RegressionPolicy.Scheduled,
+                CancellationToken.None));
+
+        Assert.Contains("file and assertion sidecar differ", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Comparison_rejects_a_candidate_missing_a_baseline_tuple()
     {
         var baselineRoot = Path.Combine(scratch, "missing-baseline");
@@ -470,13 +496,21 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                 .ToArray()
             : [];
         var benchmarkCase = new BenchmarkCase(tuple.Provider, tuple.StorageForm, tuple.Workload);
+        await using var writer = new BenchmarkArtifactWriter(layout);
+        var planArtifacts = invocation.Role == BenchmarkExecutionRole.Measured
+            ? await NativePlanFixtureArtifacts.WriteCanonicalAsync(
+                writer,
+                benchmarkCase,
+                tuple.DataShape,
+                cancellationToken)
+            : [];
         var cases = invocation.Role == BenchmarkExecutionRole.Measured
             ? new[]
             {
                 new BenchmarkCaseResult(
                     benchmarkCase,
                     new CorrectnessGateResult(true, true, true, true, true),
-                    [],
+                    planArtifacts,
                     BenchmarkSummarizer.Summarize(benchmarkCase.Identity, samples),
                     samples,
                     [new BenchmarkObservableResult(
@@ -511,7 +545,7 @@ public sealed class BenchmarkRunGroupTests : IDisposable
             layout.RelativePath(layout.MachineMetadata),
             layout.RelativePath(layout.ProviderMetadata),
             layout.RelativePath(layout.Configuration),
-            [],
+            planArtifacts,
             BaselineRun: null,
             RegressionConfirmationRun: false,
             Failure: null,
@@ -520,7 +554,6 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                 : null,
             ArtifactIntegrity: layout.RelativePath(layout.ArtifactIntegrityJson));
 
-        await using var writer = new BenchmarkArtifactWriter(layout);
         await writer.WriteManifestAsync(manifest, cancellationToken);
         await writer.WriteMachineAsync(machine, cancellationToken);
         await writer.WriteProvidersAsync(providers, cancellationToken);
@@ -578,33 +611,7 @@ public sealed class BenchmarkRunGroupTests : IDisposable
     }
 
     private static async Task ResealWorkerIntegrityAsync(string workerRoot)
-    {
-        var layout = new ArtifactLayout(workerRoot);
-        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(layout.Manifest);
-        var paths = new[]
-        {
-            layout.RelativePath(layout.Manifest),
-            manifest.RawMeasurements,
-            manifest.Summary,
-            manifest.ElsaMigrationEvidence,
-            manifest.MachineMetadata,
-            manifest.ProviderMetadata,
-            manifest.Configuration
-        }.Concat(manifest.ConsumerEvidence is null ? [] : [manifest.ConsumerEvidence])
-         .Concat(manifest.PlanArtifacts.SelectMany(plan => new[] { plan, $"{plan}.assertions.json" }))
-         .Distinct(StringComparer.Ordinal)
-         .Order(StringComparer.Ordinal)
-         .Select(relative => new BenchmarkArtifactDigest(
-             relative,
-             Digest(Path.Combine(layout.Root, relative.Replace('/', Path.DirectorySeparatorChar)))))
-         .ToArray();
-        await WriteJsonAsync(
-            layout.ArtifactIntegrityJson,
-            new BenchmarkArtifactIntegrity(
-                BenchmarkArtifactIntegrity.ContractVersion,
-                manifest.RunId,
-                paths));
-    }
+        => await NativePlanFixtureArtifacts.ResealIntegrityAsync(workerRoot, CancellationToken.None);
 
     private static string Digest(string path) =>
         Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));

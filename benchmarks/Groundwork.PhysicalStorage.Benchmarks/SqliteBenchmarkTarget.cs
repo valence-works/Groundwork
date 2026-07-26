@@ -110,10 +110,7 @@ public sealed class SqliteBenchmarkTarget(
                 lines.Add(reader.GetString(3));
             var plan = string.Join(Environment.NewLine, lines);
             if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
-                (!plan.Contains(indexName, StringComparison.OrdinalIgnoreCase) ||
-                 !plan.Contains("SEARCH", StringComparison.OrdinalIgnoreCase) ||
-                 plan.Contains("SCAN l", StringComparison.OrdinalIgnoreCase) ||
-                 plan.Contains("SCAN p", StringComparison.OrdinalIgnoreCase)))
+                !UsesDeclaredIndexWithoutScanningRelations(plan, indexName))
             {
                 throw new InvalidOperationException(
                     $"SQLite native-plan gate rejected {request.Workload}/{request.Operation}. Expected index '{indexName}'.{Environment.NewLine}{plan}");
@@ -126,19 +123,18 @@ public sealed class SqliteBenchmarkTarget(
                 (model.Route.LinkedIndexStorage ?? model.Route.PrimaryStorage).Name.Identifier,
                 indexName,
                 plan,
-                NativePlanEvidenceAssertions.For(
-                    assertionMode,
-                    [
-                        "indexed SEARCH is present",
-                        $"index {indexName} is selected",
-                        "linked and primary full-table SCAN stages are absent",
-                        plan.Contains("USE TEMP B-TREE", StringComparison.OrdinalIgnoreCase)
-                            ? "ordering remains server-side with a temporary B-tree for the stable identity suffix"
-                            : "ordering is satisfied directly by the selected index"
-                    ])));
+                NativePlanEvidenceAssertions.ForSqlite(assertionMode, indexName, plan)));
         }
         return evidence;
     }
+
+    internal static bool UsesDeclaredIndexWithoutScanningRelations(string plan, string indexName) =>
+        !string.IsNullOrWhiteSpace(plan) &&
+        !string.IsNullOrWhiteSpace(indexName) &&
+        plan.Contains(indexName, StringComparison.OrdinalIgnoreCase) &&
+        plan.Contains("SEARCH", StringComparison.OrdinalIgnoreCase) &&
+        !plan.Contains("SCAN l", StringComparison.OrdinalIgnoreCase) &&
+        !plan.Contains("SCAN p", StringComparison.OrdinalIgnoreCase);
 
     public override async Task PrepareIterationAsync(
         BenchmarkWorkload workload,

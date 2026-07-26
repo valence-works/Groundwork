@@ -81,33 +81,32 @@ public sealed class MongoDbBenchmarkTarget(
             var command = explanation.Commands.Single(candidate => candidate.Kind == commandKind);
             var planDocument = BsonDocument.Parse(command.NativePlan);
             var plan = planDocument.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { Indent = true });
-            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex && !UsesDeclaredIndex(plan, indexName))
             {
-                try
-                {
-                    MongoWinningPlanInspector.EnsureIndexScan(planDocument, indexName);
-                }
-                catch (InvalidOperationException exception)
-                {
-                    throw new InvalidOperationException(
-                        $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}",
-                        exception);
-                }
+                throw new InvalidOperationException(
+                    $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}");
             }
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 (route.LinkedIndexStorage ?? route.PrimaryStorage).Name.Identifier,
                 indexName, plan,
-                NativePlanEvidenceAssertions.For(
-                    assertionMode,
-                    [
-                        "winningPlan contains IXSCAN",
-                        $"winningPlan selects index {indexName}",
-                        "winningPlan contains no COLLSCAN"
-                    ])));
+                NativePlanEvidenceAssertions.ForMongoDb(assertionMode, indexName)));
         }
         return evidence;
+    }
+
+    internal static bool UsesDeclaredIndex(string nativePlan, string indexName)
+    {
+        try
+        {
+            MongoWinningPlanInspector.EnsureIndexScan(BsonDocument.Parse(nativePlan), indexName);
+            return true;
+        }
+        catch (Exception exception) when (exception is FormatException or InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     public override async Task PrepareIterationAsync(

@@ -65,33 +65,32 @@ public sealed class SqlServerBenchmarkTarget(
             var plans = await SqlServerShowplanReader.ReadAsync(reader, cancellationToken);
             var plan = plans.SingleOrDefault() ?? throw new InvalidOperationException(
                 $"SQL Server returned no native XML plan for {request.Workload}/{request.Operation}.");
-            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex && !UsesDeclaredIndex(plan, indexName))
             {
-                try
-                {
-                    SqlServerShowplanReader.EnsureScaleBearingIndex(plan, indexName);
-                }
-                catch (InvalidOperationException exception)
-                {
-                    throw new InvalidOperationException(
-                        $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.",
-                        exception);
-                }
+                throw new InvalidOperationException(
+                    $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.");
             }
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier,
                 indexName, plan,
-                NativePlanEvidenceAssertions.For(
-                    assertionMode,
-                    [
-                        "declared index is selected",
-                        "table and index scans are absent",
-                        "query shape is rendered by the certified production handler"
-                    ])));
+                NativePlanEvidenceAssertions.ForSqlServer(assertionMode)));
         }
         return evidence;
+    }
+
+    internal static bool UsesDeclaredIndex(string nativePlan, string indexName)
+    {
+        try
+        {
+            SqlServerShowplanReader.EnsureScaleBearingIndex(nativePlan, indexName);
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.Xml.XmlException)
+        {
+            return false;
+        }
     }
 
     public override async Task<StorageSnapshot> CaptureStorageAsync(CancellationToken cancellationToken)

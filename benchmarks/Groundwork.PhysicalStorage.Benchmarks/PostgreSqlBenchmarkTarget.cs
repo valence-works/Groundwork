@@ -85,14 +85,7 @@ public sealed class PostgreSqlBenchmarkTarget(
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 indexedRelation,
                 indexName, plan,
-                NativePlanEvidenceAssertions.For(
-                    assertionMode,
-                    [
-                        "declared index is selected on the predicate-bearing relation",
-                        "the predicate-bearing relation is not sequentially scanned",
-                        "an optimizer-selected scan of a separate primary payload relation is permitted for linked forms",
-                        "query shape is rendered by the certified production handler"
-                    ])));
+                NativePlanEvidenceAssertions.ForPostgreSql(assertionMode)));
         }
         return evidence;
     }
