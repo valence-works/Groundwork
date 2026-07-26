@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Groundwork.Core.PhysicalStorage;
@@ -81,35 +83,87 @@ public sealed class RelationshipMaterializationTransitionRequirement
 }
 
 /// <summary>
-/// A provider-supplied opaque identity used to correlate one target key across deterministic
-/// dangling-reference diagnostics. The closed format carries an HMAC-SHA-256 result only; providers
-/// must derive it with a stable provider-owned secret over a domain-separated, unambiguously framed
-/// tuple of relationship route, generation, materialization fingerprint, target scope, and target
-/// comparison key. Providers must never pass raw values or unkeyed digests. Core validates the
-/// closed format only; the authoritative provider executor owns derivation and secret handling.
+/// An opaque HMAC-SHA-256 identity used to correlate one target key across deterministic
+/// dangling-reference diagnostics. Only <see cref="Create"/> can construct an identity: callers
+/// cannot relabel a raw value or an unkeyed digest as a keyed correlation identity.
 /// </summary>
 public sealed class RelationshipMaterializationKeyCorrelationIdentity :
     IEquatable<RelationshipMaterializationKeyCorrelationIdentity>
 {
     public const string Scheme = "hmac-sha256-v1:";
-    private const int DigestLength = 64;
+    private const int MinimumProviderOwnedKeyLength = 32;
+    private const string DomainSeparator =
+        "groundwork.relationship-materialization.key-correlation.hmac-sha256.v1";
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
-    public RelationshipMaterializationKeyCorrelationIdentity(string value)
+    private RelationshipMaterializationKeyCorrelationIdentity(
+        string value,
+        RelationshipMaterializationGeneration candidateGeneration)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value);
-        if (value.Length != Scheme.Length + DigestLength ||
-            !value.StartsWith(Scheme, StringComparison.Ordinal) ||
-            !value.AsSpan(Scheme.Length).ContainsOnlyLowercaseHex())
+        Value = value;
+        CandidateGeneration = candidateGeneration;
+    }
+
+    /// <summary>
+    /// Derives the opaque identity from a provider-owned key and the exact candidate generation.
+    /// The HMAC input is UTF-8 with the following length-prefixed fields, in order: the literal
+    /// <c>groundwork.relationship-materialization.key-correlation.hmac-sha256.v1</c>, relationship
+    /// route identity, candidate generation identity, candidate materialization fingerprint, target
+    /// scope, and target comparison key. Every field is prefixed with its UTF-8 byte length as one
+    /// unsigned big-endian 32-bit integer. The result is lowercase hexadecimal under
+    /// <see cref="Scheme"/>. The key, scope, and comparison key are used only while deriving the
+    /// HMAC and are never retained or exposed by this type.
+    /// </summary>
+    public static RelationshipMaterializationKeyCorrelationIdentity Create(
+        ReadOnlySpan<byte> providerOwnedKey,
+        RelationshipMaterializationTransitionRequirement transitionRequirement,
+        string targetScope,
+        string targetComparisonKey)
+    {
+        if (providerOwnedKey.Length < MinimumProviderOwnedKeyLength)
         {
             throw new ArgumentException(
-                $"A relationship key correlation identity must use '{Scheme}' followed by exactly {DigestLength} lowercase hexadecimal characters.",
-                nameof(value));
+                $"A provider-owned relationship correlation key must contain at least {MinimumProviderOwnedKeyLength} bytes.",
+                nameof(providerOwnedKey));
         }
 
-        Value = value;
+        ArgumentNullException.ThrowIfNull(transitionRequirement);
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(
+            targetScope,
+            nameof(targetScope));
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(
+            targetComparisonKey,
+            nameof(targetComparisonKey));
+
+        var candidate = transitionRequirement.CandidateGeneration;
+        var framedInput = CreateFramedInput(
+            DomainSeparator,
+            candidate.RelationshipIdentity,
+            candidate.GenerationIdentity,
+            candidate.MaterializationFingerprint,
+            targetScope,
+            targetComparisonKey);
+        try
+        {
+            var digest = HMACSHA256.HashData(providerOwnedKey, framedInput);
+            try
+            {
+                return new($"{Scheme}{Convert.ToHexString(digest).ToLowerInvariant()}", candidate);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(digest);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(framedInput);
+        }
     }
 
     public string Value { get; }
+
+    internal RelationshipMaterializationGeneration CandidateGeneration { get; }
 
     public bool Equals(RelationshipMaterializationKeyCorrelationIdentity? other) =>
         other is not null &&
@@ -120,6 +174,31 @@ public sealed class RelationshipMaterializationKeyCorrelationIdentity :
     public override int GetHashCode() => StringComparer.Ordinal.GetHashCode(Value);
 
     public override string ToString() => Value;
+
+    private static byte[] CreateFramedInput(params string[] fields)
+    {
+        var encodedFields = fields.Select(StrictUtf8.GetBytes).ToArray();
+        try
+        {
+            var length = checked(encodedFields.Sum(field => checked(sizeof(uint) + field.Length)));
+            var framed = new byte[length];
+            var offset = 0;
+            foreach (var field in encodedFields)
+            {
+                BinaryPrimitives.WriteUInt32BigEndian(framed.AsSpan(offset, sizeof(uint)), (uint)field.Length);
+                offset += sizeof(uint);
+                field.CopyTo(framed, offset);
+                offset += field.Length;
+            }
+
+            return framed;
+        }
+        finally
+        {
+            foreach (var field in encodedFields)
+                CryptographicOperations.ZeroMemory(field);
+        }
+    }
 }
 
 /// <summary>
@@ -133,17 +212,31 @@ public sealed class RelationshipMaterializationDanglingReference :
     public const string DiagnosticCode = "GW-RELATIONSHIP-013";
 
     public RelationshipMaterializationDanglingReference(
-        RelationshipMaterializationGeneration generation,
+        RelationshipMaterializationTransitionRequirement transitionRequirement,
         RelationshipMaterializationKeyCorrelationIdentity targetKeyCorrelationIdentity)
     {
-        Generation = generation ?? throw new ArgumentNullException(nameof(generation));
+        TransitionRequirement = transitionRequirement ?? throw new ArgumentNullException(nameof(transitionRequirement));
         TargetKeyCorrelationIdentity = targetKeyCorrelationIdentity ??
             throw new ArgumentNullException(nameof(targetKeyCorrelationIdentity));
-        RelationshipRouteIdentity = generation.RelationshipIdentity;
+        CandidateGeneration = TransitionRequirement.CandidateGeneration;
+        if (!Equals(TargetKeyCorrelationIdentity.CandidateGeneration, CandidateGeneration))
+        {
+            throw new ArgumentException(
+                "The relationship key correlation identity must be derived for the transition candidate generation.",
+                nameof(targetKeyCorrelationIdentity));
+        }
+
+        RelationshipRouteIdentity = CandidateGeneration.RelationshipIdentity;
         CanonicalJson = SerializeCanonical(this);
     }
 
-    public RelationshipMaterializationGeneration Generation { get; }
+    /// <summary>
+    /// The exact non-authoritative transition requirement that supplies this diagnostic's candidate
+    /// generation. This diagnostic neither validates nor activates that transition.
+    /// </summary>
+    public RelationshipMaterializationTransitionRequirement TransitionRequirement { get; }
+
+    public RelationshipMaterializationGeneration CandidateGeneration { get; }
 
     public string RelationshipRouteIdentity { get; }
 
@@ -156,12 +249,12 @@ public sealed class RelationshipMaterializationDanglingReference :
 
     public bool Equals(RelationshipMaterializationDanglingReference? other) =>
         other is not null &&
-        Equals(Generation, other.Generation) &&
+        Equals(CandidateGeneration, other.CandidateGeneration) &&
         Equals(TargetKeyCorrelationIdentity, other.TargetKeyCorrelationIdentity);
 
     public override bool Equals(object? obj) => Equals(obj as RelationshipMaterializationDanglingReference);
 
-    public override int GetHashCode() => HashCode.Combine(Generation, TargetKeyCorrelationIdentity);
+    public override int GetHashCode() => HashCode.Combine(CandidateGeneration, TargetKeyCorrelationIdentity);
 
     private static string SerializeCanonical(RelationshipMaterializationDanglingReference diagnostic)
     {
@@ -172,10 +265,10 @@ public sealed class RelationshipMaterializationDanglingReference :
             writer.WriteNumber("schemaVersion", 1);
             writer.WriteString("code", DiagnosticCode);
             writer.WriteString("relationshipRoute", diagnostic.RelationshipRouteIdentity);
-            writer.WriteString("generation", diagnostic.Generation.GenerationIdentity);
+            writer.WriteString("generation", diagnostic.CandidateGeneration.GenerationIdentity);
             writer.WriteString(
                 "materializationFingerprint",
-                diagnostic.Generation.MaterializationFingerprint);
+                diagnostic.CandidateGeneration.MaterializationFingerprint);
             writer.WriteString(
                 "targetKeyCorrelationIdentity",
                 diagnostic.TargetKeyCorrelationIdentity.Value);
@@ -183,19 +276,5 @@ public sealed class RelationshipMaterializationDanglingReference :
         }
 
         return Encoding.UTF8.GetString(stream.ToArray());
-    }
-}
-
-internal static class RelationshipMaterializationKeyCorrelationIdentityFormat
-{
-    public static bool ContainsOnlyLowercaseHex(this ReadOnlySpan<char> value)
-    {
-        foreach (var character in value)
-        {
-            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
-                return false;
-        }
-
-        return true;
     }
 }

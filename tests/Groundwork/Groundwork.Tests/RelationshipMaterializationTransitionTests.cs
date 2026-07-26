@@ -7,6 +7,9 @@ namespace Groundwork.Tests;
 
 public sealed class RelationshipMaterializationTransitionTests
 {
+    private static readonly byte[] ProviderOwnedCorrelationKey =
+        Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
+
     [Fact]
     public void Transition_requirement_binds_exact_before_and_after_generations_without_activating_them()
     {
@@ -26,18 +29,27 @@ public sealed class RelationshipMaterializationTransitionTests
     }
 
     [Fact]
-    public void Dangling_reference_diagnostic_uses_provider_keyed_identity_and_canonical_framing()
+    public void Dangling_reference_diagnostic_binds_the_transition_candidate_and_uses_canonical_framing()
     {
+        var active = Generation("generation-active");
         var candidate = Generation("generation-candidate");
-        var targetKey = KeyCorrelationIdentity('a');
+        var transition = new RelationshipMaterializationTransitionRequirement(active, candidate);
+        var targetKey = KeyCorrelationIdentity(transition, 'a');
 
-        var first = new RelationshipMaterializationDanglingReference(candidate, targetKey);
+        var first = new RelationshipMaterializationDanglingReference(transition, targetKey);
         var same = new RelationshipMaterializationDanglingReference(
-            candidate,
-            new RelationshipMaterializationKeyCorrelationIdentity(targetKey.Value));
+            transition,
+            KeyCorrelationIdentity(transition, 'a'));
 
         Assert.Equal(first, same);
         Assert.Equal(first.CanonicalJson, same.CanonicalJson);
+        Assert.Same(transition, first.TransitionRequirement);
+        Assert.Same(candidate, first.CandidateGeneration);
+        Assert.Equal(
+            typeof(RelationshipMaterializationTransitionRequirement),
+            Assert.Single(typeof(RelationshipMaterializationDanglingReference).GetConstructors())
+                .GetParameters()[0]
+                .ParameterType);
         Assert.Equal(candidate.RelationshipIdentity, first.RelationshipRouteIdentity);
         using var document = JsonDocument.Parse(first.CanonicalJson);
         var root = document.RootElement;
@@ -50,35 +62,77 @@ public sealed class RelationshipMaterializationTransitionTests
     }
 
     [Fact]
-    public void Low_entropy_raw_unkeyed_and_delimiter_bearing_key_values_are_rejected()
+    public void Key_correlation_identity_uses_the_normative_bound_hmac_derivation()
     {
-        var invalid = new[]
-        {
-            "1",
-            "secret",
-            "sha256:" + new string('a', 64),
-            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63),
-            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('A', 64),
-            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63) + ":",
-            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63) + "\u001e",
-            RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string('a', 63) + "\n"
-        };
+        var transition = new RelationshipMaterializationTransitionRequirement(
+            Generation("generation-active"),
+            Generation("generation-candidate"));
 
-        Assert.All(invalid, value =>
-            Assert.Throws<ArgumentException>(() =>
-                new RelationshipMaterializationKeyCorrelationIdentity(value)));
+        var correlation = RelationshipMaterializationKeyCorrelationIdentity.Create(
+            ProviderOwnedCorrelationKey,
+            transition,
+            "scope:tenant-a",
+            "comparison-key:authorization-42");
+
+        Assert.Equal(
+            "hmac-sha256-v1:369f8d0d430a4acc8779749445e5a928a4ea0f439f51223a0ed7456e235cf464",
+            correlation.Value);
+        Assert.Empty(typeof(RelationshipMaterializationKeyCorrelationIdentity).GetConstructors());
+        Assert.Throws<ArgumentException>(() =>
+            RelationshipMaterializationKeyCorrelationIdentity.Create(
+                new byte[31],
+                transition,
+                "scope:tenant-a",
+                "comparison-key:authorization-42"));
+        Assert.Throws<ArgumentException>(() =>
+            RelationshipMaterializationKeyCorrelationIdentity.Create(
+                ProviderOwnedCorrelationKey,
+                transition,
+                " ",
+                "comparison-key:authorization-42"));
+        Assert.Throws<ArgumentException>(() =>
+            RelationshipMaterializationKeyCorrelationIdentity.Create(
+                ProviderOwnedCorrelationKey,
+                transition,
+                "scope:tenant-a",
+                string.Empty));
+
+        var otherCandidateTransition = new RelationshipMaterializationTransitionRequirement(
+            Generation("generation-active"),
+            Generation("generation-other-candidate"));
+        var relabelled = RelationshipMaterializationKeyCorrelationIdentity.Create(
+            ProviderOwnedCorrelationKey,
+            otherCandidateTransition,
+            "scope:tenant-a",
+            "comparison-key:authorization-42");
+
+        Assert.NotEqual(correlation, relabelled);
+        Assert.Throws<ArgumentException>(() =>
+            new RelationshipMaterializationDanglingReference(transition, relabelled));
+
+        var diagnostic = new RelationshipMaterializationDanglingReference(transition, correlation);
+        Assert.DoesNotContain("scope:tenant-a", correlation.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("comparison-key:authorization-42", correlation.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("scope:tenant-a", diagnostic.CanonicalJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("comparison-key:authorization-42", diagnostic.CanonicalJson, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Canonical_diagnostic_framing_preserves_route_delimiters_without_aliasing()
     {
         const string delimiterBearingRoute = "token\u001e\"authorization\nroute";
+        var delimitedTransition = new RelationshipMaterializationTransitionRequirement(
+            Generation("generation-active", relationshipIdentity: delimiterBearingRoute),
+            Generation("generation-candidate", relationshipIdentity: delimiterBearingRoute));
         var delimited = new RelationshipMaterializationDanglingReference(
-            Generation("generation-candidate", relationshipIdentity: delimiterBearingRoute),
-            KeyCorrelationIdentity('b'));
+            delimitedTransition,
+            KeyCorrelationIdentity(delimitedTransition, 'b'));
+        var ordinaryTransition = new RelationshipMaterializationTransitionRequirement(
+            Generation("generation-active", relationshipIdentity: "token"),
+            Generation("generation-candidate", relationshipIdentity: "token"));
         var ordinary = new RelationshipMaterializationDanglingReference(
-            Generation("generation-candidate", relationshipIdentity: "token"),
-            KeyCorrelationIdentity('b'));
+            ordinaryTransition,
+            KeyCorrelationIdentity(ordinaryTransition, 'b'));
 
         Assert.NotEqual(delimited.CanonicalJson, ordinary.CanonicalJson);
         using var document = JsonDocument.Parse(delimited.CanonicalJson);
@@ -87,6 +141,72 @@ public sealed class RelationshipMaterializationTransitionTests
             document.RootElement.GetProperty("relationshipRoute").GetString());
         Assert.DoesNotContain("\n", delimited.CanonicalJson, StringComparison.Ordinal);
         Assert.DoesNotContain("\u001e", delimited.CanonicalJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Schema_identity_construction_rejects_lone_surrogates_before_fingerprinting_or_serialization()
+    {
+        AssertSchemaIdentityRejected(new string('\uD800', 1));
+        AssertSchemaIdentityRejected(new string('\uDC00', 1));
+    }
+
+    private static void AssertSchemaIdentityRejected(string invalidIdentity)
+    {
+        var valid = Generation("generation-valid");
+        var reference = valid.Schema.Reference;
+        var fence = valid.Schema.Fence;
+
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipSidecarAccessPath(
+            invalidIdentity,
+            isUnique: true,
+            reference.UniqueSourceAccessPath.Fields));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipReferenceMaterializationSchema(
+            invalidIdentity,
+            reference.GenerationIdentity,
+            reference.UniqueSourceAccessPath,
+            reference.TargetSeekAccessPath));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipTargetFenceSchema(
+            invalidIdentity,
+            fence.GenerationIdentity,
+            fence.UniqueTargetFenceAccessPath));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipReferenceMaterializationSchema(
+            reference.StorageIdentity,
+            invalidIdentity,
+            reference.UniqueSourceAccessPath,
+            reference.TargetSeekAccessPath));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipTargetFenceSchema(
+            fence.StorageIdentity,
+            invalidIdentity,
+            fence.UniqueTargetFenceAccessPath));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipMaterializationSchema(
+            invalidIdentity,
+            valid.GenerationIdentity,
+            reference,
+            fence));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipMaterializationSchema(
+            valid.RelationshipIdentity,
+            invalidIdentity,
+            reference,
+            fence));
+    }
+
+    [Fact]
+    public void Schema_identity_serialization_preserves_valid_unicode_without_normalization()
+    {
+        const string relationshipIdentity = "relationship-🧱-e\u0301";
+        const string generationIdentity = "generation-🧬-e\u0301";
+        var schema = Generation(
+            generationIdentity,
+            relationshipIdentity: relationshipIdentity).Schema;
+
+        using var document = JsonDocument.Parse(schema.CanonicalJson);
+        Assert.Equal(relationshipIdentity, document.RootElement.GetProperty("relationship").GetString());
+        Assert.Equal(generationIdentity, document.RootElement.GetProperty("generation").GetString());
+        Assert.Equal(generationIdentity, document.RootElement
+            .GetProperty("reference")
+            .GetProperty("storageIdentity")
+            .GetString());
+        Assert.DoesNotContain("\uFFFD", schema.CanonicalJson, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -112,12 +232,21 @@ public sealed class RelationshipMaterializationTransitionTests
             method => forbiddenMethods.Contains(method.Name));
         Assert.DoesNotContain(
             transitionTypes,
-            type => type.Name.Contains("ValidationEvidence", StringComparison.Ordinal) ||
+            type => type.Name.Contains("Success", StringComparison.Ordinal) ||
+                    type.Name.Contains("Validation", StringComparison.Ordinal) ||
+                    type.Name.Contains("Activation", StringComparison.Ordinal) ||
+                    type.Name.Contains("Cutover", StringComparison.Ordinal) ||
                     type.Name.Contains("TransitionStage", StringComparison.Ordinal));
     }
 
-    private static RelationshipMaterializationKeyCorrelationIdentity KeyCorrelationIdentity(char value) =>
-        new(RelationshipMaterializationKeyCorrelationIdentity.Scheme + new string(value, 64));
+    private static RelationshipMaterializationKeyCorrelationIdentity KeyCorrelationIdentity(
+        RelationshipMaterializationTransitionRequirement transition,
+        char value) =>
+        RelationshipMaterializationKeyCorrelationIdentity.Create(
+            ProviderOwnedCorrelationKey,
+            transition,
+            "scope:tenant-a",
+            $"comparison-key:{value}");
 
     private static RelationshipMaterializationGeneration Generation(
         string generationIdentity,

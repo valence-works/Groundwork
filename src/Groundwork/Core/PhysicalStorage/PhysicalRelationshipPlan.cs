@@ -79,8 +79,9 @@ public sealed record PhysicalRelationshipPlan(
 
     /// <summary>
     /// The generated provider-neutral relationship reference and target-key fence schema. This is
-    /// intentionally a pure contract; provider admission remains fail closed until a provider has
-    /// implemented and certified its runtime maintenance protocol.
+    /// intentionally a pure, non-authoritative contract. Relationship manifests remain behind an
+    /// unconditional fail-closed prerequisite boundary: no provider capability can currently be
+    /// advertised and no certification gate exists yet.
     /// </summary>
     public PhysicalRelationshipMaterializationSchema MaterializationSchema =>
         PhysicalRelationshipMaterializationSchema.Create(this);
@@ -263,7 +264,7 @@ public sealed class PhysicalRelationshipProviderNotSupportedException : NotSuppo
         ProviderIdentity provider,
         IReadOnlyList<string> relationshipIdentities)
         : base(
-            $"GW-RELATIONSHIP-012: Provider '{provider.Name}' does not certify relationship materialization and target-key fences for: " +
+            $"GW-RELATIONSHIP-012: Relationship manifests are currently unavailable for provider '{provider.Name}' at the unconditional fail-closed prerequisite boundary: " +
             string.Join(", ", relationshipIdentities))
     {
         Provider = provider;
@@ -276,9 +277,9 @@ public sealed class PhysicalRelationshipProviderNotSupportedException : NotSuppo
 }
 
 /// <summary>
-/// Temporary fail-closed boundary for provider runtimes that have not implemented the admitted
-/// relationship plan. Providers must not perform schema or document I/O until the four-provider
-/// certification gate exists. There is deliberately no public preview-admission override.
+/// Unconditional fail-closed prerequisite boundary for relationship manifests. Providers must not
+/// perform schema or document I/O for these manifests; no provider capability can currently be
+/// advertised and no certification gate exists yet. There is deliberately no public override.
 /// </summary>
 public static class PhysicalRelationshipProviderAdmission
 {

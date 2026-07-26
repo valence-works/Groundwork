@@ -30,7 +30,7 @@ public sealed class PhysicalRelationshipSidecarAccessPath : IEquatable<PhysicalR
         bool isUnique,
         IEnumerable<PhysicalRelationshipSidecarField> fields)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(identity, nameof(identity));
         ArgumentNullException.ThrowIfNull(fields);
 
         var orderedFields = fields.ToArray();
@@ -102,8 +102,8 @@ public sealed class PhysicalRelationshipReferenceMaterializationSchema : IEquata
         PhysicalRelationshipSidecarAccessPath uniqueSourceAccessPath,
         PhysicalRelationshipSidecarAccessPath targetSeekAccessPath)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(storageIdentity);
-        ArgumentException.ThrowIfNullOrWhiteSpace(generationIdentity);
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(storageIdentity, nameof(storageIdentity));
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(generationIdentity, nameof(generationIdentity));
         ArgumentNullException.ThrowIfNull(uniqueSourceAccessPath);
         ArgumentNullException.ThrowIfNull(targetSeekAccessPath);
 
@@ -198,8 +198,8 @@ public sealed class PhysicalRelationshipTargetFenceSchema : IEquatable<PhysicalR
         string generationIdentity,
         PhysicalRelationshipSidecarAccessPath uniqueTargetFenceAccessPath)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(storageIdentity);
-        ArgumentException.ThrowIfNullOrWhiteSpace(generationIdentity);
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(storageIdentity, nameof(storageIdentity));
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(generationIdentity, nameof(generationIdentity));
         ArgumentNullException.ThrowIfNull(uniqueTargetFenceAccessPath);
         PhysicalRelationshipReferenceMaterializationSchema.EnsureExactAccessPath(
             uniqueTargetFenceAccessPath,
@@ -248,8 +248,8 @@ public sealed class PhysicalRelationshipMaterializationSchema : IEquatable<Physi
         PhysicalRelationshipReferenceMaterializationSchema reference,
         PhysicalRelationshipTargetFenceSchema fence)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(relationshipIdentity);
-        ArgumentException.ThrowIfNullOrWhiteSpace(generationIdentity);
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(relationshipIdentity, nameof(relationshipIdentity));
+        PhysicalRelationshipMaterializationIdentityValidator.Validate(generationIdentity, nameof(generationIdentity));
         ArgumentNullException.ThrowIfNull(reference);
         ArgumentNullException.ThrowIfNull(fence);
         if (!string.Equals(reference.StorageIdentity, generationIdentity, StringComparison.Ordinal) ||
@@ -352,6 +352,44 @@ internal static class PhysicalRelationshipSidecarSchemaHash
         foreach (var field in fields)
             hash.Add(field);
         return hash.ToHashCode();
+    }
+}
+
+/// <summary>Validates identity strings before fingerprinting or canonical JSON serialization.</summary>
+internal static class PhysicalRelationshipMaterializationIdentityValidator
+{
+    public static void Validate(string value, string parameterName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
+        EnsureValidUnicodeScalars(value, parameterName);
+    }
+
+    public static void EnsureValidUnicodeScalars(string value, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (char.IsHighSurrogate(character))
+            {
+                if (index + 1 < value.Length && char.IsLowSurrogate(value[index + 1]))
+                {
+                    index++;
+                    continue;
+                }
+
+                throw new ArgumentException(
+                    "Relationship materialization identities must contain only valid Unicode scalar sequences.",
+                    parameterName);
+            }
+
+            if (char.IsLowSurrogate(character))
+            {
+                throw new ArgumentException(
+                    "Relationship materialization identities must contain only valid Unicode scalar sequences.",
+                    parameterName);
+            }
+        }
     }
 }
 
