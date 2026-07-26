@@ -115,6 +115,52 @@ public sealed class BenchmarkRunGroupTests : IDisposable
     }
 
     [Fact]
+    public async Task Comparison_rejects_a_fully_resealed_forged_consumer_semantic_digest()
+    {
+        var baselineRoot = Path.Combine(scratch, "sealed-semantic-baseline");
+        var candidateRoot = Path.Combine(scratch, "sealed-semantic-candidate");
+        await WriteGroupAsync(baselineRoot, "baseline", 1_000);
+        var candidate = await WriteGroupAsync(candidateRoot, "candidate", 1_000);
+        var originalEntry = candidate.Runs[0];
+        var workerRoot = Path.Combine(candidateRoot, "runs", originalEntry.Ordinal.ToString("D6"));
+        var consumerPath = Path.Combine(workerRoot, "reports", "consumer-evidence.json");
+        var consumer = await ReadJsonAsync<BenchmarkConsumerEvidenceReport>(consumerPath);
+        await WriteJsonAsync(consumerPath, consumer with
+        {
+            Results = [consumer.Results[0] with { ResultDigest = new string('0', 64) }]
+        });
+        await ResealWorkerIntegrityAsync(workerRoot);
+
+        var responsePath = Path.Combine(candidateRoot, originalEntry.Response.Replace('/', Path.DirectorySeparatorChar));
+        var response = await ReadJsonAsync<BenchmarkWorkerResponse>(responsePath);
+        response = response with
+        {
+            Artifacts = response.Artifacts! with { ConsumerEvidenceDigest = Digest(consumerPath) }
+        };
+        await WriteJsonAsync(responsePath, response);
+        var resealedEntry = originalEntry with
+        {
+            ConsumerEvidenceDigest = Digest(consumerPath),
+            ResponseDigest = Digest(responsePath)
+        };
+        candidate = candidate with
+        {
+            Runs = candidate.Runs.Select(entry => entry.Ordinal == resealedEntry.Ordinal ? resealedEntry : entry).ToArray()
+        };
+        await WriteJsonAsync(Path.Combine(candidateRoot, "run-group.json"), candidate);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkRunGroupRegressionEvaluator.CompareAsync(
+                candidateRoot,
+                candidate,
+                baselineRoot,
+                RegressionPolicy.Scheduled,
+                CancellationToken.None));
+
+        Assert.Contains("digest claims", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Comparison_rejects_a_candidate_missing_a_baseline_tuple()
     {
         var baselineRoot = Path.Combine(scratch, "missing-baseline");
@@ -241,15 +287,8 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                 var manifestPath = Path.Combine(runRoot, "manifest.json");
                 var elsaPath = Path.Combine(runRoot, "reports", "elsa-migration-evidence.json");
                 var consumerPath = Path.Combine(runRoot, "reports", "consumer-evidence.json");
-                var rawPath = Path.Combine(runRoot, "raw", "measurements.jsonl");
-                var configurationPath = Path.Combine(runRoot, "metadata", "configuration.json");
-                var machinePath = Path.Combine(runRoot, "metadata", "machine.json");
-                var providersPath = Path.Combine(runRoot, "metadata", "providers.json");
                 Directory.CreateDirectory(Path.GetDirectoryName(requestPath)!);
                 Directory.CreateDirectory(Path.GetDirectoryName(responsePath)!);
-                Directory.CreateDirectory(Path.GetDirectoryName(elsaPath)!);
-                Directory.CreateDirectory(Path.GetDirectoryName(rawPath)!);
-                await File.WriteAllTextAsync(elsaPath, "{}");
 
                 var configuration = BenchmarkProfiles.Scheduled with
                 {
@@ -262,15 +301,6 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                     BenchmarkPayloadProfiles.For(workload),
                     5_000);
                 configuration = configuration with { DataShape = shape };
-                await WriteJsonAsync(configurationPath, configuration);
-                await WriteJsonAsync(machinePath, Machine(commit, treeDigest));
-                await WriteJsonAsync(providersPath, new[]
-                {
-                new BenchmarkProviderMetadata(
-                    BenchmarkProvider.Sqlite,
-                    "test-provider",
-                    new Dictionary<string, string> { ["mode"] = "test" })
-            });
                 var request = new BenchmarkRunRequest(
                     root,
                     configuration,
@@ -296,35 +326,11 @@ public sealed class BenchmarkRunGroupTests : IDisposable
                 await WriteJsonAsync(requestPath, invocation);
                 var requestDigest = Digest(requestPath);
 
-                var benchmarkCase = new BenchmarkCase(
-                    BenchmarkProvider.Sqlite,
-                    PhysicalStorageForm.PhysicalEntityTable,
-                    workload);
-                var lines = Enumerable.Range(0, 30)
-                    .Select(iteration => JsonSerializer.Serialize(
-                        new RawBenchmarkRecord(
-                            benchmarkCase,
-                            new BenchmarkSample(
-                                iteration,
-                                10,
-                                1_000_000_000,
-                                1_000,
-                                1,
-                                0,
-                                0,
-                                null,
-                                null,
-                                new Dictionary<string, long>(),
-                                Enumerable.Repeat(latency, 10).ToArray())
-                                .WithObservedCommandSignal()),
-                        BenchmarkJson.CompactOptions));
-                await File.WriteAllLinesAsync(rawPath, lines);
-                await WriteWorkerEnvelopeArtifactsAsync(
+                await WriteSealedWorkerAsync(
                     invocation,
-                    manifestPath,
-                    rawPath,
-                    consumerPath,
-                    semanticResultForRun?.Invoke(independentRun) ?? "result");
+                    latency,
+                    semanticResultForRun?.Invoke(independentRun) ?? "result",
+                    CancellationToken.None);
 
                 var artifacts = new BenchmarkWorkerArtifactDigests(
                     "manifest.json",
@@ -396,66 +402,9 @@ public sealed class BenchmarkRunGroupTests : IDisposable
         var manifestPath = Path.Combine(runRoot, "manifest.json");
         var elsaPath = Path.Combine(runRoot, "reports", "elsa-migration-evidence.json");
         var consumerPath = Path.Combine(runRoot, "reports", "consumer-evidence.json");
-        var rawPath = Path.Combine(runRoot, "raw", "measurements.jsonl");
-        Directory.CreateDirectory(Path.GetDirectoryName(elsaPath)!);
-        Directory.CreateDirectory(Path.GetDirectoryName(rawPath)!);
-        await File.WriteAllTextAsync(elsaPath, "{}", cancellationToken);
-        await WriteJsonAsync(
-            Path.Combine(runRoot, "metadata", "configuration.json"),
-            invocation.Request.Configuration with { DataShape = invocation.Request.DataShape });
-        await WriteJsonAsync(
-            Path.Combine(runRoot, "metadata", "machine.json"),
-            Machine(invocation.ExpectedGitCommit, invocation.ExpectedGitTreeDigest));
-        await WriteJsonAsync(
-            Path.Combine(runRoot, "metadata", "providers.json"),
-            new[]
-            {
-                new BenchmarkProviderMetadata(
-                    BenchmarkProvider.Sqlite,
-                    "test-provider",
-                    new Dictionary<string, string> { ["mode"] = "test" })
-            });
-
-        string? responseConsumer = null;
-        string? consumerDigest = null;
-        if (invocation.Role == BenchmarkExecutionRole.Measured)
-        {
-            responseConsumer = consumerPath;
-            var benchmarkCase = new BenchmarkCase(
-                invocation.Request.Configuration.Providers.Single(),
-                invocation.Request.Configuration.StorageForms.Single(),
-                invocation.Request.Workloads.Single());
-            var lines = Enumerable.Range(0, 30)
-                .Select(iteration => JsonSerializer.Serialize(
-                    new RawBenchmarkRecord(
-                        benchmarkCase,
-                        new BenchmarkSample(
-                            iteration,
-                            10,
-                            1_000_000_000,
-                            1_000,
-                            1,
-                            0,
-                            0,
-                            null,
-                            null,
-                            new Dictionary<string, long>(),
-                            Enumerable.Repeat(latency, 10).ToArray())
-                            .WithObservedCommandSignal()),
-                    BenchmarkJson.CompactOptions));
-            await File.WriteAllLinesAsync(rawPath, lines, cancellationToken);
-        }
-        else
-        {
-            await File.WriteAllTextAsync(rawPath, string.Empty, cancellationToken);
-        }
-        await WriteWorkerEnvelopeArtifactsAsync(
-            invocation,
-            manifestPath,
-            rawPath,
-            consumerPath);
-        if (responseConsumer is not null)
-            consumerDigest = Digest(consumerPath);
+        await WriteSealedWorkerAsync(invocation, latency, "result", cancellationToken);
+        var responseConsumer = invocation.Role == BenchmarkExecutionRole.Measured ? consumerPath : null;
+        var consumerDigest = responseConsumer is null ? null : Digest(responseConsumer);
 
         var artifacts = new BenchmarkWorkerArtifactDigests(
             "manifest.json",
@@ -483,83 +432,115 @@ public sealed class BenchmarkRunGroupTests : IDisposable
             });
     }
 
-    private static async Task WriteWorkerEnvelopeArtifactsAsync(
+    private static async Task WriteSealedWorkerAsync(
         BenchmarkWorkerInvocation invocation,
-        string manifestPath,
-        string rawPath,
-        string consumerPath,
-        string semanticResult = "result")
+        long latency,
+        string semanticResult,
+        CancellationToken cancellationToken)
     {
+        var runRoot = invocation.Request.OutputDirectory
+                      ?? throw new InvalidOperationException("Fixture worker requires an output directory.");
+        var layout = new ArtifactLayout(runRoot);
+        var configuration = invocation.Request.Configuration with { DataShape = invocation.Request.DataShape };
+        var machine = Machine(invocation.ExpectedGitCommit, invocation.ExpectedGitTreeDigest);
+        var providers = new[]
+        {
+            new BenchmarkProviderMetadata(
+                BenchmarkProvider.Sqlite,
+                "test-provider",
+                new Dictionary<string, string> { ["mode"] = "test" })
+        };
+        var tuple = BenchmarkRunTuple.From(invocation);
         var runId = $"{invocation.RunGroupId}-{invocation.Ordinal}";
-        var artifactIntegrityPath = Path.Combine(
-            Path.GetDirectoryName(manifestPath)!,
-            "reports",
-            "artifact-integrity.json");
+        var samples = invocation.Role == BenchmarkExecutionRole.Measured
+            ? Enumerable.Range(0, configuration.MeasurementIterations)
+                .Select(iteration => new BenchmarkSample(
+                    iteration,
+                    Operations: 10,
+                    ElapsedNanoseconds: 1_000_000_000,
+                    AllocatedBytes: 1_000,
+                    RoundTrips: 1,
+                    LogicalPayloadBytes: 0,
+                    LogicalMutations: 0,
+                    StorageBefore: null,
+                    StorageAfter: null,
+                    ProviderWork: new Dictionary<string, long>(),
+                    OperationLatencyNanoseconds: Enumerable.Repeat(latency, 10).ToArray())
+                    .WithObservedCommandSignal())
+                .ToArray()
+            : [];
+        var benchmarkCase = new BenchmarkCase(tuple.Provider, tuple.StorageForm, tuple.Workload);
+        var cases = invocation.Role == BenchmarkExecutionRole.Measured
+            ? new[]
+            {
+                new BenchmarkCaseResult(
+                    benchmarkCase,
+                    new CorrectnessGateResult(true, true, true, true, true),
+                    [],
+                    BenchmarkSummarizer.Summarize(benchmarkCase.Identity, samples),
+                    samples,
+                    [new BenchmarkObservableResult(
+                        0,
+                        "fixture-result",
+                        semanticResult,
+                        Version: 1,
+                        Count: samples.Sum(sample => (long)sample.Operations),
+                        Payload: null)])
+            }
+            : [];
+        var report = new BenchmarkRunReport(
+            BenchmarkProfiles.SchemaVersion,
+            runId,
+            configuration.Mode,
+            cases,
+            [],
+            new BaselineEligibility(false, ["fixture is non-promotable"]),
+            tuple.DataShape);
+        var manifest = new BenchmarkRunManifest(
+            BenchmarkProfiles.SchemaVersion,
+            runId,
+            "completed",
+            configuration.Mode,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            invocation.ExpectedGitCommit,
+            GitDirty: false,
+            layout.RelativePath(layout.RawMeasurements),
+            layout.RelativePath(layout.SummaryJson),
+            layout.RelativePath(layout.ElsaMigrationEvidenceJson),
+            layout.RelativePath(layout.MachineMetadata),
+            layout.RelativePath(layout.ProviderMetadata),
+            layout.RelativePath(layout.Configuration),
+            [],
+            BaselineRun: null,
+            RegressionConfirmationRun: false,
+            Failure: null,
+            ConsumerEvidence: invocation.Role == BenchmarkExecutionRole.Measured
+                ? layout.RelativePath(layout.ConsumerEvidenceJson)
+                : null,
+            ArtifactIntegrity: layout.RelativePath(layout.ArtifactIntegrityJson));
+
+        await using var writer = new BenchmarkArtifactWriter(layout);
+        await writer.WriteManifestAsync(manifest, cancellationToken);
+        await writer.WriteMachineAsync(machine, cancellationToken);
+        await writer.WriteProvidersAsync(providers, cancellationToken);
+        await writer.WriteConfigurationAsync(configuration, cancellationToken);
+        foreach (var sample in samples)
+            await writer.AppendSampleAsync(new RawBenchmarkRecord(benchmarkCase, sample), cancellationToken);
+        await writer.WriteReportAsync(report, cancellationToken);
         if (invocation.Role == BenchmarkExecutionRole.Measured)
         {
-            var tuple = BenchmarkRunTuple.From(invocation);
-            await WriteJsonAsync(
-                consumerPath,
-                new BenchmarkConsumerEvidenceReport(
-                    BenchmarkConsumerEvidenceReport.ContractVersion,
-                    runId,
-                    Promotable: false,
-                    ExternalOracleJoinRequired: true,
-                    invocation.ExpectedGitCommit,
-                    GitDirty: false,
-                    "raw/measurements.jsonl",
-                    Digest(rawPath),
-                    ["test evidence"],
-                    [new BenchmarkConsumerEvidenceResult(
-                        BenchmarkConsumerEvidenceReport.WorkloadIdentity(tuple.Workload),
-                        "test",
-                        BenchmarkConsumerEvidenceReport.MeasurementProtocol,
-                        "fingerprint",
-                        semanticResult,
-                        "measurement",
-                        BenchmarkConsumerEvidenceReport.ProviderIdentity(tuple.Provider),
-                        "test-provider",
-                        "provider",
-                        tuple.StorageForm,
-                        tuple.DataShape,
-                        invocation.IndependentRun,
-                        30,
-                        300,
-                        "raw",
-                        [],
-                        "plans")]));
+            await writer.WriteConsumerEvidenceAsync(
+                BenchmarkConsumerEvidenceReport.Create(
+                    report,
+                    configuration,
+                    machine,
+                    providers,
+                    layout,
+                    invocation.IndependentRun),
+                cancellationToken);
         }
-        await WriteJsonAsync(
-            manifestPath,
-            new BenchmarkRunManifest(
-                BenchmarkProfiles.SchemaVersion,
-                runId,
-                "completed",
-                invocation.Request.Configuration.Mode,
-                DateTimeOffset.UnixEpoch,
-                DateTimeOffset.UnixEpoch,
-                invocation.ExpectedGitCommit,
-                GitDirty: false,
-                "raw/measurements.jsonl",
-                "reports/summary.json",
-                "reports/elsa-migration-evidence.json",
-                "metadata/machine.json",
-                "metadata/providers.json",
-                "metadata/configuration.json",
-                [],
-                BaselineRun: null,
-                RegressionConfirmationRun: false,
-                Failure: null,
-                ConsumerEvidence: invocation.Role == BenchmarkExecutionRole.Measured
-                    ? "reports/consumer-evidence.json"
-                    : null,
-                ArtifactIntegrity: "reports/artifact-integrity.json"));
-        await WriteJsonAsync(
-            artifactIntegrityPath,
-            new BenchmarkArtifactIntegrity(
-                BenchmarkArtifactIntegrity.ContractVersion,
-                runId,
-                []));
+        await writer.WriteArtifactIntegrityAsync(manifest, cancellationToken);
     }
 
     private static BenchmarkMachineMetadata Machine(string commit, string treeDigest) => new(
@@ -587,6 +568,42 @@ public sealed class BenchmarkRunGroupTests : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, BenchmarkJson.Options));
+    }
+
+    private static async Task<T> ReadJsonAsync<T>(string path)
+    {
+        await using var stream = File.OpenRead(path);
+        return await JsonSerializer.DeserializeAsync<T>(stream, BenchmarkJson.Options)
+               ?? throw new InvalidOperationException($"Fixture JSON '{path}' is null.");
+    }
+
+    private static async Task ResealWorkerIntegrityAsync(string workerRoot)
+    {
+        var layout = new ArtifactLayout(workerRoot);
+        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(layout.Manifest);
+        var paths = new[]
+        {
+            layout.RelativePath(layout.Manifest),
+            manifest.RawMeasurements,
+            manifest.Summary,
+            manifest.ElsaMigrationEvidence,
+            manifest.MachineMetadata,
+            manifest.ProviderMetadata,
+            manifest.Configuration
+        }.Concat(manifest.ConsumerEvidence is null ? [] : [manifest.ConsumerEvidence])
+         .Concat(manifest.PlanArtifacts.SelectMany(plan => new[] { plan, $"{plan}.assertions.json" }))
+         .Distinct(StringComparer.Ordinal)
+         .Order(StringComparer.Ordinal)
+         .Select(relative => new BenchmarkArtifactDigest(
+             relative,
+             Digest(Path.Combine(layout.Root, relative.Replace('/', Path.DirectorySeparatorChar)))))
+         .ToArray();
+        await WriteJsonAsync(
+            layout.ArtifactIntegrityJson,
+            new BenchmarkArtifactIntegrity(
+                BenchmarkArtifactIntegrity.ContractVersion,
+                manifest.RunId,
+                paths));
     }
 
     private static string Digest(string path) =>

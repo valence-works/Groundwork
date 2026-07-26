@@ -772,29 +772,25 @@ public static class BenchmarkRunGroupRegressionEvaluator
             var workerRoot = Path.GetDirectoryName(BenchmarkRunGroupVerifier.Resolve(
                 root,
                 $"runs/{entry.Ordinal:D6}/manifest.json"))!;
-            var raw = await BenchmarkArtifactWriter.ReadRawAsync(
-                workerRoot,
-                cancellationToken);
-            var configuration = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunConfiguration>(
-                BenchmarkRunGroupVerifier.Resolve(root, $"runs/{entry.Ordinal:D6}/metadata/configuration.json"),
-                cancellationToken);
-            var machine = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkMachineMetadata>(
-                BenchmarkRunGroupVerifier.Resolve(root, $"runs/{entry.Ordinal:D6}/metadata/machine.json"),
-                cancellationToken);
-            var providers = await BenchmarkRunGroupVerifier.ReadAsync<IReadOnlyList<BenchmarkProviderMetadata>>(
-                BenchmarkRunGroupVerifier.Resolve(root, $"runs/{entry.Ordinal:D6}/metadata/providers.json"),
-                cancellationToken);
-            var consumer = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkConsumerEvidenceReport>(
-                BenchmarkRunGroupVerifier.Resolve(root, $"runs/{entry.Ordinal:D6}/reports/consumer-evidence.json"),
-                cancellationToken);
-            var matching = raw
+            var baseline = await BenchmarkArtifactWriter.ReadBaselineAsync(workerRoot, cancellationToken);
+            if (!baseline.HasProvenance || baseline.Configuration is null || baseline.Machine is null ||
+                baseline.Providers is null || baseline.ConsumerEvidence is null)
+            {
+                throw new InvalidOperationException(
+                    "Measured worker must provide complete sealed baseline provenance before regression comparison.");
+            }
+            var matching = baseline.Records
                 .Where(record => record.Case.Provider == tuple.Provider &&
                                  record.Case.StorageForm == tuple.StorageForm &&
                                  record.Case.Workload == tuple.Workload)
                 .Select(record => record.Sample)
                 .ToArray();
-            if (matching.Length != raw.Count)
+            if (matching.Length != baseline.Records.Count)
                 throw new InvalidOperationException("Measured worker raw data contains a case outside its request tuple.");
+            var configuration = baseline.Configuration;
+            var machine = baseline.Machine;
+            var providers = baseline.Providers;
+            var consumer = baseline.ConsumerEvidence;
             if (matching.Length < configuration.MeasurementIterations ||
                 matching.Sum(sample => (long)sample.Operations) < configuration.MinimumMeasuredOperations ||
                 matching.Sum(sample => sample.ElapsedNanoseconds) <
