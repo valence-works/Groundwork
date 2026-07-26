@@ -85,7 +85,13 @@ public sealed class PostgreSqlBenchmarkTarget(
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
                 indexedRelation,
                 indexName, plan,
-                NativePlanEvidenceAssertions.ForPostgreSql(assertionMode)));
+                NativePlanEvidenceAssertions.ForPostgreSql(assertionMode))
+            {
+                CommandBinding = new NativePlanCommandBinding(
+                    indexedRelation,
+                    Model.Route.LinkedIndexStorage is null ? "p" : "l",
+                    rendered.CommandText)
+            });
         }
         return evidence;
     }
@@ -118,10 +124,9 @@ public sealed class PostgreSqlBenchmarkTarget(
                 var relation = element.TryGetProperty("Relation Name", out var relationElement)
                     ? relationElement.GetString()
                     : null;
-                var selectedIndex = element.TryGetProperty("Index Name", out var indexElement)
-                    ? indexElement.GetString()
-                    : null;
-                declaredIndexSelected |= string.Equals(selectedIndex, indexName, StringComparison.OrdinalIgnoreCase);
+                declaredIndexSelected |=
+                    string.Equals(relation, indexedRelation, StringComparison.OrdinalIgnoreCase) &&
+                    ContainsIndex(element, indexName);
                 indexedRelationScanned |=
                     string.Equals(nodeType, "Seq Scan", StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(relation, indexedRelation, StringComparison.OrdinalIgnoreCase);
@@ -135,6 +140,22 @@ public sealed class PostgreSqlBenchmarkTarget(
             else if (element.ValueKind == JsonValueKind.Array)
                 foreach (var child in element.EnumerateArray())
                     Visit(child);
+        }
+
+        static bool ContainsIndex(JsonElement element, string expectedIndex)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                if (element.TryGetProperty("Index Name", out var index) &&
+                    index.ValueKind == JsonValueKind.String &&
+                    string.Equals(index.GetString(), expectedIndex, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                return element.EnumerateObject().Any(property => ContainsIndex(property.Value, expectedIndex));
+            }
+            return element.ValueKind == JsonValueKind.Array &&
+                   element.EnumerateArray().Any(child => ContainsIndex(child, expectedIndex));
         }
     }
 

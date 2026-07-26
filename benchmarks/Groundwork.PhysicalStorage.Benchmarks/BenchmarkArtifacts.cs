@@ -644,6 +644,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
                         result.Case.Provider,
                         sidecar.IndexName,
                         sidecar.PhysicalObject,
+                        sidecar.CommandBinding,
                         sidecar.NativePlan,
                         sidecar.Assertions))
                 {

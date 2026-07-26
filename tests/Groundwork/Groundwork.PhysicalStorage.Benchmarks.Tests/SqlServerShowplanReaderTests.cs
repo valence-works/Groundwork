@@ -83,12 +83,12 @@ public sealed class SqlServerShowplanReaderTests
         const string plan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
               <StatisticsInfo Statistics="[declared_index]" />
-              <RelOp PhysicalOp="Index Seek"><Object Index="[other_index]" /></RelOp>
+              <RelOp PhysicalOp="Index Seek"><Object Table="[expected_table]" Index="[other_index]" /></RelOp>
             </ShowPlanXML>
             """;
 
         var exception = Assert.Throws<InvalidOperationException>(
-            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index"));
+            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index", "expected_table"));
 
         Assert.Contains("declared_index", exception.Message, StringComparison.Ordinal);
     }
@@ -98,11 +98,11 @@ public sealed class SqlServerShowplanReaderTests
     {
         const string plan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
-              <RelOp PhysicalOp="Index Seek"><Object Index="[declared_index]" /></RelOp>
+              <RelOp PhysicalOp="Index Seek"><Object Table="[expected_table]" Index="[declared_index]" /></RelOp>
             </ShowPlanXML>
             """;
 
-        SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index");
+        SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index", "expected_table");
     }
 
     [Fact]
@@ -110,13 +110,13 @@ public sealed class SqlServerShowplanReaderTests
     {
         const string plan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
-              <RelOp PhysicalOp="Index Seek"><Object Index="[declared_index]" /></RelOp>
+              <RelOp PhysicalOp="Index Seek"><Object Table="[expected_table]" Index="[declared_index]" /></RelOp>
               <RelOp PhysicalOp="Table Scan"><Object /></RelOp>
             </ShowPlanXML>
             """;
 
         var exception = Assert.Throws<InvalidOperationException>(
-            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index"));
+            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index", "expected_table"));
 
         Assert.Contains("Table Scan", exception.Message, StringComparison.Ordinal);
     }

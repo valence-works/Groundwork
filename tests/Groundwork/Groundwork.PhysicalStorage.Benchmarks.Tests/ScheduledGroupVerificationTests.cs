@@ -332,6 +332,50 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rejects_a_fully_resealed_5000_basis_point_plan_for_an_unbound_SQLite_alias()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options
+            {
+                Workload = BenchmarkWorkload.IndexedQuery,
+                QuerySelectivityBasisPoints = BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+            });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        const string falsePlan = "SEARCH forged USING INDEX fixture_index (status=?)";
+        await File.WriteAllTextAsync(worker.PlanPath, falsePlan);
+        await WriteJsonAsync(worker.SidecarPath, worker.Evidence with { NativePlan = falsePlan });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_5000_basis_point_physical_object_drift()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options
+            {
+                Workload = BenchmarkWorkload.IndexedQuery,
+                QuerySelectivityBasisPoints = BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+            });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        await WriteJsonAsync(
+            worker.SidecarPath,
+            worker.Evidence with { PhysicalObject = "forged-physical-object" });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Rejects_a_fully_resealed_query_worker_with_assertions_for_the_wrong_data_shape_mode()
     {
         var fixture = await ScheduledGroupFixture.CreateAsync(
@@ -484,6 +528,8 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             public int OperationsPerSample { get; init; } = 10;
             public long ElapsedNanosecondsPerSample { get; init; } = 1_000_000_000;
             public BenchmarkWorkload Workload { get; init; } = BenchmarkWorkload.Insert;
+            public int QuerySelectivityBasisPoints { get; init; } =
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints;
         }
 
         public static async Task<ScheduledGroupFixture> CreateAsync(string root, Options? options = null)
@@ -546,7 +592,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             var shape = new BenchmarkDataShape(
                 1_000,
                 BenchmarkPayloadProfiles.For(options.Workload),
-                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
+                options.QuerySelectivityBasisPoints);
             var request = new BenchmarkRunRequest(
                 Root,
                 configuration,

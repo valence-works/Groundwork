@@ -41,9 +41,13 @@ internal static class SqlServerShowplanReader
         return plans;
     }
 
-    public static void EnsureScaleBearingIndex(string value, string indexName)
+    public static void EnsureScaleBearingIndex(
+        string value,
+        string indexName,
+        string physicalObject)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(indexName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(physicalObject);
         var document = Parse(value);
         var operators = document
             .Descendants()
@@ -61,7 +65,8 @@ internal static class SqlServerShowplanReader
             string.Equals(element.Attribute("PhysicalOp")?.Value, "Index Seek", StringComparison.OrdinalIgnoreCase) &&
             element.Descendants().Any(candidate =>
                 candidate.Name.LocalName == "Object" &&
-                IsIndex(candidate.Attribute("Index")?.Value, indexName)));
+                IsIndex(candidate.Attribute("Index")?.Value, indexName) &&
+                IsIdentifier(candidate.Attribute("Table")?.Value, physicalObject)));
         if (!usesDeclaredIndex || hasForbiddenScan)
         {
             throw new InvalidOperationException(
@@ -90,6 +95,14 @@ internal static class SqlServerShowplanReader
     private static bool IsIndex(string? candidate, string expected) =>
         string.Equals(candidate, expected, StringComparison.OrdinalIgnoreCase) ||
         string.Equals(candidate, $"[{expected}]", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsIdentifier(string? candidate, string expected)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+            return false;
+        var last = candidate.Split('.').Last().Trim();
+        return string.Equals(last.Trim('[', ']', '"'), expected, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool IsShowplanXml(string value)
     {

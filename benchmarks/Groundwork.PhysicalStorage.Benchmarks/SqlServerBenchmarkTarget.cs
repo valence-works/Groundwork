@@ -65,7 +65,9 @@ public sealed class SqlServerBenchmarkTarget(
             var plans = await SqlServerShowplanReader.ReadAsync(reader, cancellationToken);
             var plan = plans.SingleOrDefault() ?? throw new InvalidOperationException(
                 $"SQL Server returned no native XML plan for {request.Workload}/{request.Operation}.");
-            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex && !UsesDeclaredIndex(plan, indexName))
+            var physicalObject = (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier;
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
+                !UsesDeclaredIndex(plan, indexName, physicalObject))
             {
                 throw new InvalidOperationException(
                     $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.");
@@ -73,18 +75,27 @@ public sealed class SqlServerBenchmarkTarget(
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
-                (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier,
+                physicalObject,
                 indexName, plan,
-                NativePlanEvidenceAssertions.ForSqlServer(assertionMode)));
+                NativePlanEvidenceAssertions.ForSqlServer(assertionMode))
+            {
+                CommandBinding = new NativePlanCommandBinding(
+                    physicalObject,
+                    Model.Route.LinkedIndexStorage is null ? "p" : "l",
+                    rendered.CommandText)
+            });
         }
         return evidence;
     }
 
-    internal static bool UsesDeclaredIndex(string nativePlan, string indexName)
+    internal static bool UsesDeclaredIndex(
+        string nativePlan,
+        string indexName,
+        string physicalObject)
     {
         try
         {
-            SqlServerShowplanReader.EnsureScaleBearingIndex(nativePlan, indexName);
+            SqlServerShowplanReader.EnsureScaleBearingIndex(nativePlan, indexName, physicalObject);
             return true;
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.Xml.XmlException)

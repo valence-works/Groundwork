@@ -115,15 +115,22 @@ public sealed class SqliteBenchmarkTarget(
                 throw new InvalidOperationException(
                     $"SQLite native-plan gate rejected {request.Workload}/{request.Operation}. Expected index '{indexName}'.{Environment.NewLine}{plan}");
             }
+            var physicalObject = (model.Route.LinkedIndexStorage ?? model.Route.PrimaryStorage).Name.Identifier;
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(),
                 StorageForm.ToString(),
                 BenchmarkModelFactory.QueryIdentity,
-                (model.Route.LinkedIndexStorage ?? model.Route.PrimaryStorage).Name.Identifier,
+                physicalObject,
                 indexName,
                 plan,
-                NativePlanEvidenceAssertions.ForSqlite(assertionMode, indexName, plan)));
+                NativePlanEvidenceAssertions.ForSqlite(assertionMode, indexName, plan))
+            {
+                CommandBinding = new NativePlanCommandBinding(
+                    physicalObject,
+                    model.Route.LinkedIndexStorage is null ? "p" : "l",
+                    rendered.CommandText)
+            });
         }
         return evidence;
     }

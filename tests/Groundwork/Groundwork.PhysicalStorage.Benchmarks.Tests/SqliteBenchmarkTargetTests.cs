@@ -39,7 +39,18 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         Assert.True(correctness.BoundedQuery);
         Assert.True(correctness.MixedOrdering);
         Assert.Equal(2, plans.Count);
-        Assert.All(plans, plan => Assert.Contains(plan.IndexName, plan.NativePlan, StringComparison.OrdinalIgnoreCase));
+        Assert.All(plans, plan =>
+        {
+            Assert.Contains(plan.IndexName, plan.NativePlan, StringComparison.OrdinalIgnoreCase);
+            Assert.True(NativePlanEvidenceAssertions.Matches(
+                NativePlanAssertionMode.RequireDeclaredIndex,
+                BenchmarkProvider.Sqlite,
+                plan.IndexName,
+                plan.PhysicalObject,
+                plan.CommandBinding,
+                plan.NativePlan,
+                plan.Assertions));
+        });
         Assert.Equal(beforePlans.PrimaryRows, afterPlans.PrimaryRows);
         Assert.Equal(beforePlans.LinkedRows, afterPlans.LinkedRows);
     }

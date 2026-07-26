@@ -43,7 +43,15 @@ public sealed record NativePlanEvidence(
     string PhysicalObject,
     string IndexName,
     string NativePlan,
-    IReadOnlyList<string> Assertions);
+    IReadOnlyList<string> Assertions)
+{
+    public NativePlanCommandBinding? CommandBinding { get; init; }
+}
+
+public sealed record NativePlanCommandBinding(
+    string PhysicalObject,
+    string? Alias,
+    string? ParameterizedCommand);
 
 public static class NativePlanEvidenceAssertions
 {
@@ -118,6 +126,7 @@ public static class NativePlanEvidenceAssertions
         BenchmarkProvider provider,
         string indexName,
         string physicalObject,
+        NativePlanCommandBinding? commandBinding,
         string nativePlan,
         IReadOnlyList<string>? assertions)
     {
@@ -137,6 +146,15 @@ public static class NativePlanEvidenceAssertions
         };
         if (!expected.SequenceEqual(assertions, StringComparer.Ordinal))
             return false;
+        if (!NativePlanEvidenceValidator.Matches(
+                provider,
+                physicalObject,
+                indexName,
+                commandBinding,
+                nativePlan))
+        {
+            return false;
+        }
         if (assertionMode == NativePlanAssertionMode.ScanCharacterization)
             return true;
 
@@ -148,7 +166,10 @@ public static class NativePlanEvidenceAssertions
                 nativePlan,
                 indexName,
                 physicalObject),
-            BenchmarkProvider.SqlServer => SqlServerBenchmarkTarget.UsesDeclaredIndex(nativePlan, indexName),
+            BenchmarkProvider.SqlServer => SqlServerBenchmarkTarget.UsesDeclaredIndex(
+                nativePlan,
+                indexName,
+                physicalObject),
             _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
         };
     }

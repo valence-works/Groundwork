@@ -187,6 +187,66 @@ public sealed class BenchmarkRunGroupTests : IDisposable
     }
 
     [Fact]
+    public async Task Comparison_rejects_a_fully_resealed_5000_basis_point_plan_for_an_unbound_SQLite_alias()
+    {
+        var baselineRoot = Path.Combine(scratch, "false-plan-baseline");
+        var candidateRoot = Path.Combine(scratch, "false-plan-candidate");
+        await WriteGroupAsync(baselineRoot, "baseline", 1_000);
+        var candidate = await WriteGroupAsync(candidateRoot, "candidate", 1_000);
+        var workerRoot = Path.Combine(candidateRoot, "runs", candidate.Runs[0].Ordinal.ToString("D6"));
+        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(Path.Combine(workerRoot, "manifest.json"));
+        var planPath = Path.Combine(
+            workerRoot,
+            manifest.PlanArtifacts[0].Replace('/', Path.DirectorySeparatorChar));
+        var sidecarPath = $"{planPath}.assertions.json";
+        var evidence = await ReadJsonAsync<NativePlanEvidence>(sidecarPath);
+        const string falsePlan = "SEARCH forged USING INDEX fixture_index (status=?)";
+        await File.WriteAllTextAsync(planPath, falsePlan);
+        await WriteJsonAsync(sidecarPath, evidence with { NativePlan = falsePlan });
+        await ResealWorkerIntegrityAsync(workerRoot);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkRunGroupRegressionEvaluator.CompareAsync(
+                candidateRoot,
+                candidate,
+                baselineRoot,
+                RegressionPolicy.Scheduled,
+                CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Comparison_rejects_a_fully_resealed_5000_basis_point_physical_object_drift()
+    {
+        var baselineRoot = Path.Combine(scratch, "physical-drift-baseline");
+        var candidateRoot = Path.Combine(scratch, "physical-drift-candidate");
+        await WriteGroupAsync(baselineRoot, "baseline", 1_000);
+        var candidate = await WriteGroupAsync(candidateRoot, "candidate", 1_000);
+        var workerRoot = Path.Combine(candidateRoot, "runs", candidate.Runs[0].Ordinal.ToString("D6"));
+        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(Path.Combine(workerRoot, "manifest.json"));
+        var planPath = Path.Combine(
+            workerRoot,
+            manifest.PlanArtifacts[0].Replace('/', Path.DirectorySeparatorChar));
+        var sidecarPath = $"{planPath}.assertions.json";
+        var evidence = await ReadJsonAsync<NativePlanEvidence>(sidecarPath);
+        await WriteJsonAsync(
+            sidecarPath,
+            evidence with { PhysicalObject = "forged-physical-object" });
+        await ResealWorkerIntegrityAsync(workerRoot);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkRunGroupRegressionEvaluator.CompareAsync(
+                candidateRoot,
+                candidate,
+                baselineRoot,
+                RegressionPolicy.Scheduled,
+                CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Comparison_rejects_a_candidate_missing_a_baseline_tuple()
     {
         var baselineRoot = Path.Combine(scratch, "missing-baseline");

@@ -86,12 +86,16 @@ public sealed class MongoDbBenchmarkTarget(
                 throw new InvalidOperationException(
                     $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}");
             }
+            var physicalObject = (route.LinkedIndexStorage ?? route.PrimaryStorage).Name.Identifier;
             evidence.Add(new NativePlanEvidence(
                 request,
                 Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
-                (route.LinkedIndexStorage ?? route.PrimaryStorage).Name.Identifier,
+                physicalObject,
                 indexName, plan,
-                NativePlanEvidenceAssertions.ForMongoDb(assertionMode, indexName)));
+                NativePlanEvidenceAssertions.ForMongoDb(assertionMode, indexName))
+            {
+                CommandBinding = new NativePlanCommandBinding(physicalObject, null, null)
+            });
         }
         return evidence;
     }
