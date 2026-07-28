@@ -12,6 +12,19 @@ public static class PostgreSqlDiagnosticRecordStoreFactory
         PostgreSqlDiagnosticRecordValidator.ValidateDefinitionAndThrow(definition);
 
     /// <summary>
+    /// Creates an explicitly invoked deployment applier for diagnostic streams. It may create
+    /// missing stream storage, but runtime session factories remain read-only.
+    /// </summary>
+    public static IDiagnosticRecordDeploymentApplier CreateDeploymentApplier(string connectionString)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        return new DelegatingDiagnosticRecordDeploymentApplier(
+            new PostgreSqlDiagnosticRecordDeploymentInspector(connectionString),
+            (definition, cancellationToken) => PostgreSqlDiagnosticRecordMaterializer.MaterializeAsync(
+                connectionString, definition, cancellationToken: cancellationToken));
+    }
+
+    /// <summary>
     /// Creates a provider-neutral scope/session factory that admits only an already-deployed,
     /// compatible schema. Session opening and store leasing never materialize or repair storage.
     /// </summary>

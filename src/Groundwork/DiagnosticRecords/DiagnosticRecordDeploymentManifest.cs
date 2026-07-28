@@ -122,6 +122,99 @@ public interface IDiagnosticRecordDeploymentInspector
 }
 
 /// <summary>
+/// Provider-neutral, explicitly invoked deployment boundary for diagnostic-record streams.
+/// Implementations may add missing physical stream state and must verify an existing stream's
+/// persisted definition rather than rewriting it. They never remove streams or mutate an
+/// incompatible persisted definition. Runtime session factories remain read-only consumers of
+/// this deployment boundary.
+/// </summary>
+public interface IDiagnosticRecordDeploymentApplier
+{
+    /// <summary>The stable provider identity used by this deployment applier.</summary>
+    string Provider { get; }
+
+    /// <summary>
+    /// Materializes the deployment's declared streams when absent and verifies those already
+    /// present. Incompatible persisted definitions fail the operation.
+    /// </summary>
+    Task ApplyAsync(
+        DiagnosticRecordDeploymentManifest deployment,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Provider-neutral adapter for provider-owned diagnostic stream materialization. It admits the
+/// complete deployment before and after applying, and individually checks every stream while
+/// selecting missing work so incompatible persisted definitions never trigger repair. Provider
+/// packages supply the inspector, materializer, and, when necessary, a deployment-wide topology
+/// check; this type deliberately has no provider SDK dependency.
+/// </summary>
+public sealed class DelegatingDiagnosticRecordDeploymentApplier(
+    IDiagnosticRecordDeploymentInspector inspector,
+    Func<DiagnosticRecordStreamDefinition, CancellationToken, Task> materializeAsync,
+    Func<DiagnosticRecordDeploymentManifest, CancellationToken, Task>? validateDeploymentAsync = null)
+    : IDiagnosticRecordDeploymentApplier
+{
+    private readonly IDiagnosticRecordDeploymentInspector inspector =
+        inspector ?? throw new ArgumentNullException(nameof(inspector));
+    private readonly Func<DiagnosticRecordStreamDefinition, CancellationToken, Task> materializeAsync =
+        materializeAsync ?? throw new ArgumentNullException(nameof(materializeAsync));
+    private readonly Func<DiagnosticRecordDeploymentManifest, CancellationToken, Task>? validateDeploymentAsync =
+        validateDeploymentAsync;
+
+    /// <inheritdoc />
+    public string Provider => inspector.Provider;
+
+    /// <inheritdoc />
+    public async Task ApplyAsync(
+        DiagnosticRecordDeploymentManifest deployment,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(deployment);
+        if (deployment.Streams.Count == 0)
+            return;
+
+        var preflight = await DiagnosticRecordDeploymentAdmission.InspectAsync(
+            inspector, deployment, cancellationToken);
+        if (preflight.IsReady)
+            return;
+        ThrowIfUnsafe(preflight);
+
+        var missingStreams = new List<DiagnosticRecordStreamDefinition>();
+        foreach (var stream in deployment.Streams)
+        {
+            var streamDeployment = new DiagnosticRecordDeploymentManifest(deployment.Storage, [stream]);
+            var streamInspection = await DiagnosticRecordDeploymentAdmission.InspectAsync(
+                inspector, streamDeployment, cancellationToken);
+            if (streamInspection.IsReady)
+                continue;
+            ThrowIfUnsafe(streamInspection);
+            missingStreams.Add(stream);
+        }
+
+        if (missingStreams.Count == 0)
+        {
+            await DiagnosticRecordDeploymentAdmission.EnsureReadyAsync(inspector, deployment, cancellationToken);
+            return;
+        }
+
+        if (validateDeploymentAsync is not null)
+            await validateDeploymentAsync(deployment, cancellationToken);
+
+        foreach (var stream in missingStreams)
+            await materializeAsync(stream, cancellationToken);
+
+        await DiagnosticRecordDeploymentAdmission.EnsureReadyAsync(inspector, deployment, cancellationToken);
+    }
+
+    private static void ThrowIfUnsafe(DiagnosticRecordDeploymentInspection inspection)
+    {
+        if (inspection.Status != DiagnosticRecordDeploymentAdmissionStatus.Missing)
+            throw DiagnosticRecordDeploymentAdmissionException.FromInspection(inspection);
+    }
+}
+
+/// <summary>
 /// Produces provider-native planner evidence for the exact bounded diagnostic-record query,
 /// grouped reduction, statistics-inspection, or trim-selection route. Inspection is admission-gated and read-only:
 /// it never creates or repairs physical storage. This deliberately covers the scale-bearing
@@ -608,7 +701,7 @@ public sealed class DelegatingDiagnosticRecordStoreSessionFactory(
 
 internal static class DiagnosticRecordDeploymentAdmission
 {
-    public static async ValueTask EnsureReadyAsync(
+    public static async ValueTask<DiagnosticRecordDeploymentInspection> InspectAsync(
         IDiagnosticRecordDeploymentInspector inspector,
         DiagnosticRecordDeploymentManifest deployment,
         CancellationToken cancellationToken)
@@ -645,6 +738,15 @@ internal static class DiagnosticRecordDeploymentAdmission
                     $"Diagnostic-record deployment inspector '{inspector.GetType().FullName}' reported provider " +
                     $"'{inspection.Provider}' instead of '{inspector.Provider}'."));
         }
+        return inspection;
+    }
+
+    public static async ValueTask EnsureReadyAsync(
+        IDiagnosticRecordDeploymentInspector inspector,
+        DiagnosticRecordDeploymentManifest deployment,
+        CancellationToken cancellationToken)
+    {
+        var inspection = await InspectAsync(inspector, deployment, cancellationToken);
         if (!inspection.IsReady)
             throw DiagnosticRecordDeploymentAdmissionException.FromInspection(inspection);
     }

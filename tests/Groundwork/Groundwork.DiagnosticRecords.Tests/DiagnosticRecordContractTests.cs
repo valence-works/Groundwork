@@ -39,6 +39,104 @@ public abstract class DiagnosticRecordContractTests
     }
 
     [Fact]
+    public async Task Deployment_applier_validates_the_complete_deployment_before_materializing_each_stream()
+    {
+        var calls = new List<string>();
+        var deployment = new DiagnosticRecordDeploymentManifest(
+            StorageManifest(),
+            [Definition() with { Stream = new("z") }, Definition() with { Stream = new("a") }]);
+        var deploymentInspections = 0;
+        var applier = new DelegatingDiagnosticRecordDeploymentApplier(
+            new CallbackDeploymentInspector("test", inspected =>
+            {
+                if (inspected.Streams.Count == 1)
+                    return DiagnosticRecordDeploymentInspection.Missing("test", inspected);
+                return Interlocked.Increment(ref deploymentInspections) == 1
+                    ? DiagnosticRecordDeploymentInspection.Missing("test", inspected)
+                    : DiagnosticRecordDeploymentInspection.Ready("test");
+            }),
+            (stream, _) =>
+            {
+                calls.Add($"materialize:{stream.Stream.Value}");
+                return Task.CompletedTask;
+            },
+            (_, _) =>
+            {
+                calls.Add("validate");
+                return Task.CompletedTask;
+            });
+
+        await applier.ApplyAsync(deployment);
+
+        Assert.Equal("test", applier.Provider);
+        Assert.Equal(["validate", "materialize:a", "materialize:z"], calls);
+    }
+
+    [Fact]
+    public async Task Deployment_applier_does_not_materialize_when_deployment_validation_fails()
+    {
+        var materialized = 0;
+        var applier = new DelegatingDiagnosticRecordDeploymentApplier(
+            new CallbackDeploymentInspector(
+                "test",
+                deployment => DiagnosticRecordDeploymentInspection.Missing("test", deployment)),
+            (_, _) =>
+            {
+                Interlocked.Increment(ref materialized);
+                return Task.CompletedTask;
+            },
+            (_, _) => Task.FromException(new InvalidOperationException("incompatible deployment")));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            applier.ApplyAsync(new DiagnosticRecordDeploymentManifest(StorageManifest(), [Definition()])));
+
+        Assert.Equal(0, Volatile.Read(ref materialized));
+    }
+
+    [Fact]
+    public async Task Deployment_applier_rejects_drift_before_any_stream_is_materialized()
+    {
+        var materialized = 0;
+        var applier = new DelegatingDiagnosticRecordDeploymentApplier(
+            new StubDeploymentInspector(
+                DiagnosticRecordDeploymentInspection.Drifted("test", [Definition().Stream.Value])),
+            (_, _) =>
+            {
+                Interlocked.Increment(ref materialized);
+                return Task.CompletedTask;
+            });
+
+        var exception = await Assert.ThrowsAsync<DiagnosticRecordDeploymentAdmissionException>(() =>
+            applier.ApplyAsync(new DiagnosticRecordDeploymentManifest(StorageManifest(), [Definition()])));
+
+        Assert.Equal(DiagnosticRecordDeploymentAdmissionErrorCodes.Drifted, exception.Code);
+        Assert.Equal(0, Volatile.Read(ref materialized));
+    }
+
+    [Fact]
+    public async Task Deployment_applier_requires_ready_postcondition_after_materialization()
+    {
+        var materialized = 0;
+        var deployment = new DiagnosticRecordDeploymentManifest(StorageManifest(), [Definition()]);
+        var applier = new DelegatingDiagnosticRecordDeploymentApplier(
+            new SequencedDeploymentInspector(
+                DiagnosticRecordDeploymentInspection.Missing("test", deployment),
+                DiagnosticRecordDeploymentInspection.Missing("test", deployment),
+                DiagnosticRecordDeploymentInspection.Missing("test", deployment)),
+            (_, _) =>
+            {
+                Interlocked.Increment(ref materialized);
+                return Task.CompletedTask;
+            });
+
+        var exception = await Assert.ThrowsAsync<DiagnosticRecordDeploymentAdmissionException>(() =>
+            applier.ApplyAsync(deployment));
+
+        Assert.Equal(DiagnosticRecordDeploymentAdmissionErrorCodes.Missing, exception.Code);
+        Assert.Equal(1, Volatile.Read(ref materialized));
+    }
+
+    [Fact]
     public async Task Session_factory_admits_only_declared_streams_and_enforces_scope_isolation()
     {
         var deployment = new DiagnosticRecordDeploymentManifest(StorageManifest(), [Definition()]);
@@ -988,6 +1086,19 @@ public abstract class DiagnosticRecordContractTests
             DiagnosticRecordDeploymentManifest deployment,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(inspection);
+    }
+
+    private sealed class CallbackDeploymentInspector(
+        string provider,
+        Func<DiagnosticRecordDeploymentManifest, DiagnosticRecordDeploymentInspection> inspect)
+        : IDiagnosticRecordDeploymentInspector
+    {
+        public string Provider { get; } = provider;
+
+        public ValueTask<DiagnosticRecordDeploymentInspection> InspectAsync(
+            DiagnosticRecordDeploymentManifest deployment,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(inspect(deployment));
     }
 
     private sealed class ThrowingDeploymentInspector(string provider, Exception failure)
