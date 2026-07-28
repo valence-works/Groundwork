@@ -11,6 +11,22 @@ public static class SqlServerDiagnosticRecordStoreFactory
     public static void ValidateDefinition(DiagnosticRecordStreamDefinition definition) =>
         SqlServerDiagnosticRecordValidator.ValidateDefinitionAndThrow(definition);
 
+    /// <summary>
+    /// Creates an explicitly invoked deployment applier for diagnostic streams. It validates
+    /// SQL Server's required transaction topology before materializing any stream; runtime
+    /// session factories remain read-only.
+    /// </summary>
+    public static IDiagnosticRecordDeploymentApplier CreateDeploymentApplier(string connectionString)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        return new DelegatingDiagnosticRecordDeploymentApplier(
+            new SqlServerDiagnosticRecordDeploymentInspector(connectionString),
+            (definition, cancellationToken) => SqlServerDiagnosticRecordMaterializer.MaterializeAsync(
+                connectionString, definition, cancellationToken: cancellationToken),
+            (deployment, cancellationToken) => ValidateAdmissionAsync(
+                connectionString, deployment.Streams, cancellationToken));
+    }
+
     public static async Task ValidateAdmissionAsync(
         string connectionString,
         IReadOnlyList<DiagnosticRecordStreamDefinition> definitions,

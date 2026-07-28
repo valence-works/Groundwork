@@ -127,35 +127,24 @@ internal static class DiagnosticRecordDeploymentCoordinator
         DiagnosticRecordDeploymentManifest deployment,
         CancellationToken cancellationToken)
     {
-        foreach (var stream in deployment.Streams)
-        {
-            switch (provider.ToLowerInvariant())
-            {
-                case "sqlite":
-                    await SqliteDiagnosticRecordMaterializer.MaterializeAsync(connectionString, stream, cancellationToken: cancellationToken);
-                    break;
-                case "sqlserver":
-                    await SqlServerDiagnosticRecordMaterializer.MaterializeAsync(connectionString, stream, cancellationToken: cancellationToken);
-                    break;
-                case "postgresql":
-                    await PostgreSqlDiagnosticRecordMaterializer.MaterializeAsync(connectionString, stream, cancellationToken: cancellationToken);
-                    break;
-                case "mongodb":
-                    var databaseName = database ?? MongoUrl.Create(connectionString).DatabaseName;
-                    if (string.IsNullOrWhiteSpace(databaseName))
-                        throw new SchemaToolConfigurationException("GW-CLI-006", "MongoDB requires '--database' or a database name in the connection URI.");
-                    await using (var handle = await MongoDbDiagnosticRecordStoreFactory.CreateAsync(
-                                     connectionString, databaseName, stream, cancellationToken: cancellationToken))
-                    {
-                        // The factory is the topology gate. Disposal releases the client even when
-                        // this command is only establishing the declared stream schema.
-                    }
-                    break;
-                default:
-                    throw new SchemaToolConfigurationException("GW-CLI-002", "Unknown provider. Supported providers: mongodb, postgresql, sqlite, sqlserver.");
-            }
-        }
+        var applier = CreateDeploymentApplier(provider, connectionString, database);
+        await applier.ApplyAsync(deployment, cancellationToken);
     }
+
+    private static IDiagnosticRecordDeploymentApplier CreateDeploymentApplier(
+        string provider,
+        string connectionString,
+        string? database) =>
+        provider.ToLowerInvariant() switch
+        {
+            "sqlite" => SqliteDiagnosticRecordStoreFactory.CreateDeploymentApplier(connectionString),
+            "sqlserver" => SqlServerDiagnosticRecordStoreFactory.CreateDeploymentApplier(connectionString),
+            "postgresql" => PostgreSqlDiagnosticRecordStoreFactory.CreateDeploymentApplier(connectionString),
+            "mongodb" => MongoDbDiagnosticRecordStoreFactory.CreateDeploymentApplier(
+                connectionString,
+                ResolveMongoDatabase(connectionString, database)),
+            _ => throw new SchemaToolConfigurationException("GW-CLI-002", "Unknown provider. Supported providers: mongodb, postgresql, sqlite, sqlserver.")
+        };
 
     private static IDiagnosticRecordDeploymentInspector CreateInspector(
         string provider,
