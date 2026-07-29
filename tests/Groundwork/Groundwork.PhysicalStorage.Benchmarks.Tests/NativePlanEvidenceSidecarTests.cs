@@ -665,6 +665,49 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
                      Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
     }
 
+    [Fact]
+    public async Task Writer_rejects_a_nested_MongoDB_exists_value_before_writing_either_plan_artifact()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.MongoDb,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = MongoDbEvidenceWithSecret();
+        evidence = evidence with
+        {
+            CommandBinding = evidence.CommandBinding! with
+            {
+                MongoCommandReceipt = new NativePlanMongoCommandReceipt(
+                    Groundwork.Documents.Store.PhysicalDocumentQueryCommandKind.Page,
+                    """
+                    {
+                      "find": "fixture_table",
+                      "filter": {
+                        "storage_scope": "<redacted>",
+                        "document_kind": "<redacted>",
+                        "status": { "$exists": true },
+                        "$or": [{
+                          "status": { "$eq": { "$exists": false, "marker": "<redacted>" } }
+                        }]
+                      },
+                      "limit": 20
+                    }
+                    """)
+            }
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root))

@@ -173,6 +173,32 @@ public sealed class NativePlanEvidenceValidatorTests
     }
 
     [Fact]
+    public void MongoDB_capture_rejects_a_nested_exists_value_disguised_as_selected_status()
+    {
+        var explain = BsonDocument.Parse(
+            """
+            { "command": {
+              "find": "expected_table",
+              "filter": {
+                "storage_scope": "tenant-a",
+                "document_kind": "benchmark-document",
+                "status": { "$exists": true },
+                "$or": [{
+                  "status": { "$eq": { "$exists": false, "marker": "open" } }
+                }]
+              },
+              "limit": 20
+            } }
+            """);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            NativePlanMongoCommandReceipt.FromExplain(
+                explain,
+                PhysicalDocumentQueryCommandKind.Page,
+                NativePlanTestBindings.CanonicalFields));
+    }
+
+    [Fact]
     public void MongoDB_rejects_a_page_command_resealed_as_a_count_terminal()
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.PaginationAndCount])
@@ -665,6 +691,60 @@ public sealed class NativePlanEvidenceValidatorTests
             NativePlan(BenchmarkProvider.MongoDb)));
     }
 
+    [Fact]
+    public void MongoDB_accepts_the_driver_ordered_exists_guards_with_singleton_or_status_predicate()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.MixedCompoundOrdering])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        const NativePlanAssertionMode mode = NativePlanAssertionMode.ScanCharacterization;
+        var explain = BsonDocument.Parse(
+            """
+            { "command": {
+              "find": "expected_table",
+              "filter": {
+                "storage_scope": "tenant-a",
+                "document_kind": "benchmark-document",
+                "status": { "$exists": true },
+                "rank": { "$exists": true },
+                "$or": [{ "status": "open" }]
+              },
+              "sort": { "rank": -1, "storage_scope": 1, "id_comparison_key": 1 },
+              "limit": 20
+            } }
+            """);
+        var command = NativePlanMongoCommandReceipt.FromExplain(
+            explain,
+            PhysicalDocumentQueryCommandKind.Page,
+            NativePlanTestBindings.CanonicalFields);
+        var receipt = NativePlanQueryReceipt.FromMongoDb(
+            request,
+            mode,
+            command,
+            NativePlanTestBindings.CanonicalFields);
+        var binding = new NativePlanCommandBinding(
+            PhysicalObject,
+            null,
+            null,
+            receipt.Shape,
+            receipt)
+        {
+            Fields = NativePlanTestBindings.CanonicalFields,
+            MongoCommandReceipt = command
+        };
+
+        Assert.Contains("\"status\" : { \"$exists\" : true }", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.Contains("\"rank\" : { \"$exists\" : true }", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("tenant-a", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("benchmark-document", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"open\"", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.True(Matches(
+            BenchmarkProvider.MongoDb,
+            mode,
+            request,
+            binding,
+            NativePlan(BenchmarkProvider.MongoDb)));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -687,6 +767,58 @@ public sealed class NativePlanEvidenceValidatorTests
                 "$or": [{ "status": "<redacted>" }]{{extra}}
               },
               "sort": { "storage_scope": 1, "id_comparison_key": 1 },
+              "limit": 20
+            }
+            """);
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_ordered_exists_guard_on_an_unordered_request()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            {
+              "find": "expected_table",
+              "filter": {
+                "storage_scope": "<redacted>",
+                "document_kind": "<redacted>",
+                "status": { "$exists": true },
+                "rank": { "$exists": true },
+                "$or": [{ "status": "<redacted>" }]
+              },
+              "sort": { "storage_scope": 1, "id_comparison_key": 1 },
+              "limit": 20
+            }
+            """);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(", \"rank\": { \"$exists\": false }")]
+    [InlineData(", \"rank\": { \"$exists\": true }, \"category\": { \"$exists\": true }")]
+    public void MongoDB_rejects_noncanonical_ordered_exists_guards(string extraGuards)
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.MixedCompoundOrdering])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            $$"""
+            {
+              "find": "expected_table",
+              "filter": {
+                "storage_scope": "<redacted>",
+                "document_kind": "<redacted>",
+                "status": { "$exists": true }{{extraGuards}},
+                "$or": [{ "status": "<redacted>" }]
+              },
+              "sort": { "rank": -1, "storage_scope": 1, "id_comparison_key": 1 },
               "limit": 20
             }
             """);

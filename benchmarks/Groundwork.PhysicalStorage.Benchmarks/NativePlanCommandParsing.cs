@@ -18,6 +18,7 @@ internal static partial class NativePlanCommandParsing
         Root,
         Pipeline,
         PipelineStage,
+        Predicate,
         Sort
     }
 
@@ -76,7 +77,7 @@ internal static partial class NativePlanCommandParsing
         ArgumentNullException.ThrowIfNull(fields);
         var command = ParseMongoCommand(receipt);
         var terminal = MongoTerminal(command, receipt.Kind);
-        var filters = MongoFilters(command, fields);
+        var filters = MongoFilters(command, request, fields);
         var order = MongoOrder(command, request, fields);
         var pagination = MongoPagination(command, terminal);
         var expected = NativePlanRequestShape.For(request, assertionMode);
@@ -260,6 +261,7 @@ internal static partial class NativePlanCommandParsing
 
     private static IReadOnlyList<NativePlanFilterShape> MongoFilters(
         BsonDocument command,
+        BenchmarkPlanRequest request,
         NativePlanFieldBinding fields)
     {
         var predicates = command.Contains("aggregate")
@@ -273,17 +275,19 @@ internal static partial class NativePlanCommandParsing
                 .Where(value => value.IsBsonDocument)
                 .Select(value => value.AsBsonDocument)
                 .ToArray();
-        return predicates.Length == 1 && IsCanonicalMongoPredicate(predicates[0], fields)
+        return predicates.Length == 1 && IsCanonicalMongoPredicate(predicates[0], request, fields)
             ? NativePlanRequestShape.CanonicalFilters
             : [];
     }
 
     private static bool IsCanonicalMongoPredicate(
         BsonDocument predicate,
+        BenchmarkPlanRequest request,
         NativePlanFieldBinding fields)
     {
         var expected = new[] { fields.StorageScope, fields.DocumentKind, fields.Status };
-        if (expected.Distinct(StringComparer.Ordinal).Count() != expected.Length ||
+        var boundFields = request.Ordered ? [.. expected, fields.Rank] : expected;
+        if (boundFields.Distinct(StringComparer.Ordinal).Count() != boundFields.Length ||
             expected.Contains("$or", StringComparer.Ordinal) ||
             !predicate.TryGetValue(fields.StorageScope, out var scope) ||
             !IsMongoEquality(scope) ||
@@ -303,11 +307,27 @@ internal static partial class NativePlanCommandParsing
         if (IsMongoEquality(directStatus))
             return predicate.ElementCount == expected.Length && !predicate.Contains("$or");
 
-        return predicate.ElementCount == expected.Length + 1 &&
-               IsMongoExistenceGuard(directStatus) &&
-               predicate.TryGetValue("$or", out var logicalStatus) &&
-               IsMongoSingletonStatusEquality(logicalStatus, fields.Status);
+        if (!IsMongoExistenceGuard(directStatus) ||
+            !predicate.TryGetValue("$or", out var logicalStatus) ||
+            !IsMongoSingletonStatusEquality(logicalStatus, fields.Status))
+        {
+            return false;
+        }
+
+        var guardedFields = request.Ordered
+            ? new[] { fields.StorageScope, fields.DocumentKind, fields.Status, fields.Rank, "$or" }
+            : [.. expected, "$or"];
+        return HasExactMongoMembers(predicate, guardedFields) &&
+               (!request.Ordered ||
+                predicate.TryGetValue(fields.Rank, out var rank) &&
+                IsMongoExistenceGuard(rank));
     }
+
+    private static bool HasExactMongoMembers(
+        BsonDocument document,
+        IReadOnlyCollection<string> expected) =>
+        document.ElementCount == expected.Count &&
+        document.Names.All(expected.Contains);
 
     private static bool IsMongoExistenceGuard(BsonValue value) =>
         value.IsBsonDocument &&
@@ -440,8 +460,15 @@ internal static partial class NativePlanCommandParsing
     }
 
     private static bool IsMongoEquality(BsonValue value) =>
-        !value.IsBsonDocument ||
-        value.AsBsonDocument.ElementCount == 1 && value.AsBsonDocument.Contains("$eq");
+        IsRedactedMongoScalar(value) ||
+        value.IsBsonDocument &&
+        value.AsBsonDocument.ElementCount == 1 &&
+        value.AsBsonDocument.TryGetValue("$eq", out var equality) &&
+        IsRedactedMongoScalar(equality);
+
+    private static bool IsRedactedMongoScalar(BsonValue value) =>
+        value.IsString &&
+        string.Equals(value.AsString, "<redacted>", StringComparison.Ordinal);
 
     private static bool ContainsSelectedStatus(BsonValue value, string statusField)
     {
@@ -472,7 +499,11 @@ internal static partial class NativePlanCommandParsing
 
     private static bool ContainsOpenValue(BsonValue value) =>
         value.IsString && string.Equals(value.AsString, "open", StringComparison.Ordinal) ||
-        value.IsBsonDocument && value.AsBsonDocument.Elements.Any(element => ContainsOpenValue(element.Value));
+        value.IsBsonDocument &&
+        value.AsBsonDocument.ElementCount == 1 &&
+        value.AsBsonDocument.TryGetValue("$eq", out var equality) &&
+        equality.IsString &&
+        string.Equals(equality.AsString, "open", StringComparison.Ordinal);
 
     private static bool HasMongoPhysicalObject(BsonDocument command) =>
         command.Names.Any(name => name is "find" or "aggregate" or "count");
@@ -486,7 +517,8 @@ internal static partial class NativePlanCommandParsing
             var document = new BsonDocument();
             foreach (var element in value.AsBsonDocument.Elements)
             {
-                document[element.Name] = PreserveMongoScalar(location, element.Name, element.Value)
+                document[element.Name] = PreserveMongoExistenceGuard(location, element.Value) ||
+                                         PreserveMongoScalar(location, element.Name, element.Value)
                     ? element.Value.DeepClone()
                     : RedactMongoValue(element.Value, ChildLocation(location, element.Name));
             }
@@ -511,6 +543,7 @@ internal static partial class NativePlanCommandParsing
         if (value.IsBsonDocument)
         {
             return value.AsBsonDocument.Elements.All(element =>
+                PreserveMongoExistenceGuard(location, element.Value) ||
                 PreserveMongoScalar(location, element.Name, element.Value)
                     ? true
                     : HasOnlyRedactedValues(
@@ -530,6 +563,12 @@ internal static partial class NativePlanCommandParsing
                string.Equals(value.AsString, "<redacted>", StringComparison.Ordinal);
     }
 
+    private static bool PreserveMongoExistenceGuard(
+        MongoCommandLocation location,
+        BsonValue value) =>
+        location == MongoCommandLocation.Predicate &&
+        IsMongoExistenceGuard(value);
+
     private static bool PreserveMongoScalar(
         MongoCommandLocation location,
         string key,
@@ -545,8 +584,7 @@ internal static partial class NativePlanCommandParsing
          key is "$skip" or "$limit" &&
          value.IsNumeric) ||
         (location == MongoCommandLocation.Sort &&
-         value.IsNumeric) ||
-        (key == "$exists" && value.IsBoolean);
+         value.IsNumeric);
 
     private static MongoCommandLocation ChildLocation(
         MongoCommandLocation location,
@@ -555,6 +593,8 @@ internal static partial class NativePlanCommandParsing
         {
             MongoCommandLocation.Root when key == "pipeline" => MongoCommandLocation.Pipeline,
             MongoCommandLocation.Root when key == "sort" => MongoCommandLocation.Sort,
+            MongoCommandLocation.Root when key is "filter" or "query" => MongoCommandLocation.Predicate,
+            MongoCommandLocation.PipelineStage when key == "$match" => MongoCommandLocation.Predicate,
             MongoCommandLocation.PipelineStage when key == "$sort" => MongoCommandLocation.Sort,
             _ => MongoCommandLocation.Nested
         };
