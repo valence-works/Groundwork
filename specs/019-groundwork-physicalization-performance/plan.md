@@ -101,7 +101,8 @@ benchmarks/Groundwork.PhysicalStorage.Benchmarks/
 │   ├── RecoveryProtocol.cs
 │   └── SqliteRecoveryWorker.cs
 └── schemas/
-    └── recovery-evidence.schema.json
+    └── v1/
+        └── recovery-evidence.schema.json
 
 tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/
 └── SqliteProcessFailureRecoveryTests.cs

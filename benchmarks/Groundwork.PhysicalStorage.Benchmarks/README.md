@@ -13,9 +13,9 @@ baselines, and cannot make an Elsa migration go/no-go decision.
 
 ## Bounded SQLite process-failure proof
 
-The `recovery-proof` command creates a durable SQLite target through the production physical-target
-admission path, starts a distinct mutation worker, kills that process tree at one declared
-transaction boundary, and verifies the exact durable state in another process:
+The `recovery-proof` command creates a durable SQLite target, reopens it through the production
+factory's inspect-only admission path, starts a distinct mutation worker, kills that process tree at
+one declared instrumentation barrier, and verifies the exact durable state in another process:
 
 ```bash
 dotnet run --project benchmarks/Groundwork.PhysicalStorage.Benchmarks -- \
@@ -25,11 +25,28 @@ dotnet run --project benchmarks/Groundwork.PhysicalStorage.Benchmarks -- \
   --output artifacts/recovery-pre-commit.json
 ```
 
-Run the command separately with `committed-before-ack` to prove that a committed mutation survives
-and a retry with the original expected version conflicts. The retained document binds the exact Git
-snapshot and harness assembly, provider/form, distinct process receipts, forced termination,
-recovered version/state digest, retry outcome, and configured whole-proof bound. It deliberately
-contains no database path, connection value, or credential and is always marked non-promotable.
+The parent never releases the worker's response gate. At `pre-commit`, recovery first observes the
+committed v1 state and replaying the original expected-version-1 request succeeds to v2. At
+`committed-before-ack`, recovery first observes v2 and the same replay conflicts. In both cases the
+requester acknowledgement remains absent before and after the forced kill.
+
+The retained document binds the exact Git commit and worktree digest, a deterministic digest of the
+complete referenced `Groundwork.*` assembly closure, provider/form, three distinct process receipts,
+forced termination, before/after retry state digests, retry outcome, and configured recovery-
+execution bound. The timing interval begins with seed setup and ends after both child exits and the
+exact recovery result; evidence persistence/readback and best-effort scratch deletion are outside
+that field. It contains no database path, connection value, or credential and is always marked
+non-promotable.
+
+The command prints a SHA-256 of the exact retained evidence file bytes. CI or workflow metadata must
+retain that digest separately; it is an integrity anchor, not a signature. Verify later with:
+
+```bash
+dotnet run --project benchmarks/Groundwork.PhysicalStorage.Benchmarks -- \
+  recovery-evidence-verify \
+  --evidence artifacts/recovery-pre-commit.json \
+  --expected-evidence-sha256 <digest-retained-out-of-band>
+```
 
 This is one SQLite correctness slice. It does not prove four-provider recovery, approve an immutable
 baseline, select a physical form, compare EF, or issue an Elsa migration verdict.

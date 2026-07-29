@@ -52,7 +52,7 @@ public sealed class SqliteBenchmarkTarget(
     /// deliberately benchmark-internal: callers receive only the public document-store contract
     /// and this path never creates or deletes a durable database.
     /// </summary>
-    internal static async Task<SqliteRecoverySession> OpenExistingRecoveryAsync(
+    internal static async Task<IDocumentStore> OpenExistingRecoveryAsync(
         PhysicalStorageForm storageForm,
         string instance,
         string databasePath,
@@ -68,20 +68,6 @@ public sealed class SqliteBenchmarkTarget(
         if (!File.Exists(databasePath))
             throw new FileNotFoundException("Recovery database does not exist.", databasePath);
         var connectionString = RecoveryConnectionString(databasePath, SqliteOpenMode.ReadWrite);
-        await using (var connection = new SqliteConnection(connectionString))
-        {
-            await connection.OpenAsync(cancellationToken);
-            await ConfigureAsync(connection, cancellationToken);
-            var admission = await PhysicalSchemaApplication.ApplyAsync(
-                model.Target,
-                new SqlitePhysicalSchemaExecutor(connection),
-                cancellationToken: cancellationToken);
-            if (admission.Outcome != PhysicalSchemaApplicationOutcome.NoChanges)
-            {
-                throw new InvalidOperationException(
-                    $"Recovery admission returned {admission.Outcome}; expected NoChanges for an existing durable database.");
-            }
-        }
         var store = await SqliteDocumentStoreFactory.OpenPhysicalAsync(
             connectionString,
             model.Manifest,
@@ -89,10 +75,10 @@ public sealed class SqliteBenchmarkTarget(
             DocumentStoreAccess.Scoped(new("tenant-a")),
             BenchmarkModelFactory.NamePolicy(instance),
             cancellationToken: cancellationToken);
-        return new SqliteRecoverySession(store);
+        return store;
     }
 
-    internal static async Task<SqliteRecoverySession> InitializeRecoveryAsync(
+    internal static async Task<IDocumentStore> InitializeRecoveryAsync(
         PhysicalStorageForm storageForm,
         string instance,
         string databasePath,

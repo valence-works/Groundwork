@@ -73,13 +73,15 @@ verify the exact recovered state through a new process.
 
 1. **Given** a worker that has staged a mutation but has not committed, **When** the parent
    terminates that process, **Then** a bounded recovery process observes no partial mutation and
-   preserves the previously committed state.
+   replaying the original expected-version request succeeds exactly once from the previously
+   committed state.
 2. **Given** a worker that has committed but has not acknowledged completion, **When** the parent
    terminates that process, **Then** a bounded recovery process observes the committed mutation
    exactly once, and a retry carrying the original expected version is rejected without a duplicate
    effect.
 3. **Given** retained recovery evidence, **When** its source, failure point, process outcome, or
-   recovered-state digest is altered, **Then** evidence verification rejects it.
+   recovered-state digest is altered without the caller's out-of-band exact-file digest changing,
+   **Then** evidence verification rejects it.
 
 ### Edge Cases
 
@@ -109,8 +111,9 @@ verify the exact recovered state through a new process.
 - **FR-013**: The first recovery slice MUST use the production SQLite physical-target admission and
   durable storage path for both mutation and recovery.
 - **FR-014**: Recovery evidence MUST bind the exact source snapshot, provider, physical form,
-  declared failure point, process termination outcome, recovered-state digest, and bounded
-  completion result without retaining connection values or credentials.
+  declared failure point, process termination outcome, requester-acknowledgement absence,
+  before/after retry state digests, and bounded recovery-execution result without retaining
+  connection values or credentials. Exact-file SHA-256 retention MUST remain outside the evidence.
 - **FR-015**: This SQLite slice MUST remain non-promotable and MUST NOT claim four-provider recovery,
   immutable-baseline approval, form selection, or an Elsa performance verdict.
 
@@ -129,8 +132,9 @@ verify the exact recovered state through a new process.
 - **SC-002**: SQLite-backed tests verify optimized projection structures are created, maintained, and queried successfully.
 - **SC-003**: MongoDB-backed tests verify optimized projection fields and indexes are created, maintained, and queried successfully.
 - **SC-004**: Full solution tests pass with optimized physicalization included.
-- **SC-005**: Real SQLite process tests prove both pre-commit rollback and committed-before-
-  acknowledgement recovery, including stale-retry rejection, within declared time bounds.
+- **SC-005**: Real SQLite process tests prove pre-commit rollback plus eligible replay and committed-
+  before-acknowledgement recovery plus stale-retry rejection within declared recovery-execution
+  bounds.
 - **SC-006**: Contract tests reject tampered, incomplete, timed-out, or same-process recovery
   evidence.
 

@@ -1,7 +1,7 @@
-using Groundwork.Core.PhysicalStorage;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Groundwork.Core.PhysicalStorage;
 using Xunit;
 
 namespace Groundwork.PhysicalStorage.Benchmarks.Tests;
@@ -11,82 +11,81 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
     private readonly string scratch = Path.Combine(Path.GetTempPath(), $"groundwork-recovery-{Guid.NewGuid():N}");
 
     [Theory]
-    [InlineData(0, 1)]
-    [InlineData(1, 2)]
+    [InlineData(0, 1, "saved")]
+    [InlineData(1, 2, "concurrencyConflict")]
     public async Task ProcessFailureRecovery_proves_the_declared_durable_outcome(
         int failurePointValue,
-        long expectedVersion)
+        long expectedBeforeRetryVersion,
+        string expectedRetryOutcome)
     {
         var failurePoint = (RecoveryFailurePoint)failurePointValue;
-        var evidence = await SqliteProcessFailureRecovery.RunAsync(
+        var retained = await RunProofAsync(
             PhysicalStorageForm.SharedDocuments,
-            scratch,
             failurePoint,
-            CancellationToken.None);
+            $"outcome-{failurePointValue}.json");
+        var (result, output) = retained;
+        var evidence = result.Evidence;
 
+        Assert.Equal(BenchmarkSubprocessCoordinator.DigestFile(output), result.EvidenceFileSha256);
         Assert.Equal(RecoveryProtocol.KillTreeMethod, evidence.WorkerTerminationMethod);
         Assert.True(evidence.WorkerTerminated);
+        Assert.False(evidence.RequesterAcknowledgementObserved);
         Assert.NotEqual(0, evidence.WorkerExitCode);
-        Assert.NotEqual(evidence.WorkerProcessId, evidence.RecoveryProcessId);
-        Assert.True(evidence.CompletedWithinBound);
-        Assert.InRange(evidence.ElapsedMilliseconds, 0, evidence.ConfiguredBoundMilliseconds);
-        Assert.Equal(expectedVersion, evidence.RecoveredVersion);
-        Assert.False(evidence.Promotable);
+        AssertDistinct(evidence.CoordinatorProcessId, evidence.WorkerProcessId, evidence.RecoveryProcessId);
+        Assert.True(evidence.RecoveryExecutionCompletedWithinBound);
+        Assert.InRange(
+            evidence.RecoveryExecutionElapsedMilliseconds,
+            0,
+            evidence.ConfiguredRecoveryExecutionBoundMilliseconds);
+        Assert.Equal(expectedBeforeRetryVersion, evidence.RecoveredBeforeRetryVersion);
+        Assert.Equal(2, evidence.RecoveredAfterRetryVersion);
+        Assert.Equal(expectedRetryOutcome, evidence.RetryOutcome);
         Assert.Equal(
-            failurePoint == RecoveryFailurePoint.CommittedBeforeAcknowledgement
-                ? "concurrencyConflict"
-                : "notAttempted",
-            evidence.RetryOutcome);
+            RecoveryProtocol.ExpectedStateDigest(failurePoint),
+            evidence.RecoveredBeforeRetryStateDigest);
+        Assert.Equal(
+            RecoveryProtocol.ExpectedStateDigest(RecoveryFailurePoint.CommittedBeforeAcknowledgement),
+            evidence.RecoveredAfterRetryStateDigest);
+        Assert.False(evidence.Promotable);
     }
 
     [Fact]
-    public async Task Recovery_evidence_fails_closed_for_resealed_semantic_tampering()
+    public async Task Retained_evidence_digest_rejects_semantic_and_source_tampering()
     {
-        var evidence = await SqliteProcessFailureRecovery.RunAsync(
+        var (result, output) = await RunProofAsync(
             PhysicalStorageForm.DedicatedDocumentTable,
-            scratch,
             RecoveryFailurePoint.CommittedBeforeAcknowledgement,
-            CancellationToken.None);
+            Path.Combine("tamper", "recovery-evidence.json"));
+        var evidence = result.Evidence;
 
-        AssertResealedRejected(evidence, evidence with { FailurePoint = RecoveryFailurePoint.PreCommit });
-        AssertResealedRejected(evidence, evidence with { RecoveredStateDigest = new string('0', 64) });
-        AssertResealedRejected(evidence, evidence with { RecoveredVersion = 1 });
-        AssertResealedRejected(evidence, evidence with { RetryOutcome = "notAttempted" });
-        AssertResealedRejected(evidence, evidence with { WorkerProcessId = evidence.WorkerProcessId + 1 });
-        AssertResealedRejected(evidence, evidence with { RecoveryProcessId = evidence.WorkerProcessId });
-        AssertResealedRejected(evidence, evidence with { WorkerTerminationMethod = "claimed" });
-        AssertResealedRejected(evidence, evidence with { WorkerExitCode = 0 });
-        AssertResealedRejected(evidence, evidence with { WorkerTerminated = false });
-        AssertResealedRejected(evidence, evidence with { ConfiguredBoundMilliseconds = evidence.ConfiguredBoundMilliseconds + 1 });
-        AssertResealedRejected(evidence, evidence with { ElapsedMilliseconds = evidence.ElapsedMilliseconds + 1 });
-        AssertResealedRejected(evidence, evidence with { CompletedWithinBound = false });
-        AssertResealedRejected(evidence, evidence with
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { FailurePoint = RecoveryFailurePoint.PreCommit });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { StorageForm = PhysicalStorageForm.SharedDocuments });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { CoordinatorProcessId = evidence.CoordinatorProcessId + 1 });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { WorkerProcessId = evidence.WorkerProcessId + 1 });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { RecoveryProcessId = evidence.RecoveryProcessId + 1 });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { WorkerExitCode = 0 });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { WorkerTerminated = false });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with { RequesterAcknowledgementObserved = true });
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with
         {
-            Source = evidence.Source with { GitCommit = evidence.Source.GitCommit + "0" }
+            ConfiguredRecoveryExecutionBoundMilliseconds = evidence.ConfiguredRecoveryExecutionBoundMilliseconds + 1
         });
-        AssertResealedRejected(evidence, evidence with
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with
         {
-            Source = evidence.Source with { GitTreeDigest = new string('0', 64) }
+            Source = evidence.Source with { GitCommit = new string('0', 40) }
         });
-        AssertResealedRejected(evidence, evidence with
+        await AssertAnchoredRejectedAsync(output, result.EvidenceFileSha256, evidence with
         {
-            Source = evidence.Source with { HarnessAssemblySha256 = new string('0', 64) }
+            Source = evidence.Source with { GroundworkAssemblyClosureSha256 = new string('0', 64) }
         });
-        Assert.Throws<InvalidOperationException>(() =>
-            RecoveryProtocol.Verify(evidence with { Seal = string.Empty }, evidence));
-
-        var retained = JsonSerializer.Serialize(evidence, BenchmarkJson.CompactOptions);
-        Assert.DoesNotContain("databasePath", retained, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("data source", retained, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
     public async Task Recovery_protocol_rejects_an_incomplete_barrier_within_its_bound()
     {
-        var missing = Path.Combine(scratch, "never-created.json");
-
-        await Assert.ThrowsAsync<TimeoutException>(() =>
-            WaitForMissingBarrierAsync(missing));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(25));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RecoveryProtocol.WaitForFileAsync(
+            Path.Combine(scratch, "never-created.json"), timeout.Token));
     }
 
     [Fact]
@@ -105,10 +104,9 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Recovery_proof_cli_retains_only_sanitized_sealed_evidence()
+    public async Task Recovery_proof_cli_retains_sanitized_evidence_and_emits_the_external_digest()
     {
         var output = Path.Combine(scratch, "retained", "recovery-evidence.json");
-
         var exitCode = await Program.Main(
         [
             "recovery-proof", "--form", "shared", "--failure-point", "pre-commit",
@@ -119,14 +117,18 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
         var retained = await File.ReadAllTextAsync(output);
         Assert.DoesNotContain("databasePath", retained, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("data source", retained, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("harnessAssemblySha256", retained, StringComparison.Ordinal);
-        Assert.Contains("process.kill-tree", retained, StringComparison.Ordinal);
+        Assert.Contains("groundworkAssemblyClosureSha256", retained, StringComparison.Ordinal);
+        Assert.Contains("requesterAcknowledgementObserved", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("evidenceFileSha256", retained, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task Recovery_children_reject_a_source_snapshot_that_they_cannot_recompute()
     {
-        var source = RecoveryProtocol.CaptureSourceSnapshot() with { GitTreeDigest = new string('0', 64) };
+        var source = RecoveryProtocol.CaptureSourceSnapshot() with
+        {
+            GroundworkAssemblyClosureSha256 = new string('0', 64)
+        };
         var mutation = new RecoveryWorkerRequest(
             RecoveryProtocol.Version,
             source,
@@ -134,7 +136,9 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
             "source-check",
             Path.Combine(scratch, "not-opened.db"),
             RecoveryFailurePoint.PreCommit,
-            Path.Combine(scratch, "barrier.json"));
+            Path.Combine(scratch, "instrumentation.json"),
+            Path.Combine(scratch, "release.json"),
+            Path.Combine(scratch, "ack.json"));
         var verification = new RecoveryVerificationRequest(
             RecoveryProtocol.Version,
             source,
@@ -148,18 +152,47 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => SqliteRecoveryWorker.VerifyAsync(verification, CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("unavailable", 64, 1)]
+    [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 64, 1)]
+    [InlineData("not-hex-not-hex-not-hex-not-hex-not-hex!!", 64, 1)]
+    [InlineData("0000000000000000000000000000000000000000", 63, 1)]
+    [InlineData("0000000000000000000000000000000000000000", 64, 0)]
+    public void Source_validation_rejects_unavailable_or_invalid_identity(string commit, int treeLength, int closureCount)
+    {
+        var source = new RecoverySourceSnapshot(
+            commit,
+            GitDirty: false,
+            new string('0', treeLength),
+            new string('0', 64),
+            closureCount);
+
+        Assert.Throws<InvalidOperationException>(() => RecoveryProtocol.ValidateSourceSnapshot(source));
+    }
+
     [Fact]
     public async Task Recovery_open_existing_rejects_a_missing_database_without_creating_it()
     {
         var databasePath = Path.Combine(scratch, "missing", "durable.db");
-
         await Assert.ThrowsAsync<FileNotFoundException>(() => SqliteBenchmarkTarget.OpenExistingRecoveryAsync(
-            PhysicalStorageForm.SharedDocuments,
-            "missing_database",
-            databasePath,
-            CancellationToken.None));
-
+            PhysicalStorageForm.SharedDocuments, "missing_database", databasePath, CancellationToken.None));
         Assert.False(File.Exists(databasePath));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task Inspect_only_recovery_open_rejects_empty_or_corrupt_files_without_repair(int kind)
+    {
+        var databasePath = Path.Combine(scratch, $"invalid-{kind}.db");
+        Directory.CreateDirectory(scratch);
+        var original = kind == 0 ? Array.Empty<byte>() : "not-a-sqlite-database"u8.ToArray();
+        await File.WriteAllBytesAsync(databasePath, original);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => SqliteBenchmarkTarget.OpenExistingRecoveryAsync(
+            PhysicalStorageForm.SharedDocuments, $"invalid_{kind}", databasePath, CancellationToken.None));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(databasePath));
     }
 
     [Fact]
@@ -188,65 +221,110 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Retained_evidence_verifier_recomputes_source_before_accepting_a_resealed_document()
+    public async Task Retained_evidence_verifier_requires_the_out_of_band_digest_and_current_source()
     {
-        var output = Path.Combine(scratch, "retained-source", "recovery-evidence.json");
-        var evidence = await SqliteProcessFailureRecovery.RunAsync(
+        var (result, output) = await RunProofAsync(
             PhysicalStorageForm.SharedDocuments,
-            scratch,
             RecoveryFailurePoint.PreCommit,
-            CancellationToken.None,
-            evidenceOutputPath: output);
-        var accepted = await RecoveryProtocol.VerifyRetainedAsync(output, CancellationToken.None);
-        Assert.Equal(evidence, accepted);
+            Path.Combine("retained-source", "recovery-evidence.json"));
+        var accepted = await RecoveryProtocol.VerifyRetainedAsync(
+            output, result.EvidenceFileSha256, CancellationToken.None);
+        Assert.Equal(result.Evidence, accepted);
+        Assert.Equal(0, await Program.Main(
+        [
+            "recovery-evidence-verify",
+            "--evidence", output,
+            "--expected-evidence-sha256", result.EvidenceFileSha256
+        ]));
 
-        var tampered = evidence with
-        {
-            Source = evidence.Source with { GitTreeDigest = new string('0', 64) }
-        };
-        tampered = tampered with { Seal = RecoveryProtocol.Seal(tampered) };
-        await File.WriteAllTextAsync(output, JsonSerializer.Serialize(tampered, BenchmarkJson.Options));
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            RecoveryProtocol.VerifyRetainedAsync(output, CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RecoveryProtocol.VerifyRetainedAsync(
+            output, new string('0', 64), CancellationToken.None));
+        Assert.Throws<ArgumentException>(() => RecoveryEvidenceVerifyCommandLine.Parse(
+            ["recovery-evidence-verify", "--evidence", output]));
     }
 
     [Fact]
-    public async Task Retained_evidence_rejects_an_omitted_default_valued_required_member_without_a_seal_change()
+    public async Task Retained_evidence_rejects_missing_numeric_and_undefined_enum_members()
     {
-        var output = Path.Combine(scratch, "retained-incomplete", "recovery-evidence.json");
-        await SqliteProcessFailureRecovery.RunAsync(
+        var (_, output) = await RunProofAsync(
             PhysicalStorageForm.SharedDocuments,
-            scratch,
             RecoveryFailurePoint.PreCommit,
+            Path.Combine("retained-strict", "recovery-evidence.json"));
+        var original = JsonNode.Parse(await File.ReadAllTextAsync(output))!.AsObject();
+
+        var missing = original.DeepClone().AsObject();
+        Assert.True(missing.Remove("provider"));
+        await File.WriteAllTextAsync(output, missing.ToJsonString());
+        await Assert.ThrowsAsync<JsonException>(() => RecoveryProtocol.VerifyRetainedAsync(
+            output, BenchmarkSubprocessCoordinator.DigestFile(output), CancellationToken.None));
+
+        var numeric = original.DeepClone().AsObject();
+        numeric["failurePoint"] = 1;
+        await File.WriteAllTextAsync(output, numeric.ToJsonString());
+        await Assert.ThrowsAsync<JsonException>(() => RecoveryProtocol.VerifyRetainedAsync(
+            output, BenchmarkSubprocessCoordinator.DigestFile(output), CancellationToken.None));
+
+        var undefined = original.DeepClone().AsObject();
+        undefined["storageForm"] = "unknownForm";
+        await File.WriteAllTextAsync(output, undefined.ToJsonString());
+        await Assert.ThrowsAsync<JsonException>(() => RecoveryProtocol.VerifyRetainedAsync(
+            output, BenchmarkSubprocessCoordinator.DigestFile(output), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Retained_evidence_semantics_reject_same_process_and_over_bound_receipts()
+    {
+        var (result, output) = await RunProofAsync(
+            PhysicalStorageForm.SharedDocuments,
+            RecoveryFailurePoint.PreCommit,
+            Path.Combine("retained-semantics", "recovery-evidence.json"));
+        var evidence = result.Evidence;
+
+        await AssertFreshlyAnchoredRejectedAsync(output, evidence with
+        {
+            RecoveryProcessId = evidence.CoordinatorProcessId
+        });
+        await AssertFreshlyAnchoredRejectedAsync(output, evidence with
+        {
+            RecoveryExecutionElapsedMilliseconds =
+                evidence.ConfiguredRecoveryExecutionBoundMilliseconds + 1,
+            RecoveryExecutionCompletedWithinBound = false
+        });
+    }
+
+    private static async Task AssertAnchoredRejectedAsync(
+        string output,
+        string originalDigest,
+        RecoveryEvidence altered)
+    {
+        await File.WriteAllTextAsync(output, JsonSerializer.Serialize(altered, BenchmarkJson.Options));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RecoveryProtocol.VerifyRetainedAsync(
+            output, originalDigest, CancellationToken.None));
+    }
+
+    private static async Task AssertFreshlyAnchoredRejectedAsync(string output, RecoveryEvidence altered)
+    {
+        await File.WriteAllTextAsync(output, JsonSerializer.Serialize(altered, BenchmarkJson.Options));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RecoveryProtocol.VerifyRetainedAsync(
+            output, BenchmarkSubprocessCoordinator.DigestFile(output), CancellationToken.None));
+    }
+
+    private async Task<(RecoveryProofResult Result, string Output)> RunProofAsync(
+        PhysicalStorageForm storageForm,
+        RecoveryFailurePoint failurePoint,
+        string relativeOutput)
+    {
+        var output = Path.Combine(scratch, relativeOutput);
+        var result = await SqliteProcessFailureRecovery.RunAsync(
+            storageForm,
+            scratch,
+            failurePoint,
             CancellationToken.None,
             evidenceOutputPath: output);
-        var node = JsonNode.Parse(await File.ReadAllTextAsync(output))!.AsObject();
-        Assert.True(node.Remove("provider"));
-        await File.WriteAllTextAsync(output, node.ToJsonString());
-
-        await Assert.ThrowsAsync<JsonException>(() =>
-            RecoveryProtocol.VerifyRetainedAsync(output, CancellationToken.None));
+        return (result, output);
     }
 
-    private static void AssertResealedRejected(RecoveryEvidence expected, RecoveryEvidence altered)
-    {
-        altered = altered with { Seal = RecoveryProtocol.Seal(altered) };
-        Assert.Throws<InvalidOperationException>(() => RecoveryProtocol.Verify(altered, expected));
-    }
-
-    private static async Task WaitForMissingBarrierAsync(string path)
-    {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(25));
-        try
-        {
-            await RecoveryProtocol.WaitForFileAsync(path, timeout.Token);
-        }
-        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
-        {
-            throw new TimeoutException();
-        }
-    }
+    private static void AssertDistinct(params int[] values) => Assert.Equal(values.Length, values.Distinct().Count());
 
     private static void AssertProcessExited(int processId)
     {

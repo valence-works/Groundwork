@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Documents.Store;
 
@@ -8,23 +7,22 @@ namespace Groundwork.PhysicalStorage.Benchmarks;
 /// <summary>Bounded parent-side proof for SQLite process termination and recovery.</summary>
 internal static class SqliteProcessFailureRecovery
 {
-    internal static async Task<RecoveryEvidence> RunAsync(
+    internal static async Task<RecoveryProofResult> RunAsync(
         PhysicalStorageForm storageForm,
         string scratchDirectory,
         RecoveryFailurePoint failurePoint,
         CancellationToken cancellationToken,
-        TimeSpan? configuredBound = null,
+        TimeSpan? configuredRecoveryExecutionBound = null,
         string? evidenceOutputPath = null,
         Action<int>? workerStarted = null)
     {
-        var bound = configuredBound ?? TimeSpan.FromMilliseconds(RecoveryProtocol.TimeoutMilliseconds);
+        var bound = configuredRecoveryExecutionBound ?? TimeSpan.FromMilliseconds(RecoveryProtocol.TimeoutMilliseconds);
         if (bound <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(configuredBound));
-        var configuredBoundMilliseconds = checked((long)Math.Ceiling(bound.TotalMilliseconds));
-        var stopwatch = Stopwatch.StartNew();
-        using var wholeProof = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        wholeProof.CancelAfter(bound);
-        var token = wholeProof.Token;
+            throw new ArgumentOutOfRangeException(nameof(configuredRecoveryExecutionBound));
+        var configuredRecoveryExecutionBoundMilliseconds = checked((long)Math.Ceiling(bound.TotalMilliseconds));
+        var stopwatch = new Stopwatch();
+        using var recoveryExecution = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var token = recoveryExecution.Token;
         var runDirectory = Path.Combine(scratchDirectory, "recovery-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(runDirectory);
         Process? worker = null;
@@ -34,24 +32,40 @@ internal static class SqliteProcessFailureRecovery
             var instance = "recovery_" + Guid.NewGuid().ToString("N")[..12];
             var databasePath = Path.Combine(runDirectory, "durable.db");
             var source = RecoveryProtocol.CaptureSourceSnapshot();
+            stopwatch.Start();
+            recoveryExecution.CancelAfter(bound);
             await SeedAsync(storageForm, instance, databasePath, token);
 
             var requestPath = Path.Combine(runDirectory, "mutation-request.json");
-            var barrierPath = Path.Combine(runDirectory, "mutation-barrier.json");
+            var instrumentationBarrierPath = Path.Combine(runDirectory, "instrumentation-barrier.json");
+            var responseReleasePath = Path.Combine(runDirectory, "response-release.json");
+            var requesterAcknowledgementPath = Path.Combine(runDirectory, "requester-acknowledgement.json");
             await RecoveryProtocol.WriteAsync(requestPath, new RecoveryWorkerRequest(
-                RecoveryProtocol.Version, source, storageForm, instance, databasePath, failurePoint, barrierPath), token);
+                RecoveryProtocol.Version,
+                source,
+                storageForm,
+                instance,
+                databasePath,
+                failurePoint,
+                instrumentationBarrierPath,
+                responseReleasePath,
+                requesterAcknowledgementPath), token);
             worker = Start("recovery-worker", requestPath);
             workerStarted?.Invoke(worker.Id);
             using (var barrierTimeout = RemainingTimeout(token, stopwatch, bound))
-                await RecoveryProtocol.WaitForFileAsync(barrierPath, barrierTimeout.Token);
-            var barrier = await RecoveryProtocol.ReadAsync<RecoveryBarrier>(barrierPath, token);
+                await RecoveryProtocol.WaitForFileAsync(instrumentationBarrierPath, barrierTimeout.Token);
+            var barrier = await RecoveryProtocol.ReadAsync<RecoveryInstrumentationBarrier>(instrumentationBarrierPath, token);
             if (barrier.ProtocolVersion != RecoveryProtocol.Version || barrier.Source != source ||
                 barrier.FailurePoint != failurePoint || barrier.WorkerProcessId != worker.Id ||
-                barrier.State != (failurePoint == RecoveryFailurePoint.PreCommit ? "staged" : "committed") ||
+                barrier.State != (failurePoint == RecoveryFailurePoint.PreCommit
+                    ? "staged-pre-commit"
+                    : "committed-before-requester-acknowledgement") ||
                 worker.HasExited)
             {
                 throw new InvalidOperationException("Recovery worker barrier did not bind a live declared failure point.");
             }
+            if (File.Exists(requesterAcknowledgementPath))
+                throw new InvalidOperationException("Requester acknowledgement was observed before forced termination.");
 
             worker.Kill(entireProcessTree: true);
             using (var killTimeout = RemainingTimeout(token, stopwatch, bound))
@@ -59,6 +73,8 @@ internal static class SqliteProcessFailureRecovery
             var workerExitCode = worker.ExitCode;
             if (workerExitCode == 0)
                 throw new InvalidOperationException("Recovery worker exited successfully after the forced-kill barrier.");
+            if (File.Exists(requesterAcknowledgementPath))
+                throw new InvalidOperationException("Requester acknowledgement was observed after forced termination.");
 
             var verificationPath = Path.Combine(runDirectory, "recovery-result.json");
             var verificationRequestPath = Path.Combine(runDirectory, "recovery-request.json");
@@ -83,26 +99,34 @@ internal static class SqliteProcessFailureRecovery
                 BenchmarkProvider.Sqlite,
                 storageForm,
                 failurePoint,
+                Environment.ProcessId,
                 worker.Id,
                 RecoveryProtocol.KillTreeMethod,
                 workerExitCode,
                 workerExitCode != 0,
+                RequesterAcknowledgementObserved: false,
                 result.RecoveryProcessId,
-                result.RecoveredVersion,
-                result.RecoveredStateDigest,
+                result.RecoveredBeforeRetryVersion,
+                result.RecoveredBeforeRetryStateDigest,
                 result.RetryOutcome,
-                configuredBoundMilliseconds,
-                elapsedMilliseconds,
-                elapsedMilliseconds <= configuredBoundMilliseconds,
+                result.RecoveredAfterRetryVersion,
+                result.RecoveredAfterRetryStateDigest,
+                ConfiguredRecoveryExecutionBoundMilliseconds: configuredRecoveryExecutionBoundMilliseconds,
+                RecoveryExecutionElapsedMilliseconds: elapsedMilliseconds,
+                RecoveryExecutionCompletedWithinBound:
+                    elapsedMilliseconds <= configuredRecoveryExecutionBoundMilliseconds,
                 Promotable: false);
-            evidence = evidence with { Seal = RecoveryProtocol.Seal(evidence) };
+            RecoveryProtocol.VerifySemantics(evidence);
             var evidencePath = evidenceOutputPath is null
                 ? Path.Combine(runDirectory, "recovery-evidence.json")
                 : Path.GetFullPath(evidenceOutputPath);
-            await RecoveryProtocol.WriteAsync(evidencePath, evidence, token);
-            var retained = await RecoveryProtocol.ReadAsync<RecoveryEvidence>(evidencePath, token);
-            RecoveryProtocol.Verify(retained, evidence);
-            return retained;
+            await RecoveryProtocol.WriteAsync(evidencePath, evidence, cancellationToken);
+            var evidenceFileSha256 = BenchmarkSubprocessCoordinator.DigestFile(evidencePath);
+            var retained = await RecoveryProtocol.VerifyRetainedAsync(
+                evidencePath,
+                evidenceFileSha256,
+                cancellationToken);
+            return new RecoveryProofResult(retained, evidenceFileSha256);
         }
         finally
         {
@@ -199,9 +223,9 @@ internal static class SqliteProcessFailureRecovery
         string databasePath,
         CancellationToken cancellationToken)
     {
-        await using var session = await SqliteBenchmarkTarget.InitializeRecoveryAsync(
+        var store = await SqliteBenchmarkTarget.InitializeRecoveryAsync(
             storageForm, instance, databasePath, cancellationToken);
-        var seed = await session.Store.SaveAsync(
+        var seed = await store.SaveAsync(
             RecoveryProtocol.Save(RecoveryProtocol.Content("open", 1), expectedVersion: 0), cancellationToken);
         if (seed.Status != DocumentStoreWriteStatus.Saved || seed.Document?.Version != 1)
             throw new InvalidOperationException("Recovery setup could not seed committed version 1 through the production store.");
@@ -215,7 +239,7 @@ internal static class SqliteProcessFailureRecovery
             RedirectStandardOutput = false,
             UseShellExecute = false
         };
-        startInfo.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
+        startInfo.ArgumentList.Add(RecoveryProtocol.BenchmarkAssemblyPath);
         startInfo.ArgumentList.Add(command);
         startInfo.ArgumentList.Add("--request");
         startInfo.ArgumentList.Add(requestPath);

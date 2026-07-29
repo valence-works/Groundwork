@@ -8,6 +8,8 @@ internal sealed record RecoveryProofCommand(
     string OutputPath,
     TimeSpan Bound);
 
+internal sealed record RecoveryEvidenceVerifyCommand(string EvidencePath, string ExpectedEvidenceSha256);
+
 internal static class RecoveryProofCommandLine
 {
     internal static RecoveryProofCommand Parse(IReadOnlyList<string> args)
@@ -64,5 +66,35 @@ internal static class RecoveryProofCommandLine
                 "Usage: recovery-proof --form shared|dedicated|entity --failure-point pre-commit|committed-before-ack --output <evidence.json> [--timeout-ms <positive-int>].");
         }
         return new RecoveryProofCommand(storageForm.Value, failurePoint.Value, output, TimeSpan.FromMilliseconds(timeoutMilliseconds));
+    }
+}
+
+internal static class RecoveryEvidenceVerifyCommandLine
+{
+    internal static RecoveryEvidenceVerifyCommand Parse(IReadOnlyList<string> args)
+    {
+        string? evidence = null;
+        string? expectedEvidenceSha256 = null;
+        for (var index = 1; index < args.Count; index++)
+        {
+            var option = args[index];
+            if (index + 1 >= args.Count)
+                throw new ArgumentException($"Option '{option}' requires a value.");
+            var value = args[++index];
+            switch (option)
+            {
+                case "--evidence" when evidence is null:
+                    evidence = Path.GetFullPath(value);
+                    break;
+                case "--expected-evidence-sha256" when expectedEvidenceSha256 is null:
+                    expectedEvidenceSha256 = value;
+                    break;
+                default:
+                    throw new ArgumentException($"Unknown or duplicate recovery-evidence-verify option '{option}'.");
+            }
+        }
+        if (evidence is null || expectedEvidenceSha256 is null)
+            throw new ArgumentException("Usage: recovery-evidence-verify --evidence <evidence.json> --expected-evidence-sha256 <sha256>.");
+        return new RecoveryEvidenceVerifyCommand(evidence, expectedEvidenceSha256);
     }
 }

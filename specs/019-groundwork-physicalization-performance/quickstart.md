@@ -38,34 +38,33 @@ Expected result: all Groundwork and host integration validation tests pass.
 dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --filter ProcessFailureRecovery
 ```
 
-Expected result: distinct worker processes are terminated at the pre-commit and
-committed-before-acknowledgement barriers, a distinct recovery process verifies the exact durable
-state within the configured bound, and tampered or incomplete evidence is rejected.
-
-This is a non-promotable SQLite recovery slice. It does not claim controlled four-provider
-execution, immutable-baseline approval, physical-form selection, an EF comparison, or an Elsa
-migration verdict.
+Expected result: both declared process-failure cases and the strict retained-evidence contract pass.
+See the [benchmark recovery-proof contract and nonclaims](../../benchmarks/Groundwork.PhysicalStorage.Benchmarks/README.md#bounded-sqlite-process-failure-proof)
+for the detailed barrier, replay, source-binding, timing, and external-digest semantics.
 
 ### Bounded recovery checkpoint verification
 
 Container-free candidate verification on 2026-07-29:
 
-- 41/41 focused recovery and schema tests passed.
-- 351/351 benchmark-project tests passed with the live MongoDB and relational-server integration
+- 49/49 focused recovery and schema tests passed.
+- 359/359 benchmark-project tests passed with the live MongoDB and relational-server integration
   classes excluded; no database-server container or benchmark measurement ran.
 - The benchmark executable and its test project built with compiler warnings treated as errors.
   The existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` audit advisory was retained as a
   warning rather than hidden.
+- A deliberately concurrent review build/test attempt produced a transient source-snapshot
+  mismatch while build outputs changed. This is the intended fail-closed result; the recorded gates
+  build first and then execute tests sequentially against the stable assembly closure.
 - Targeted `dotnet format --verify-no-changes` passed for every changed C# file, and
   `git diff --check` passed. Whole-project format verification still reports pre-existing
   whitespace findings in untouched benchmark files.
 - Root review caught and remediated an unbounded failure-cleanup wait, a recovery reopen path that
-  could create a missing database, incomplete retained-source validation, a process-global SQLite
-  pool reset that broke a parallel existing test, and omission of default-valued required JSON
-  members without invalidating the seal.
+  could create or mutate a missing/corrupt database, incomplete retained-source validation, a
+  process-global SQLite pool reset that broke a parallel existing test, an instrumentation barrier
+  mislabeled as requester acknowledgement, self-authenticating checksum language, and omission of
+  default-valued required JSON members.
 
-The retained evidence is a bounded process-failure correctness receipt, not a promoted performance
-artifact. The exact-range adversarial review record will be appended after the candidate is frozen.
+The exact-range adversarial review record will be appended after the candidate is frozen.
 
 ## Issue #50 Execution-Evidence Checkpoint Review
 

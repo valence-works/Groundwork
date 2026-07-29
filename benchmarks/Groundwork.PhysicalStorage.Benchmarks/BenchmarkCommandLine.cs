@@ -12,6 +12,7 @@ public static class BenchmarkCommandLine
         Usage:
           dotnet run --project benchmarks/Groundwork.PhysicalStorage.Benchmarks -- run [options]
           dotnet run --project benchmarks/Groundwork.PhysicalStorage.Benchmarks -- recovery-proof --form shared|dedicated|entity --failure-point pre-commit|committed-before-ack --output <evidence.json> [--timeout-ms <positive-int>]
+          dotnet run --project benchmarks/Groundwork.PhysicalStorage.Benchmarks -- recovery-evidence-verify --evidence <evidence.json> --expected-evidence-sha256 <sha256>
 
         Options:
           --profile smoke|scheduled       Fixed reproducibility profile (default: smoke)
