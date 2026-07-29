@@ -209,10 +209,20 @@ internal static partial class NativePlanEvidenceValidator
                    IdentifierMatches(observedIndex.Value, indexName));
     }
 
-    private static bool HasSafeParameterizedCommand(NativePlanCommandBinding binding) =>
-        !string.IsNullOrWhiteSpace(binding.ParameterizedCommand) &&
-        !ConnectionData().IsMatch(binding.ParameterizedCommand) &&
-        !SqlStringLiteral().IsMatch(binding.ParameterizedCommand);
+    private static bool HasSafeParameterizedCommand(NativePlanCommandBinding binding)
+    {
+        if (string.IsNullOrWhiteSpace(binding.ParameterizedCommand))
+            return false;
+
+        var command = binding.ParameterizedCommand.Trim();
+        if (command.EndsWith(';'))
+            command = command[..^1].TrimEnd();
+        return command.Length != 0 &&
+               !command.Contains(';') &&
+               !SqlComment().IsMatch(command) &&
+               !ConnectionData().IsMatch(command) &&
+               !SqlStringLiteral().IsMatch(command);
+    }
 
     private static bool MatchesRequestShape(
         NativePlanRequestShape? shape,
@@ -446,9 +456,12 @@ internal static partial class NativePlanEvidenceValidator
     private static partial Regex SqliteAuxiliary();
 
     [GeneratedRegex(
-        @"(?:Data\s+Source|Initial\s+Catalog|Server|Password|User\s+ID)\s*=|mongodb(?:\+srv)?://",
+        @"(?:Data\s+Source|Initial\s+Catalog|Server|Address|Addr|Network\s+Address|Database|Password|Pwd|Pass|User\s+ID|UserId|Uid|AccountKey|SharedAccessKey|Secret|Token|ApiKey|AccessKey|Trusted_Connection|Integrated\s+Security)\s*=|mongodb(?:\+srv)?://",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex ConnectionData();
+
+    [GeneratedRegex(@"--|/\*|\*/", RegexOptions.CultureInvariant)]
+    private static partial Regex SqlComment();
 
     [GeneratedRegex(@"'(?:''|[^'])*'", RegexOptions.CultureInvariant)]
     private static partial Regex SqlStringLiteral();

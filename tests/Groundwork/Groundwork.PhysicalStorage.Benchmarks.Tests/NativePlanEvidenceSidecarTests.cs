@@ -104,8 +104,10 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         Assert.True(document.RootElement.GetProperty("commandBinding").TryGetProperty("parameterizedCommand", out _));
     }
 
-    [Fact]
-    public async Task Writer_rejects_unsafe_evidence_before_writing_either_plan_artifact()
+    [Theory]
+    [InlineData("; Server=example; Password=synthetic-test-value")]
+    [InlineData(" /* Pwd=synthetic-test-value */")]
+    public async Task Writer_rejects_unsafe_evidence_before_writing_either_plan_artifact(string unsafeSuffix)
     {
         var benchmarkCase = new BenchmarkCase(
             BenchmarkProvider.Sqlite,
@@ -117,7 +119,7 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             CommandBinding = evidence.CommandBinding! with
             {
                 ParameterizedCommand =
-                    $"{evidence.CommandBinding!.ParameterizedCommand}; Server=example; Password=synthetic-test-value"
+                    $"{evidence.CommandBinding!.ParameterizedCommand}{unsafeSuffix}"
             }
         };
         await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));

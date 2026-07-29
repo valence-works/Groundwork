@@ -223,41 +223,36 @@ internal static partial class NativePlanCommandParsing
     private static bool AggregatePageStagesAreValid(BsonDocument command)
     {
         var stages = MongoPipelineStages(command).ToArray();
-        if (stages.Length == 0 ||
-            stages.Any(stage => stage.ElementCount != 1 || IsMongoCountStage(stage)))
+        if (stages.Length == 0 || stages.Any(stage => stage.ElementCount != 1))
         {
             return false;
         }
 
-        var sorts = StageIndexes(stages, "$sort");
-        var skips = StageIndexes(stages, "$skip");
-        var limits = StageIndexes(stages, "$limit");
-        return sorts.Length <= 1 &&
-               skips.Length <= 1 &&
-               limits.Length == 1 &&
-               (sorts.Length == 0 || sorts[0] < limits[0]) &&
-               (skips.Length == 0 || skips[0] < limits[0]) &&
-               (sorts.Length == 0 || skips.Length == 0 || sorts[0] < skips[0]);
+        var names = stages.Select(stage => stage.GetElement(0).Name).ToArray();
+        var index = 0;
+        while (index < names.Length && names[index] == "$match")
+            index++;
+        if (index == 0)
+            return false;
+        while (index < names.Length && names[index] == "$project")
+            index++;
+        if (index < names.Length && names[index] == "$sort")
+            index++;
+        if (index < names.Length && names[index] == "$skip")
+            index++;
+        return index == names.Length - 1 && names[index] == "$limit";
     }
 
     private static bool AggregateCountStagesAreValid(BsonDocument command)
     {
         var stages = MongoPipelineStages(command).ToArray();
-        if (stages.Length == 0 ||
-            stages.Any(stage => stage.ElementCount != 1 ||
-                                stage.Contains("$sort") ||
-                                stage.Contains("$skip") ||
-                                stage.Contains("$limit")))
+        if (stages.Length < 2 || stages.Any(stage => stage.ElementCount != 1))
         {
             return false;
         }
 
-        var terminals = stages
-            .Select((stage, index) => (stage, index))
-            .Where(item => IsMongoCountStage(item.stage))
-            .Select(item => item.index)
-            .ToArray();
-        return terminals.Length == 1 && terminals[0] == stages.Length - 1;
+        return stages[..^1].All(stage => stage.Contains("$match")) &&
+               IsMongoCountStage(stages[^1]);
     }
 
     private static bool IsMongoCountStage(BsonDocument stage) =>
@@ -267,14 +262,6 @@ internal static partial class NativePlanCommandParsing
         group.AsBsonDocument.Elements.Any(element =>
             element.Value.IsBsonDocument &&
             element.Value.AsBsonDocument.Contains("$sum"));
-
-    private static int[] StageIndexes(
-        IReadOnlyList<BsonDocument> stages,
-        string member) =>
-        stages.Select((stage, index) => (stage, index))
-            .Where(item => item.stage.Contains(member))
-            .Select(item => item.index)
-            .ToArray();
 
     private static IReadOnlyList<NativePlanFilterShape> MongoFilters(
         BsonDocument command,

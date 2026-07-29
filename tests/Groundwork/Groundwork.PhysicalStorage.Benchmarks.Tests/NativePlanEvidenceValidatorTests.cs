@@ -494,6 +494,60 @@ public sealed class NativePlanEvidenceValidatorTests
     }
 
     [Fact]
+    public void MongoDB_rejects_an_ordered_aggregate_page_that_filters_after_limiting()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.PaginationAndCount])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$sort": { "rank": -1 } },
+              { "$limit": 20 },
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } }
+            ] }
+            """);
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_unordered_aggregate_page_that_filters_after_limiting()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        Assert.False(request.Ordered);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$limit": 20 },
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } }
+            ] }
+            """);
+    }
+
+    [Fact]
+    public void MongoDB_rejects_a_noncanonical_cardinality_changing_page_stage()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+              { "$group": { "_id": "$status" } },
+              { "$limit": 20 }
+            ] }
+            """);
+    }
+
+    [Fact]
     public void MongoDB_rejects_an_aggregate_page_that_contains_a_count_terminal()
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.PaginationAndCount])
@@ -618,6 +672,26 @@ public sealed class NativePlanEvidenceValidatorTests
             binding,
             nativePlan,
             assertions);
+    }
+
+    private static void AssertMongoCommandRejected(
+        BenchmarkPlanRequest request,
+        PhysicalDocumentQueryCommandKind kind,
+        string command)
+    {
+        const NativePlanAssertionMode mode = NativePlanAssertionMode.ScanCharacterization;
+        var original = Binding(BenchmarkProvider.MongoDb, request, mode);
+        var binding = original with
+        {
+            MongoCommandReceipt = new NativePlanMongoCommandReceipt(kind, command)
+        };
+
+        Assert.False(Matches(
+            BenchmarkProvider.MongoDb,
+            mode,
+            request,
+            binding,
+            NativePlan(BenchmarkProvider.MongoDb)));
     }
 
     private static NativePlanCommandBinding Binding(
