@@ -52,10 +52,11 @@ public sealed class SqlServerBenchmarkTarget(
         var store = RelationalTenantA;
         await using var connection = new SqlConnection(ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        var indexName = Model.Route.Indexes.Single().Name.Identifier;
+        var fields = BenchmarkModelFactory.FieldBindingFor(Model.Route);
         var evidence = new List<NativePlanEvidence>(requests.Count);
         foreach (var request in requests)
         {
+            var indexName = BenchmarkModelFactory.IndexFor(Model.Route, request.Ordered).Name.Identifier;
             var rendered = RenderPlan(request, store);
             await using var command = connection.CreateCommand();
             command.CommandText = $"SET STATISTICS XML ON; {rendered.CommandText} SET STATISTICS XML OFF;";
@@ -65,33 +66,54 @@ public sealed class SqlServerBenchmarkTarget(
             var plans = await SqlServerShowplanReader.ReadAsync(reader, cancellationToken);
             var plan = plans.SingleOrDefault() ?? throw new InvalidOperationException(
                 $"SQL Server returned no native XML plan for {request.Workload}/{request.Operation}.");
-            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
+            var physicalObject = (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier;
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
+                !UsesDeclaredIndex(plan, indexName, physicalObject))
             {
-                try
-                {
-                    SqlServerShowplanReader.EnsureScaleBearingIndex(plan, indexName);
-                }
-                catch (InvalidOperationException exception)
-                {
-                    throw new InvalidOperationException(
-                        $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.",
-                        exception);
-                }
+                throw new InvalidOperationException(
+                    $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.");
             }
+            var queryReceipt = NativePlanQueryReceipt.FromRelational(
+                request,
+                assertionMode,
+                rendered.CommandText,
+                rendered.Parameters,
+                fields);
             evidence.Add(new NativePlanEvidence(
                 request,
-                Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
-                (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier,
+                Provider, StorageForm, BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
+                physicalObject,
                 indexName, plan,
-                NativePlanEvidenceAssertions.For(
-                    assertionMode,
-                    [
-                        "declared index is selected",
-                        "table and index scans are absent",
-                        "query shape is rendered by the certified production handler"
-                    ])));
+                NativePlanEvidenceAssertions.ForSqlServer(assertionMode))
+            {
+                CommandBinding = new NativePlanCommandBinding(
+                    physicalObject,
+                    Model.Route.LinkedIndexStorage is null ? "p" : "l",
+                    rendered.CommandText,
+                    queryReceipt.Shape,
+                    queryReceipt)
+                {
+                    Fields = fields
+                }
+            });
         }
         return evidence;
+    }
+
+    internal static bool UsesDeclaredIndex(
+        string nativePlan,
+        string indexName,
+        string physicalObject)
+    {
+        try
+        {
+            SqlServerShowplanReader.EnsureScaleBearingIndex(nativePlan, indexName, physicalObject);
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.Xml.XmlException)
+        {
+            return false;
+        }
     }
 
     public override async Task<StorageSnapshot> CaptureStorageAsync(CancellationToken cancellationToken)

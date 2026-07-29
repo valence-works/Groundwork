@@ -28,7 +28,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         };
         var runner = new BenchmarkRunner(null, () => environment);
 
-        await runner.RunAsync(
+        var result = await runner.RunAsync(
             new BenchmarkRunRequest(
                 FindRepositoryRoot(),
                 configuration,
@@ -54,7 +54,12 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         Assert.Equal(0, measured.PlanCalls);
         Assert.Equal(1, plans.PlanCalls);
         Assert.Equal([NativePlanAssertionMode.RequireDeclaredIndex], plans.PlanAssertionModes);
-        Assert.Equal(configuration.MeasurementIterations, measured.ExecuteCalls);
+        Assert.Equal(
+            configuration.WarmupIterations + configuration.MeasurementIterations,
+            measured.ExecuteCalls);
+        Assert.Equal(
+            configuration.MeasurementIterations,
+            Assert.Single(result.Report.Cases).Samples.Count);
         Assert.Equal(0, plans.ExecuteCalls);
         Assert.True(measured.Disposed);
         Assert.True(plans.Disposed);
@@ -166,6 +171,37 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Concurrent_create_rejects_a_target_that_omits_synchronized_contention_evidence()
+    {
+        var environment = new RecordingEnvironment();
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            DatasetSize = 10,
+            MigrationDatasetSize = 1,
+            WarmupIterations = 1,
+            MeasurementIterations = 5,
+            OperationsPerIteration = 1,
+            Concurrency = 2,
+            Providers = [BenchmarkProvider.Sqlite],
+            StorageForms = [PhysicalStorageForm.SharedDocuments]
+        };
+        var runner = new BenchmarkRunner(null, () => environment);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
+            new BenchmarkRunRequest(
+                FindRepositoryRoot(),
+                configuration,
+                [BenchmarkWorkload.ConcurrentCreate],
+                output,
+                null,
+                AllowContainers: false,
+                RegressionConfirmationRun: false),
+            CancellationToken.None));
+
+        Assert.Contains("concurrent-create requires complete synchronized-contention evidence", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Measured_run_continues_whole_samples_until_operation_and_steady_state_floors_are_met()
     {
         var clock = new ManualTimeProvider();
@@ -197,7 +233,7 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
 
         var measured = Assert.Single(environment.Targets);
         var samples = Assert.Single(result.Report.Cases).Samples;
-        Assert.Equal(6, measured.ExecuteCalls);
+        Assert.Equal(configuration.WarmupIterations + 6, measured.ExecuteCalls);
         Assert.Equal(6, samples.Count);
         Assert.Equal(150, samples.Sum(sample => sample.Operations));
         Assert.Equal(150, samples.Sum(sample => sample.OperationLatencyNanoseconds.Count));
@@ -444,8 +480,53 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         {
             PlanCalls++;
             PlanAssertionModes.Add(assertionMode);
-            return Task.FromResult<IReadOnlyList<NativePlanEvidence>>(requests.Select(request => new NativePlanEvidence(
-                request, Provider.ToString(), StorageForm.ToString(), "query", "table", "index", "plan", ["assertion"])).ToArray());
+            return Task.FromResult<IReadOnlyList<NativePlanEvidence>>(requests
+                .Select(request => PlanEvidence(request, assertionMode))
+                .ToArray());
+        }
+
+        private NativePlanEvidence PlanEvidence(
+            BenchmarkPlanRequest request,
+            NativePlanAssertionMode assertionMode)
+        {
+            var command = request.Operation == NativePlanOperation.Count
+                ? "SELECT COUNT(*) FROM \"table\" AS l WHERE l.\"storage_scope\" = @scope AND l.\"document_kind\" = @kind AND l.\"status\" = @q0"
+                : $"SELECT * FROM \"table\" AS l WHERE l.\"storage_scope\" = @scope AND l.\"document_kind\" = @kind AND l.\"status\" = @q0" +
+                  (request.Ordered ? " ORDER BY l.\"rank\" DESC" : string.Empty) +
+                  " LIMIT @take OFFSET @skip";
+            var parameters = new List<(string Name, object? Value)>
+            {
+                ("scope", "tenant-a"),
+                ("kind", "benchmark-document"),
+                ("q0", "open")
+            };
+            if (request.Operation == NativePlanOperation.Selection)
+            {
+                parameters.Add(("skip", request.Skip ?? 0));
+                parameters.Add(("take", request.Take));
+            }
+            var receipt = NativePlanQueryReceipt.FromRelational(
+                request,
+                assertionMode,
+                command,
+                parameters,
+                NativePlanTestBindings.CanonicalFields);
+            const string nativePlan = "SEARCH l USING INDEX index (status=?)";
+            return new NativePlanEvidence(
+                request,
+                Provider,
+                StorageForm,
+                BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
+                "table",
+                "index",
+                nativePlan,
+                NativePlanEvidenceAssertions.ForSqlite(assertionMode, "index", nativePlan))
+            {
+                CommandBinding = new NativePlanCommandBinding("table", "l", command, receipt.Shape, receipt)
+                {
+                    Fields = NativePlanTestBindings.CanonicalFields
+                }
+            };
         }
 
         public Task PrepareWorkloadAsync(BenchmarkWorkload workload, int totalIterations, int operationsPerIteration, CancellationToken cancellationToken) =>

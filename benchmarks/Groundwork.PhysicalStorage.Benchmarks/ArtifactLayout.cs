@@ -5,7 +5,7 @@ public sealed class ArtifactLayout
     public ArtifactLayout(string root)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
-        Root = Path.GetFullPath(root);
+        Root = BenchmarkArtifactPaths.RequireRoot(root, create: true);
     }
 
     public string Root { get; }
@@ -22,7 +22,13 @@ public sealed class ArtifactLayout
     public string Configuration => Path.Combine(Root, "metadata", "configuration.json");
 
     public string RelativePath(string path) =>
-        Path.GetRelativePath(Root, path).Replace(Path.DirectorySeparatorChar, '/');
+        BenchmarkArtifactPaths.Relative(Root, path, "Artifact").Replace(Path.DirectorySeparatorChar, '/');
+
+    public string ExistingPath(string path, string description) =>
+        BenchmarkArtifactPaths.ResolveAbsoluteExisting(Root, path, description);
+
+    public string WritablePath(string path, string description) =>
+        BenchmarkArtifactPaths.ResolveAbsoluteForWrite(Root, path, description);
 
     public void RequireEmptyOutput()
     {
@@ -49,7 +55,7 @@ public sealed class ArtifactLayout
                          BenchmarkWorkload.IndexedQuery), NativePlanOperation.Selection, "txt")
                  })
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+            _ = WritablePath(file, "Artifact output");
         }
     }
 }

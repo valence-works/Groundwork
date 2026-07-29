@@ -144,7 +144,7 @@ public sealed class RelationalServerBenchmarkTargetTests(
         BenchmarkPhysicalModel model,
         CancellationToken cancellationToken)
     {
-        var index = model.Route.Indexes.Single();
+        var index = BenchmarkModelFactory.IndexFor(model.Route, ordered: true);
         var table = (model.Route.LinkedIndexStorage ?? model.Route.PrimaryStorage).Name.Identifier;
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -158,7 +158,7 @@ public sealed class RelationalServerBenchmarkTargetTests(
         BenchmarkPhysicalModel model,
         CancellationToken cancellationToken)
     {
-        var index = model.Route.Indexes.Single();
+        var index = BenchmarkModelFactory.IndexFor(model.Route, ordered: true);
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();

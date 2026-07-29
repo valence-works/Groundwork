@@ -63,10 +63,11 @@ public sealed class PostgreSqlBenchmarkTarget(
         var store = RelationalTenantA;
         await using var connection = new NpgsqlConnection(ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        var indexName = Model.Route.Indexes.Single().Name.Identifier;
+        var fields = BenchmarkModelFactory.FieldBindingFor(Model.Route);
         var evidence = new List<NativePlanEvidence>(requests.Count);
         foreach (var request in requests)
         {
+            var indexName = BenchmarkModelFactory.IndexFor(Model.Route, request.Ordered).Name.Identifier;
             var rendered = RenderPlan(request, store);
             await using var command = connection.CreateCommand();
             command.CommandText = $"EXPLAIN (FORMAT JSON) {rendered.CommandText}";
@@ -80,19 +81,29 @@ public sealed class PostgreSqlBenchmarkTarget(
                 throw new InvalidOperationException(
                     $"PostgreSQL native-plan gate rejected {request.Workload}/{request.Operation}. Expected index '{indexName}'.{Environment.NewLine}{plan}");
             }
+            var queryReceipt = NativePlanQueryReceipt.FromRelational(
+                request,
+                assertionMode,
+                rendered.CommandText,
+                rendered.Parameters,
+                fields);
             evidence.Add(new NativePlanEvidence(
                 request,
-                Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
+                Provider, StorageForm, BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
                 indexedRelation,
                 indexName, plan,
-                NativePlanEvidenceAssertions.For(
-                    assertionMode,
-                    [
-                        "declared index is selected on the predicate-bearing relation",
-                        "the predicate-bearing relation is not sequentially scanned",
-                        "an optimizer-selected scan of a separate primary payload relation is permitted for linked forms",
-                        "query shape is rendered by the certified production handler"
-                    ])));
+                NativePlanEvidenceAssertions.ForPostgreSql(assertionMode))
+            {
+                CommandBinding = new NativePlanCommandBinding(
+                    indexedRelation,
+                    Model.Route.LinkedIndexStorage is null ? "p" : "l",
+                    rendered.CommandText,
+                    queryReceipt.Shape,
+                    queryReceipt)
+                {
+                    Fields = fields
+                }
+            });
         }
         return evidence;
     }
@@ -125,10 +136,9 @@ public sealed class PostgreSqlBenchmarkTarget(
                 var relation = element.TryGetProperty("Relation Name", out var relationElement)
                     ? relationElement.GetString()
                     : null;
-                var selectedIndex = element.TryGetProperty("Index Name", out var indexElement)
-                    ? indexElement.GetString()
-                    : null;
-                declaredIndexSelected |= string.Equals(selectedIndex, indexName, StringComparison.OrdinalIgnoreCase);
+                declaredIndexSelected |=
+                    string.Equals(relation, indexedRelation, StringComparison.OrdinalIgnoreCase) &&
+                    ContainsIndex(element, indexName);
                 indexedRelationScanned |=
                     string.Equals(nodeType, "Seq Scan", StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(relation, indexedRelation, StringComparison.OrdinalIgnoreCase);
@@ -142,6 +152,22 @@ public sealed class PostgreSqlBenchmarkTarget(
             else if (element.ValueKind == JsonValueKind.Array)
                 foreach (var child in element.EnumerateArray())
                     Visit(child);
+        }
+
+        static bool ContainsIndex(JsonElement element, string expectedIndex)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                if (element.TryGetProperty("Index Name", out var index) &&
+                    index.ValueKind == JsonValueKind.String &&
+                    string.Equals(index.GetString(), expectedIndex, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                return element.EnumerateObject().Any(property => ContainsIndex(property.Value, expectedIndex));
+            }
+            return element.ValueKind == JsonValueKind.Array &&
+                   element.EnumerateArray().Any(child => ContainsIndex(child, expectedIndex));
         }
     }
 

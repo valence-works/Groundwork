@@ -6,6 +6,35 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["case", "sample"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "case": {
+            "properties": { "workload": { "const": "concurrentCreate" } },
+            "required": ["workload"]
+          }
+        },
+        "required": ["case"]
+      },
+      "then": {
+        "properties": {
+          "sample": {
+            "properties": { "concurrentLoad": { "$ref": "#/$defs/concurrentLoad" } },
+            "required": ["concurrentLoad"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "sample": {
+            "properties": { "concurrentLoad": { "type": "null" } },
+            "required": ["concurrentLoad"]
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "case": { "$ref": "#/$defs/case" },
     "sample": { "$ref": "#/$defs/sample" }
@@ -86,6 +115,7 @@
         "logicalMutations",
         "providerWork",
         "databaseSignal",
+        "concurrentLoad",
         "operationLatencyNanoseconds",
         "throughputOperationsPerSecond",
         "allocatedBytesPerOperation"
@@ -102,6 +132,9 @@
         "storageAfter": { "oneOf": [{ "$ref": "#/$defs/storage" }, { "type": "null" }] },
         "providerWork": { "$ref": "#/$defs/integerMap" },
         "databaseSignal": { "$ref": "#/$defs/databaseSignal" },
+        "concurrentLoad": {
+          "oneOf": [{ "$ref": "#/$defs/concurrentLoad" }, { "type": "null" }]
+        },
         "operationLatencyNanoseconds": {
           "type": "array",
           "minItems": 1,
@@ -176,6 +209,30 @@
         "commandStarts": { "type": ["integer", "null"], "minimum": 1 },
         "clientActivities": { "type": ["integer", "null"], "minimum": 1 },
         "observableRoundTrips": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "concurrentLoad": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedParallelism",
+        "waveCount",
+        "releasedTogetherWaveCount",
+        "attempts",
+        "completions",
+        "successfulOperations",
+        "conflictOperations",
+        "peakInFlightProductionStoreCalls"
+      ],
+      "properties": {
+        "requestedParallelism": { "type": "integer", "minimum": 1 },
+        "waveCount": { "type": "integer", "minimum": 1 },
+        "releasedTogetherWaveCount": { "type": "integer", "minimum": 0 },
+        "attempts": { "type": "integer", "minimum": 1 },
+        "completions": { "type": "integer", "minimum": 1 },
+        "successfulOperations": { "type": "integer", "minimum": 1 },
+        "conflictOperations": { "type": "integer", "minimum": 0 },
+        "peakInFlightProductionStoreCalls": { "type": "integer", "minimum": 1 }
       }
     },
     "integerMap": {

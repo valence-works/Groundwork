@@ -23,12 +23,28 @@ public sealed class BenchmarkModelFactoryTests
         Assert.Equal(form, model.Route.Form);
         Assert.Equal(expectsLinkedStorage, model.Route.LinkedIndexStorage is not null);
         Assert.Collection(
-            Assert.Single(model.Route.Indexes).Columns,
+            BenchmarkModelFactory.IndexFor(model.Route, ordered: false).Columns,
+            scope => Assert.Equal("storage_scope", scope.Column.LogicalName),
+            status => Assert.Equal(PhysicalSortDirection.Ascending, status.Direction));
+        Assert.Collection(
+            BenchmarkModelFactory.IndexFor(model.Route, ordered: true).Columns,
             scope => Assert.Equal("storage_scope", scope.Column.LogicalName),
             status => Assert.Equal(PhysicalSortDirection.Ascending, status.Direction),
             rank => Assert.Equal(PhysicalSortDirection.Descending, rank.Direction));
-        Assert.Equal(BenchmarkModelFactory.QueryIdentity,
-            Assert.Single(model.Manifest.StorageUnits.Single().PhysicalStorage!.BoundedQueries).Identity);
+        Assert.Equal(
+            [BenchmarkModelFactory.IndexedQueryIdentity, BenchmarkModelFactory.QueryIdentity],
+            model.Manifest.StorageUnits.Single().PhysicalStorage!.BoundedQueries.Select(query => query.Identity));
+        var fields = BenchmarkModelFactory.FieldBindingFor(model.Route);
+        Assert.Equal(
+            model.Route.LinkedRelationship?.StorageScope.Identifier ?? model.Route.ScopeKey.Column.Identifier,
+            fields.StorageScope);
+        Assert.Equal(
+            model.Route.LinkedRelationship?.DocumentKind.Identifier ?? model.Route.Discriminator.Column.Identifier,
+            fields.DocumentKind);
+        Assert.EndsWith(
+            expectsLinkedStorage ? "document_id_comparison_key" : "id_comparison_key",
+            fields.IdentityComparison,
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -50,6 +66,6 @@ public sealed class BenchmarkModelFactoryTests
             BenchmarkModelFactory.NamePolicy(instance));
 
         Assert.Equal(factoryTarget.Fingerprint, model.Target.Fingerprint);
-        Assert.Equal(factoryTarget.Routes.Single().Indexes.Single(), model.Route.Indexes.Single());
+        Assert.Equal(factoryTarget.Routes.Single().Indexes, model.Route.Indexes);
     }
 }

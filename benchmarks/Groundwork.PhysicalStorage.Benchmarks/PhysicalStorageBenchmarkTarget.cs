@@ -279,7 +279,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
     protected static DocumentQuery Query(int? skip = null, int? take = null, bool includeOrdering = true) =>
         new(
             BenchmarkModelFactory.DocumentKind,
-            BenchmarkModelFactory.QueryIdentity,
+            BenchmarkModelFactory.QueryIdentityFor(includeOrdering),
             [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "open"))],
             includeOrdering ? [new DocumentQueryOrder("rank", PhysicalSortDirection.Descending)] : null,
             skip,
@@ -540,21 +540,31 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
         CancellationToken cancellationToken)
     {
         long payloadBytes = 0;
+        var concurrentLoad = new ConcurrentLoadEvidenceCollector(concurrency);
         var observed = new BenchmarkObservableResultBuilder();
         for (var batch = 0; batch < batches; batch++)
         {
             var id = NewId("concurrent");
+            concurrentLoad.BeginWave();
             var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var attempts = Enumerable.Range(0, concurrency).Select(async index =>
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var readyCount = 0;
+            var waveAttempts = Enumerable.Range(0, concurrency).Select(async index =>
             {
                 await start.Task.WaitAsync(cancellationToken);
                 var payload = Payload("open", index, "concurrent", payloadProfile.PaddingBytes);
+                if (Interlocked.Increment(ref readyCount) == concurrency)
+                    release.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
                 var timestamp = Stopwatch.GetTimestamp();
-                var result = await TenantA.SaveAsync(Save(id, payload), cancellationToken);
-                return (Attempt: index, Result: result, Payload: payload, Latency: ElapsedNanoseconds(timestamp));
+                using (concurrentLoad.EnterProductionStoreCall())
+                {
+                    var result = await TenantA.SaveAsync(Save(id, payload), cancellationToken);
+                    return (Attempt: index, Result: result, Payload: payload, Latency: ElapsedNanoseconds(timestamp));
+                }
             }).ToArray();
             start.SetResult();
-            var results = await Task.WhenAll(attempts);
+            var results = await Task.WhenAll(waveAttempts);
             if (results.Count(result => result.Result.Status == DocumentStoreWriteStatus.Saved) != 1 ||
                 results.Count(result => result.Result.Status == DocumentStoreWriteStatus.ConcurrencyConflict) != concurrency - 1)
             {
@@ -567,6 +577,11 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
                 "concurrent-create winner",
                 winner.Payload);
             payloadBytes += results.Sum(result => Encoding.UTF8.GetByteCount(result.Payload));
+            concurrentLoad.CompleteWave(
+                results.Count(result => result.Result.Status == DocumentStoreWriteStatus.Saved),
+                results.Count(result => result.Result.Status == DocumentStoreWriteStatus.ConcurrencyConflict),
+                releasedTogether: Volatile.Read(ref readyCount) == concurrency &&
+                                  release.Task.IsCompletedSuccessfully);
             foreach (var result in results)
                 operationLatencies.Add(result.Latency);
             observed.Add(
@@ -576,11 +591,17 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
                 concurrency,
                 NormalizeConcurrentPayload(winnerDocument.ContentJson, concurrency));
         }
+        var concurrentEvidence = concurrentLoad.Build();
+        if (!concurrentEvidence.MeetsConfiguredContention(concurrency, batches))
+            throw new InvalidOperationException("Concurrent-create workload did not retain complete synchronized-contention evidence.");
         return Execution(
             batches * concurrency,
             payloadBytes,
             batches,
-            observableResultVector: observed.Build());
+            observableResultVector: observed.Build()) with
+        {
+            ConcurrentLoad = concurrentEvidence
+        };
     }
 
     private async Task<WorkloadExecution> PaginationAndCountAsync(

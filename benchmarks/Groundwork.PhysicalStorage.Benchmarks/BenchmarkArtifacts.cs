@@ -240,13 +240,18 @@ public sealed class BenchmarkDataShapeJsonConverter : JsonConverter<BenchmarkDat
 public sealed class BenchmarkArtifactWriter : IAsyncDisposable
 {
     private readonly StreamWriter rawWriter;
+    private BenchmarkRunConfiguration? configuration;
 
     public BenchmarkArtifactWriter(ArtifactLayout layout)
     {
         Layout = layout ?? throw new ArgumentNullException(nameof(layout));
         Layout.CreateDirectories();
         rawWriter = new StreamWriter(
-            new FileStream(Layout.RawMeasurements, FileMode.Create, FileAccess.Write, FileShare.Read),
+            new FileStream(
+                Layout.WritablePath(Layout.RawMeasurements, "Raw measurements"),
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.Read),
             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
         {
             AutoFlush = true
@@ -256,21 +261,27 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     public ArtifactLayout Layout { get; }
 
     public Task WriteManifestAsync(BenchmarkRunManifest manifest, CancellationToken cancellationToken) =>
-        WriteJsonAsync(Layout.Manifest, manifest, cancellationToken);
+        WriteJsonAsync(Layout.WritablePath(Layout.Manifest, "Run manifest"), manifest, cancellationToken);
 
     public Task WriteMachineAsync(BenchmarkMachineMetadata metadata, CancellationToken cancellationToken) =>
-        WriteJsonAsync(Layout.MachineMetadata, metadata, cancellationToken);
+        WriteJsonAsync(Layout.WritablePath(Layout.MachineMetadata, "Machine metadata"), metadata, cancellationToken);
 
     public Task WriteProvidersAsync(IReadOnlyList<BenchmarkProviderMetadata> providers, CancellationToken cancellationToken) =>
-        WriteJsonAsync(Layout.ProviderMetadata, providers, cancellationToken);
+        WriteJsonAsync(Layout.WritablePath(Layout.ProviderMetadata, "Provider metadata"), providers, cancellationToken);
 
-    public Task WriteConfigurationAsync(BenchmarkRunConfiguration configuration, CancellationToken cancellationToken) =>
-        WriteJsonAsync(Layout.Configuration, configuration, cancellationToken);
+    public Task WriteConfigurationAsync(BenchmarkRunConfiguration configuration, CancellationToken cancellationToken)
+    {
+        this.configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        return WriteJsonAsync(Layout.WritablePath(Layout.Configuration, "Run configuration"), configuration, cancellationToken);
+    }
 
     public Task WriteConsumerEvidenceAsync(
         BenchmarkConsumerEvidenceReport report,
         CancellationToken cancellationToken) =>
-        WriteImmutableJsonAsync(Layout.ConsumerEvidenceJson, report, cancellationToken);
+        WriteImmutableJsonAsync(
+            Layout.WritablePath(Layout.ConsumerEvidenceJson, "Consumer evidence"),
+            report,
+            cancellationToken);
 
     public async Task WriteArtifactIntegrityAsync(
         BenchmarkRunManifest manifest,
@@ -283,12 +294,15 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             throw new InvalidOperationException("Only a completed manifest with an integrity location can be sealed.");
         }
 
+        VerifyManifestArtifactPaths(Layout, manifest);
         await rawWriter.FlushAsync(cancellationToken);
         var required = new List<string>
         {
             Layout.RelativePath(Layout.Manifest),
             manifest.RawMeasurements,
             manifest.Summary,
+            Layout.RelativePath(Layout.SummaryMarkdown),
+            Layout.RelativePath(Layout.RegressionJson),
             manifest.ElsaMigrationEvidence,
             manifest.MachineMetadata,
             manifest.ProviderMetadata,
@@ -310,7 +324,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
                 DigestFile(ResolveArtifact(Layout, relative))))
             .ToArray();
         await WriteImmutableJsonAsync(
-            Layout.ArtifactIntegrityJson,
+            Layout.WritablePath(Layout.ArtifactIntegrityJson, "Artifact-integrity ledger"),
             new BenchmarkArtifactIntegrity(BenchmarkArtifactIntegrity.ContractVersion, manifest.RunId, artifacts),
             cancellationToken);
     }
@@ -320,6 +334,16 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(record);
         if (!record.Sample.HasValidDatabaseSignalEvidence())
             throw new InvalidOperationException("Raw measurements require valid target-scoped database-signal evidence.");
+        if (record.Case.Workload == BenchmarkWorkload.ConcurrentCreate && configuration is null)
+            throw new InvalidOperationException("Concurrent-create raw measurements require the exact run configuration.");
+        if (!record.Sample.HasValidConcurrentLoadEvidence(
+                record.Case.Workload,
+                configuration?.Concurrency,
+                configuration?.OperationsPerIteration))
+        {
+            throw new InvalidOperationException(
+                "Raw measurements require complete concurrent-create evidence and forbid it for other workloads.");
+        }
         var line = JsonSerializer.Serialize(record, BenchmarkJson.CompactOptions);
         await rawWriter.WriteLineAsync(line.AsMemory(), cancellationToken);
     }
@@ -327,38 +351,93 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     public async Task<string> WritePlanAsync(
         BenchmarkCase benchmarkCase,
         NativePlanEvidence evidence,
+        NativePlanAssertionMode assertionMode,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(benchmarkCase);
         ArgumentNullException.ThrowIfNull(evidence);
-        if (benchmarkCase.Workload != evidence.Request.Workload)
+        var admittedEvidence = evidence with
+        {
+            NativePlan = ProviderNativePlanRetention.Retain(
+                evidence.Provider,
+                evidence.NativePlan,
+                evidence.PhysicalObject,
+                evidence.IndexName,
+                evidence.CommandBinding?.Alias,
+                assertionMode)
+        };
+        if (benchmarkCase.Workload != admittedEvidence.Request.Workload ||
+            benchmarkCase.Provider != admittedEvidence.Provider ||
+            benchmarkCase.StorageForm != admittedEvidence.StorageForm ||
+            !HasAdmissibleRawCommand(benchmarkCase.Provider, admittedEvidence.CommandBinding) ||
+            !string.Equals(
+                admittedEvidence.QueryIdentity,
+                BenchmarkModelFactory.QueryIdentityFor(admittedEvidence.Request.Ordered),
+                StringComparison.Ordinal) ||
+            !NativePlanEvidenceAssertions.Matches(
+                assertionMode,
+                admittedEvidence.Request,
+                benchmarkCase.Provider,
+                admittedEvidence.IndexName,
+                admittedEvidence.PhysicalObject,
+                admittedEvidence.CommandBinding,
+                admittedEvidence.NativePlan,
+                admittedEvidence.Assertions))
         {
             throw new InvalidOperationException(
-                $"Plan evidence for '{evidence.Request.Workload}' cannot be written for case '{benchmarkCase.Identity}'.");
+                $"Native-plan evidence cannot be admitted for case '{benchmarkCase.Identity}'.");
         }
-        var extension = benchmarkCase.Provider switch
-        {
-            BenchmarkProvider.SqlServer => "xml",
-            BenchmarkProvider.PostgreSql or BenchmarkProvider.MongoDb => "json",
-            _ => "txt"
-        };
-        var path = Layout.Plan(benchmarkCase, evidence.Request.Operation, extension);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, evidence.NativePlan, cancellationToken);
-        await WriteJsonAsync(path + ".assertions.json", evidence, cancellationToken);
+        var retainedEvidence = RetainedPlanEvidence(admittedEvidence);
+        NativePlanEvidenceSidecar.ValidateForWrite(retainedEvidence);
+        var extension = PlanExtension(benchmarkCase.Provider);
+        var path = Layout.WritablePath(
+            Layout.Plan(benchmarkCase, admittedEvidence.Request.Operation, extension),
+            "Native-plan evidence");
+        await File.WriteAllTextAsync(path, admittedEvidence.NativePlan, cancellationToken);
+        await WriteJsonAsync(
+            Layout.WritablePath(path + ".assertions.json", "Native-plan assertion evidence"),
+            retainedEvidence,
+            cancellationToken);
         return Path.GetRelativePath(Layout.Root, path).Replace(Path.DirectorySeparatorChar, '/');
+    }
+
+    private static bool HasAdmissibleRawCommand(
+        BenchmarkProvider provider,
+        NativePlanCommandBinding? binding) =>
+        binding is not null &&
+        binding.ParameterizedCommandDigest is null &&
+        (provider == BenchmarkProvider.MongoDb
+            ? binding.ParameterizedCommand is null && binding.MongoCommandReceipt is not null
+            : !string.IsNullOrWhiteSpace(binding.ParameterizedCommand) && binding.MongoCommandReceipt is null);
+
+    private static NativePlanEvidence RetainedPlanEvidence(NativePlanEvidence evidence)
+    {
+        if (evidence.Provider == BenchmarkProvider.MongoDb)
+            return evidence;
+
+        var binding = evidence.CommandBinding!;
+        var digest = Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(binding.ParameterizedCommand!)));
+        return evidence with
+        {
+            CommandBinding = binding with
+            {
+                ParameterizedCommand = null,
+                ParameterizedCommandDigest = $"sha256:{digest}"
+            }
+        };
     }
 
     public async Task WriteReportAsync(BenchmarkRunReport report, CancellationToken cancellationToken)
     {
-        VerifyReportSamples(report);
-        await WriteJsonAsync(Layout.SummaryJson, report, cancellationToken);
-        await WriteJsonAsync(Layout.RegressionJson, report.Regressions, cancellationToken);
+        VerifyReportSamples(report, configuration);
+        await WriteJsonAsync(Layout.WritablePath(Layout.SummaryJson, "Run summary"), report, cancellationToken);
+        await WriteJsonAsync(Layout.WritablePath(Layout.RegressionJson, "Regression report"), report.Regressions, cancellationToken);
         await WriteJsonAsync(
-            Layout.ElsaMigrationEvidenceJson,
+            Layout.WritablePath(Layout.ElsaMigrationEvidenceJson, "Elsa migration evidence"),
             ElsaMigrationEvidenceReport.From(report),
             cancellationToken);
-        await WriteTextAsync(Layout.SummaryMarkdown, Markdown(report), cancellationToken);
+        await WriteTextAsync(Layout.WritablePath(Layout.SummaryMarkdown, "Run summary markdown"), Markdown(report), cancellationToken);
     }
 
     public async ValueTask DisposeAsync() => await rawWriter.DisposeAsync();
@@ -368,8 +447,10 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var path = Directory.Exists(runOrRawPath)
-            ? Path.Combine(runOrRawPath, "raw", "measurements.jsonl")
-            : runOrRawPath;
+            ? new ArtifactLayout(runOrRawPath).ExistingPath(
+                Path.Combine(Path.GetFullPath(runOrRawPath), "raw", "measurements.jsonl"),
+                "Raw measurements")
+            : BenchmarkArtifactPaths.RequireExistingFile(runOrRawPath, "Raw measurements");
         if (!File.Exists(path))
             throw new FileNotFoundException("Baseline raw measurements were not found.", path);
         var records = new List<RawBenchmarkRecord>();
@@ -384,6 +465,11 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
                 throw new InvalidOperationException(
                     $"Raw measurement in '{path}' has an invalid target-scoped database-signal invariant.");
             }
+            if (!records[^1].Sample.HasValidConcurrentLoadEvidence(records[^1].Case.Workload))
+            {
+                throw new InvalidOperationException(
+                    $"Raw measurement in '{path}' has an invalid concurrent-load invariant.");
+            }
         }
         return records;
     }
@@ -396,20 +482,23 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         if (!Directory.Exists(runOrRawPath))
             return new BenchmarkBaseline(records, null, null, null, null, null);
 
-        var root = Path.GetFullPath(runOrRawPath);
-        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(Path.Combine(root, "manifest.json"), cancellationToken);
-        var layout = new ArtifactLayout(root);
+        var layout = new ArtifactLayout(runOrRawPath);
+        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(
+            layout.ExistingPath(layout.Manifest, "Run manifest"), cancellationToken);
+        VerifyManifestArtifactPaths(layout, manifest);
         if (string.IsNullOrWhiteSpace(manifest.ArtifactIntegrity))
             throw new InvalidOperationException("Baseline run has no artifact-integrity ledger.");
         var integrity = await ReadJsonAsync<BenchmarkArtifactIntegrity>(
             ResolveArtifact(layout, manifest.ArtifactIntegrity), cancellationToken);
         VerifyArtifactIntegrity(layout, manifest, integrity);
-        var configuration = await ReadJsonAsync<BenchmarkRunConfiguration>(Path.Combine(root, "metadata", "configuration.json"), cancellationToken);
-        var machine = await ReadJsonAsync<BenchmarkMachineMetadata>(Path.Combine(root, "metadata", "machine.json"), cancellationToken);
-        var providers = await ReadJsonAsync<IReadOnlyList<BenchmarkProviderMetadata>>(Path.Combine(root, "metadata", "providers.json"), cancellationToken);
-        var evidence = await ReadJsonAsync<ElsaMigrationEvidenceReport>(Path.Combine(root, "reports", "elsa-migration-evidence.json"), cancellationToken);
-        var report = await ReadJsonAsync<BenchmarkRunReport>(Path.Combine(root, "reports", "summary.json"), cancellationToken);
-        VerifyReportSamples(report);
+        var configuration = await ReadJsonAsync<BenchmarkRunConfiguration>(layout.ExistingPath(layout.Configuration, "Run configuration"), cancellationToken);
+        var machine = await ReadJsonAsync<BenchmarkMachineMetadata>(layout.ExistingPath(layout.MachineMetadata, "Machine metadata"), cancellationToken);
+        var providers = await ReadJsonAsync<IReadOnlyList<BenchmarkProviderMetadata>>(layout.ExistingPath(layout.ProviderMetadata, "Provider metadata"), cancellationToken);
+        var evidence = await ReadJsonAsync<ElsaMigrationEvidenceReport>(layout.ExistingPath(layout.ElsaMigrationEvidenceJson, "Elsa migration evidence"), cancellationToken);
+        var report = await ReadJsonAsync<BenchmarkRunReport>(layout.ExistingPath(layout.SummaryJson, "Run summary"), cancellationToken);
+        VerifyReportSamples(report, configuration);
+        VerifyRawSamples(report, records, configuration);
+        await VerifyNativePlanEvidenceAsync(layout, manifest, report, configuration, cancellationToken);
         var consumer = manifest.ConsumerEvidence is null
             ? null
             : await ReadJsonAsync<BenchmarkConsumerEvidenceReport>(ResolveArtifact(layout, manifest.ConsumerEvidence), cancellationToken);
@@ -471,6 +560,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
 
     private static async Task<T> ReadJsonAsync<T>(string path, CancellationToken cancellationToken)
     {
+        path = BenchmarkArtifactPaths.RequireExistingFile(path, "Baseline provenance artifact");
         if (!File.Exists(path))
             throw new FileNotFoundException("Baseline provenance artifact was not found.", path);
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -492,6 +582,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         var required = new[]
         {
             layout.RelativePath(layout.Manifest), manifest.RawMeasurements, manifest.Summary,
+            layout.RelativePath(layout.SummaryMarkdown), layout.RelativePath(layout.RegressionJson),
             manifest.ElsaMigrationEvidence, manifest.MachineMetadata, manifest.ProviderMetadata,
             manifest.Configuration
         }.Concat(manifest.ConsumerEvidence is null ? [] : [manifest.ConsumerEvidence])
@@ -511,32 +602,200 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         }
     }
 
-    private static string ResolveArtifact(ArtifactLayout layout, string relative)
+    private static async Task VerifyNativePlanEvidenceAsync(
+        ArtifactLayout layout,
+        BenchmarkRunManifest manifest,
+        BenchmarkRunReport report,
+        BenchmarkRunConfiguration configuration,
+        CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative))
-            throw new InvalidOperationException("Artifact paths must be non-empty and relative.");
-        var root = Path.GetFullPath(layout.Root);
-        var path = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
-        if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            throw new InvalidOperationException($"Artifact path '{relative}' escapes the run root.");
-        return path;
+        var manifestPlans = manifest.PlanArtifacts ??
+            throw new InvalidOperationException("Baseline manifest native-plan artifacts are missing.");
+        if (manifestPlans.Any(string.IsNullOrWhiteSpace) ||
+            manifestPlans.Distinct(StringComparer.Ordinal).Count() != manifestPlans.Count)
+        {
+            throw new InvalidOperationException("Baseline manifest native-plan artifacts must be a distinct canonical set.");
+        }
+
+        var reportPlans = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var result in report.Cases)
+        {
+            var casePlans = result.PlanArtifacts ??
+                throw new InvalidOperationException($"Baseline case '{result.Case.Identity}' has no native-plan artifact collection.");
+            var canonicalRequests = BenchmarkPlanRequests.ForWorkloads([result.Case.Workload]);
+            if (canonicalRequests.Count == 0)
+            {
+                if (casePlans.Count != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' is not a query workload and must not contain native-plan artifacts.");
+                }
+                continue;
+            }
+
+            if (configuration.DataShape is null)
+            {
+                throw new InvalidOperationException(
+                    $"Baseline case '{result.Case.Identity}' requires configured data-shape native-plan semantics.");
+            }
+
+            if (casePlans.Count != canonicalRequests.Count ||
+                casePlans.Any(string.IsNullOrWhiteSpace) ||
+                casePlans.Distinct(StringComparer.Ordinal).Count() != casePlans.Count)
+            {
+                throw new InvalidOperationException(
+                    $"Baseline case '{result.Case.Identity}' does not have exactly one native-plan artifact for every canonical request.");
+            }
+
+            var assertionMode = BenchmarkSelectivityPolicy.PlanAssertionModeFor(configuration.DataShape);
+            var seenRequests = new HashSet<BenchmarkPlanRequest>();
+            foreach (var artifact in casePlans)
+            {
+                var path = ResolveArtifact(layout, artifact);
+                var sidecar = await NativePlanEvidenceSidecar.ReadAsync(
+                    ResolveArtifact(layout, $"{artifact}.assertions.json"),
+                    cancellationToken);
+                if (sidecar.Request is null || !canonicalRequests.Contains(sidecar.Request) || !seenRequests.Add(sidecar.Request))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan artifacts do not bijectively map to canonical requests.");
+                }
+
+                var expectedArtifact = layout.RelativePath(
+                    layout.Plan(result.Case, sidecar.Request.Operation, PlanExtension(result.Case.Provider)));
+                if (!string.Equals(artifact, expectedArtifact, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan artifact does not use the canonical request path.");
+                }
+
+                if (sidecar.Provider != result.Case.Provider ||
+                    sidecar.StorageForm != result.Case.StorageForm)
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan sidecar does not match its provider/storage tuple.");
+                }
+
+                var nativePlan = await File.ReadAllTextAsync(path, cancellationToken);
+                if (!string.Equals(nativePlan, sidecar.NativePlan, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan file and assertion sidecar differ.");
+                }
+
+                if (string.IsNullOrWhiteSpace(sidecar.QueryIdentity) ||
+                    string.IsNullOrWhiteSpace(sidecar.PhysicalObject) ||
+                    string.IsNullOrWhiteSpace(sidecar.IndexName) ||
+                    string.IsNullOrWhiteSpace(sidecar.NativePlan))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan evidence is missing physical, query, or index identity.");
+                }
+
+                if (!string.Equals(
+                        sidecar.QueryIdentity,
+                        BenchmarkModelFactory.QueryIdentityFor(sidecar.Request.Ordered),
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan evidence has an unexpected query identity.");
+                }
+
+                if (!NativePlanEvidenceAssertions.Matches(
+                        assertionMode,
+                        sidecar.Request,
+                        result.Case.Provider,
+                        sidecar.IndexName,
+                        sidecar.PhysicalObject,
+                        sidecar.CommandBinding,
+                        sidecar.NativePlan,
+                        sidecar.Assertions))
+                {
+                    throw new InvalidOperationException(
+                        $"Baseline case '{result.Case.Identity}' native-plan assertions do not match configured data-shape semantics.");
+                }
+            }
+
+            if (!seenRequests.SetEquals(canonicalRequests))
+            {
+                throw new InvalidOperationException(
+                    $"Baseline case '{result.Case.Identity}' native-plan artifacts do not cover the canonical request set.");
+            }
+
+            reportPlans.UnionWith(casePlans);
+        }
+
+        if (!reportPlans.SetEquals(manifestPlans))
+        {
+            throw new InvalidOperationException(
+                "Baseline manifest native-plan artifacts do not exactly equal the union of report-case artifacts.");
+        }
     }
+
+    internal static void VerifyManifestArtifactPaths(
+        ArtifactLayout layout,
+        BenchmarkRunManifest manifest)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(manifest);
+        RequireExpectedRelative(manifest.RawMeasurements, layout.RelativePath(layout.RawMeasurements), "Run manifest raw measurements");
+        RequireExpectedRelative(manifest.Summary, layout.RelativePath(layout.SummaryJson), "Run manifest summary");
+        RequireExpectedRelative(manifest.ElsaMigrationEvidence, layout.RelativePath(layout.ElsaMigrationEvidenceJson), "Run manifest Elsa migration evidence");
+        RequireExpectedRelative(manifest.MachineMetadata, layout.RelativePath(layout.MachineMetadata), "Run manifest machine metadata");
+        RequireExpectedRelative(manifest.ProviderMetadata, layout.RelativePath(layout.ProviderMetadata), "Run manifest provider metadata");
+        RequireExpectedRelative(manifest.Configuration, layout.RelativePath(layout.Configuration), "Run manifest configuration");
+        RequireExpectedRelative(manifest.ArtifactIntegrity!, layout.RelativePath(layout.ArtifactIntegrityJson), "Run manifest artifact-integrity ledger");
+        if (manifest.ConsumerEvidence is not null)
+            RequireExpectedRelative(manifest.ConsumerEvidence, layout.RelativePath(layout.ConsumerEvidenceJson), "Run manifest consumer evidence");
+        foreach (var plan in manifest.PlanArtifacts)
+        {
+            var canonical = BenchmarkArtifactPaths.RequireCanonicalRelative(plan, "Run manifest plan artifact");
+            if (!canonical.StartsWith("plans/", StringComparison.Ordinal))
+                throw new InvalidOperationException("Run manifest plan artifacts must be inside the plans directory.");
+        }
+    }
+
+    private static void RequireExpectedRelative(string actual, string expected, string description)
+    {
+        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            throw new InvalidOperationException($"{description} must use its canonical expected artifact path.");
+    }
+
+    private static string ResolveArtifact(ArtifactLayout layout, string relative)
+        => BenchmarkArtifactPaths.ResolveExisting(layout.Root, relative, "Artifact");
+
+    private static string PlanExtension(BenchmarkProvider provider) => provider switch
+    {
+        BenchmarkProvider.SqlServer => "xml",
+        BenchmarkProvider.PostgreSql or BenchmarkProvider.MongoDb => "json",
+        _ => "txt"
+    };
 
     private static string DigestFile(string path)
     {
+        path = BenchmarkArtifactPaths.RequireExistingFile(path, "Artifact");
         using var stream = File.OpenRead(path);
         return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
 
-    private static void VerifyReportSamples(BenchmarkRunReport report)
+    private static void VerifyReportSamples(
+        BenchmarkRunReport report,
+        BenchmarkRunConfiguration? configuration = null)
     {
         ArgumentNullException.ThrowIfNull(report);
         foreach (var result in report.Cases)
         {
-            if (result.Samples.Count == 0 || result.Samples.Any(sample => !sample.HasValidDatabaseSignalEvidence()))
+            var requiresConfiguration = result.Case.Workload == BenchmarkWorkload.ConcurrentCreate;
+            if (result.Samples.Count == 0 || result.Samples.Any(sample =>
+                    !sample.HasValidDatabaseSignalEvidence() ||
+                    requiresConfiguration && configuration is null ||
+                    !sample.HasValidConcurrentLoadEvidence(
+                        result.Case.Workload,
+                        configuration?.Concurrency,
+                        configuration?.OperationsPerIteration)))
             {
                 throw new InvalidOperationException(
-                    $"Summary for '{result.Case.Identity}' contains invalid target-scoped database-signal evidence.");
+                    $"Summary for '{result.Case.Identity}' contains invalid target-scoped evidence.");
             }
 
             BenchmarkCaseSummary expected;
@@ -557,6 +816,51 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             {
                 throw new InvalidOperationException(
                     $"Summary for '{result.Case.Identity}' does not match its target-scoped raw samples.");
+            }
+        }
+    }
+
+    internal static void VerifyRawSamples(
+        BenchmarkRunReport report,
+        IReadOnlyList<RawBenchmarkRecord> records,
+        BenchmarkRunConfiguration? configuration = null)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        ArgumentNullException.ThrowIfNull(records);
+
+        var expectedCases = report.Cases.Select(result => result.Case).ToHashSet();
+        var actualCases = records.Select(record => record.Case).ToHashSet();
+        if (!expectedCases.SetEquals(actualCases))
+        {
+            throw new InvalidOperationException(
+                "Raw measurements and summary do not contain the same benchmark cases.");
+        }
+
+        foreach (var result in report.Cases)
+        {
+            var rawSamples = records
+                .Where(record => record.Case == result.Case)
+                .Select(record => record.Sample)
+                .ToArray();
+            if (result.Case.Workload == BenchmarkWorkload.ConcurrentCreate && configuration is null ||
+                rawSamples.Any(sample =>
+                    !sample.HasValidConcurrentLoadEvidence(
+                        result.Case.Workload,
+                        configuration?.Concurrency,
+                        configuration?.OperationsPerIteration)))
+            {
+                throw new InvalidOperationException(
+                    $"Raw measurements for '{result.Case.Identity}' have invalid concurrent-load evidence.");
+            }
+            if (rawSamples.Length != result.Samples.Count ||
+                !rawSamples.Zip(result.Samples, static (raw, summary) =>
+                        CryptographicOperations.FixedTimeEquals(
+                            JsonSerializer.SerializeToUtf8Bytes(raw, BenchmarkJson.CompactOptions),
+                            JsonSerializer.SerializeToUtf8Bytes(summary, BenchmarkJson.CompactOptions)))
+                    .All(equal => equal))
+            {
+                throw new InvalidOperationException(
+                    $"Raw measurements for '{result.Case.Identity}' do not exactly bind its summary samples.");
             }
         }
     }

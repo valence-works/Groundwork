@@ -88,6 +88,7 @@
         "rawSampleCount",
         "rawOperationLatencyCount",
         "rawSamplesDigest",
+        "concurrentLoadEvidenceDigest",
         "nativePlanArtifacts",
         "nativePlanDigest"
       ],
@@ -107,13 +108,37 @@
         "rawSampleCount": { "type": "integer", "minimum": 1 },
         "rawOperationLatencyCount": { "type": "integer", "minimum": 1 },
         "rawSamplesDigest": { "$ref": "#/$defs/digest" },
+        "concurrentLoadEvidenceDigest": {
+          "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+        },
         "nativePlanArtifacts": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
         "nativePlanDigest": { "$ref": "#/$defs/digest" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "workloadIdentity": { "const": "groundwork.physical-storage/concurrent-create" }
+            },
+            "required": ["workloadIdentity"]
+          },
+          "then": {
+            "properties": {
+              "workloadVersion": { "const": "1.2" },
+              "concurrentLoadEvidenceDigest": { "$ref": "#/$defs/digest" }
+            }
+          },
+          "else": {
+            "properties": {
+              "concurrentLoadEvidenceDigest": { "type": "null" }
+            }
+          }
+        }
+      ]
     }
   }
 }

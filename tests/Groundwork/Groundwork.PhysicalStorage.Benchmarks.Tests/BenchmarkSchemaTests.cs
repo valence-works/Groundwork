@@ -14,6 +14,7 @@ public sealed class BenchmarkSchemaTests
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/raw-measurement.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/elsa-migration-evidence.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/consumer-evidence.schema.json",
+        "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/native-plan-assertions.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/worker-invocation.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/worker-response.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/run-group.schema.json",
@@ -90,6 +91,9 @@ public sealed class BenchmarkSchemaTests
         Assert.Contains(
             sample.GetProperty("required").EnumerateArray(),
             property => property.GetString() == "roundTrips");
+        Assert.Contains(
+            sample.GetProperty("required").EnumerateArray(),
+            property => property.GetString() == "concurrentLoad");
         Assert.Equal("#/$defs/databaseSignal", sample.GetProperty("properties")
             .GetProperty("databaseSignal").GetProperty("$ref").GetString());
         Assert.True(signal.GetProperty("additionalProperties").GetBoolean() is false);
@@ -113,6 +117,34 @@ public sealed class BenchmarkSchemaTests
             "null",
             sample.GetProperty("allOf")[1].GetProperty("then").GetProperty("properties")
                 .GetProperty("roundTrips").GetProperty("type").GetString());
+        var concurrent = definitions.GetProperty("concurrentLoad");
+        Assert.Equal("object", concurrent.GetProperty("type").GetString());
+        Assert.True(concurrent.GetProperty("additionalProperties").GetBoolean() is false);
+        Assert.Equal(
+            ["requestedParallelism", "waveCount", "releasedTogetherWaveCount", "attempts", "completions", "successfulOperations", "conflictOperations", "peakInFlightProductionStoreCalls"],
+            concurrent.GetProperty("required").EnumerateArray().Select(property => property.GetString()));
+        Assert.Equal(1, document.RootElement.GetProperty("allOf").GetArrayLength());
+    }
+
+    [Fact]
+    public void Consumer_schema_requires_a_concurrent_load_digest_only_for_concurrent_create()
+    {
+        using var document = Read(
+            "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/consumer-evidence.schema.json");
+        var result = document.RootElement.GetProperty("$defs").GetProperty("result");
+
+        Assert.Contains(
+            result.GetProperty("required").EnumerateArray(),
+            property => property.GetString() == "concurrentLoadEvidenceDigest");
+        Assert.Equal(1, result.GetProperty("allOf").GetArrayLength());
+        Assert.Equal(
+            "groundwork.physical-storage/concurrent-create",
+            result.GetProperty("allOf")[0].GetProperty("if").GetProperty("properties")
+                .GetProperty("workloadIdentity").GetProperty("const").GetString());
+        Assert.Equal(
+            "1.2",
+            result.GetProperty("allOf")[0].GetProperty("then").GetProperty("properties")
+                .GetProperty("workloadVersion").GetProperty("const").GetString());
     }
 
     [Fact]

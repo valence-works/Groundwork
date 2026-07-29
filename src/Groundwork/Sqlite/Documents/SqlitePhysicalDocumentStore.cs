@@ -25,6 +25,28 @@ public sealed class SqlitePhysicalDocumentStore : RelationalPhysicalDocumentStor
     {
     }
 
+    /// <summary>
+    /// Creates a store bound to an exactly admitted physical-schema target. Mutations fence against the target's
+    /// compact durable fingerprint instead of re-materializing the full applied-state snapshot on every write.
+    /// </summary>
+    public SqlitePhysicalDocumentStore(
+        SqliteConnection connection,
+        StorageManifest manifest,
+        PhysicalSchemaTarget admittedTarget,
+        DocumentStoreAccess access,
+        IStorageScopeObserver? scopeObserver = null)
+        : base(
+            connection,
+            manifest,
+            RequireMatchingTarget(manifest, admittedTarget).Routes,
+            new SqlitePhysicalDocumentDialect(),
+            access,
+            scopeObserver,
+            admittedTarget.Provider,
+            admittedTarget.Fingerprint)
+    {
+    }
+
     internal SqlitePhysicalDocumentStore(
         SqliteConnection connection,
         StorageManifest manifest,
@@ -88,6 +110,45 @@ public sealed class SqlitePhysicalDocumentStore : RelationalPhysicalDocumentStor
     {
     }
 
+    /// <summary>
+    /// Creates one reusable, concurrently callable store whose operations own independent SQLite connections.
+    /// The supplied target is the exact startup-admitted schema proof used to fence every mutation.
+    /// </summary>
+    public static SqlitePhysicalDocumentStore CreateConcurrent(
+        string connectionString,
+        StorageManifest manifest,
+        PhysicalSchemaTarget admittedTarget,
+        DocumentStoreAccess access,
+        SqliteConnectionPragmaOptions? connectionPragmas = null,
+        IStorageScopeObserver? scopeObserver = null) =>
+        new(
+            SqliteRelationalSessions.CreateConcurrentImmediate(connectionString, connectionPragmas),
+            manifest,
+            RequireMatchingTarget(manifest, admittedTarget),
+            access,
+            scopeObserver);
+
+    /// <summary>
+    /// Creates a reusable store bound to an exactly admitted physical-schema target.
+    /// </summary>
+    public SqlitePhysicalDocumentStore(
+        string connectionString,
+        StorageManifest manifest,
+        PhysicalSchemaTarget admittedTarget,
+        DocumentStoreAccess access,
+        IStorageScopeObserver? scopeObserver = null)
+        : base(
+            SqliteRelationalSessions.CreateSerializedImmediate(connectionString),
+            manifest,
+            RequireMatchingTarget(manifest, admittedTarget).Routes,
+            new SqlitePhysicalDocumentDialect(),
+            access,
+            scopeObserver,
+            admittedTarget.Provider,
+            admittedTarget.Fingerprint)
+    {
+    }
+
     internal SqlitePhysicalDocumentStore(
         string connectionString,
         StorageManifest manifest,
@@ -105,6 +166,41 @@ public sealed class SqlitePhysicalDocumentStore : RelationalPhysicalDocumentStor
             physicalSchemaProvider)
     {
         ArgumentNullException.ThrowIfNull(physicalSchemaProvider);
+    }
+
+    private SqlitePhysicalDocumentStore(
+        RelationalSessionFactory sessions,
+        StorageManifest manifest,
+        PhysicalSchemaTarget admittedTarget,
+        DocumentStoreAccess access,
+        IStorageScopeObserver? scopeObserver)
+        : base(
+            sessions,
+            manifest,
+            admittedTarget.Routes,
+            new SqlitePhysicalDocumentDialect(),
+            access,
+            scopeObserver,
+            admittedTarget.Provider,
+            admittedTarget.Fingerprint)
+    {
+    }
+
+    private static PhysicalSchemaTarget RequireMatchingTarget(
+        StorageManifest manifest,
+        PhysicalSchemaTarget admittedTarget)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(admittedTarget);
+        if (admittedTarget.ManifestIdentity != manifest.Identity ||
+            admittedTarget.ManifestVersion != manifest.Version)
+        {
+            throw new ArgumentException(
+                "The admitted physical-schema target must belong to the supplied storage manifest.",
+                nameof(admittedTarget));
+        }
+
+        return admittedTarget;
     }
 }
 
@@ -229,7 +325,7 @@ internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocument
         DbConnection connection,
         PhysicalSchemaTargetIdentity target,
         CancellationToken cancellationToken) =>
-        SqlitePhysicalSchemaTransitionLock.AcquireAsync(
+        SqlitePhysicalSchemaTransitionLock.AcquireSharedAsync(
             connection.ConnectionString,
             target,
             cancellationToken);

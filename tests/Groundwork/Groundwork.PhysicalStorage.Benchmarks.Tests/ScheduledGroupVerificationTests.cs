@@ -33,6 +33,13 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         Assert.Equal(3, summary.VerifiedMeasuredWorkerCount);
         Assert.Equal(1, summary.SemanticTupleCount);
         Assert.Equal(0, exitCode);
+
+        var measuredManifest = await ReadJsonAsync<BenchmarkRunManifest>(
+            Path.Combine(fixture.Root, "runs", "000002", "manifest.json"));
+        var measuredReport = await ReadJsonAsync<BenchmarkRunReport>(
+            Path.Combine(fixture.Root, "runs", "000002", "reports", "summary.json"));
+        Assert.Empty(measuredManifest.PlanArtifacts);
+        Assert.Empty(Assert.Single(measuredReport.Cases).PlanArtifacts);
     }
 
     [Fact]
@@ -41,6 +48,23 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         var fixture = await ScheduledGroupFixture.CreateAsync(
             scratch,
             new ScheduledGroupFixture.Options { ForgeMeasuredConsumerResultDigest = true });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("digest claims", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_resealed_concurrent_load_digest_that_does_not_match_raw_evidence()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options
+            {
+                Workload = BenchmarkWorkload.ConcurrentCreate,
+                ForgeMeasuredConcurrentLoadDigest = true
+            });
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
@@ -146,7 +170,72 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
 
-        Assert.Contains("escapes the group root", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("canonical expected artifact path", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_nested_worker_manifest_decoy()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(scratch);
+        var groupPath = Path.Combine(fixture.Root, "run-group.json");
+        var group = await ReadJsonAsync<BenchmarkRunGroupManifest>(groupPath);
+        var originalEntry = group.Runs.Single(entry => entry.Ordinal == 2);
+        var workerRoot = Path.Combine(fixture.Root, "runs", "000002");
+        var canonicalManifestPath = Path.Combine(workerRoot, "manifest.json");
+        var decoyManifestPath = Path.Combine(workerRoot, "nested", "manifest.json");
+        var decoy = (await ReadJsonAsync<BenchmarkRunManifest>(canonicalManifestPath)) with
+        {
+            StartedAtUtc = DateTimeOffset.UnixEpoch.AddSeconds(1)
+        };
+        await WriteJsonAsync(decoyManifestPath, decoy);
+
+        var responsePath = Path.Combine(fixture.Root, originalEntry.Response.Replace('/', Path.DirectorySeparatorChar));
+        var response = await ReadJsonAsync<BenchmarkWorkerResponse>(responsePath);
+        response = response with
+        {
+            Artifacts = response.Artifacts! with
+            {
+                Manifest = "nested/manifest.json",
+                ManifestDigest = Digest(decoyManifestPath)
+            }
+        };
+        await WriteJsonAsync(responsePath, response);
+
+        var resealedEntry = originalEntry with
+        {
+            WorkerManifest = Relative(fixture.Root, decoyManifestPath),
+            WorkerManifestDigest = Digest(decoyManifestPath),
+            ResponseDigest = Digest(responsePath)
+        };
+        await WriteJsonAsync(groupPath, group with
+        {
+            Runs = group.Runs.Select(entry => entry.Ordinal == resealedEntry.Ordinal ? resealedEntry : entry).ToArray()
+        });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("canonical expected artifact path", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_run_group_artifact_path_that_crosses_a_symbolic_link()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // Creating symlinks can require elevated privileges on Windows CI.
+
+        var fixture = await ScheduledGroupFixture.CreateAsync(scratch);
+        var outside = Path.Combine(scratch, "outside");
+        Directory.CreateDirectory(outside);
+        await File.WriteAllTextAsync(Path.Combine(outside, "manifest.json"), "{}");
+        var canonicalManifest = Path.Combine(fixture.Root, "runs", "000001", "manifest.json");
+        File.Delete(canonicalManifest);
+        File.CreateSymbolicLink(canonicalManifest, Path.Combine(outside, "manifest.json"));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("symbolic link", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -160,6 +249,167 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
 
         Assert.Contains("artifact-integrity", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_query_worker_missing_a_canonical_plan()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { Workload = BenchmarkWorkload.IndexedQuery });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        await WriteJsonAsync(
+            worker.Layout.SummaryJson,
+            worker.Report with
+            {
+                Cases = [worker.Case with { PlanArtifacts = worker.Case.PlanArtifacts.Skip(1).ToArray() }]
+            });
+        await WriteJsonAsync(
+            worker.Layout.Manifest,
+            worker.Manifest with { PlanArtifacts = worker.Manifest.PlanArtifacts.Skip(1).ToArray() });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+        await ResealRunGroupWorkerManifestBindingAsync(fixture.Root, ordinal: 2);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("exactly one native-plan artifact", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_query_worker_with_a_mismatched_plan_request()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { Workload = BenchmarkWorkload.IndexedQuery });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        await WriteJsonAsync(
+            worker.SidecarPath,
+            worker.Evidence with
+            {
+                Request = worker.Evidence.Request with { Take = worker.Evidence.Request.Take!.Value + 1 }
+            });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("bijectively map", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_query_worker_when_the_raw_plan_drifts_from_its_sidecar()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { Workload = BenchmarkWorkload.IndexedQuery });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        await File.WriteAllTextAsync(worker.PlanPath, "SEARCH fixture_index with drift");
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("file and assertion sidecar differ", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_false_query_plan_with_correct_assertion_strings()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { Workload = BenchmarkWorkload.IndexedQuery });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        const string falsePlan = "SCAN l USING fixture_index";
+        await File.WriteAllTextAsync(worker.PlanPath, falsePlan);
+        await WriteJsonAsync(worker.SidecarPath, worker.Evidence with { NativePlan = falsePlan });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_5000_basis_point_plan_for_an_unbound_SQLite_alias()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options
+            {
+                Workload = BenchmarkWorkload.IndexedQuery,
+                QuerySelectivityBasisPoints = BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+            });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        const string falsePlan = "SEARCH forged USING INDEX fixture_index (status=?)";
+        await File.WriteAllTextAsync(worker.PlanPath, falsePlan);
+        await WriteJsonAsync(worker.SidecarPath, worker.Evidence with { NativePlan = falsePlan });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_5000_basis_point_physical_object_drift()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options
+            {
+                Workload = BenchmarkWorkload.IndexedQuery,
+                QuerySelectivityBasisPoints = BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+            });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        await WriteJsonAsync(
+            worker.SidecarPath,
+            worker.Evidence with { PhysicalObject = "forged-physical-object" });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_query_worker_with_assertions_for_the_wrong_data_shape_mode()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { Workload = BenchmarkWorkload.IndexedQuery });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        await WriteJsonAsync(
+            worker.SidecarPath,
+            worker.Evidence with
+            {
+                Assertions = NativePlanEvidenceAssertions.For(NativePlanAssertionMode.ScanCharacterization, [])
+            });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("configured data-shape semantics", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejects_a_fully_resealed_query_worker_with_a_drifting_query_identity()
+    {
+        var fixture = await ScheduledGroupFixture.CreateAsync(
+            scratch,
+            new ScheduledGroupFixture.Options { Workload = BenchmarkWorkload.IndexedQuery });
+        var worker = await ReadFirstMeasuredPlanAsync(fixture.Root);
+        await WriteJsonAsync(worker.SidecarPath, worker.Evidence with { QueryIdentity = "forged-query" });
+        await NativePlanFixtureArtifacts.ResealIntegrityAsync(worker.Root, CancellationToken.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            BenchmarkScheduledGroupVerifier.VerifyAsync(fixture.Root, fixture.Commit, CancellationToken.None));
+
+        Assert.Contains("unexpected query identity", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     public Task InitializeAsync() => Task.CompletedTask;
@@ -184,6 +434,72 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                ?? throw new InvalidOperationException($"Fixture JSON '{path}' is null.");
     }
 
+    private static string Digest(string path) =>
+        Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
+
+    private static string Relative(string root, string path) =>
+        Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+
+    private static async Task<SealedMeasuredPlan> ReadFirstMeasuredPlanAsync(string root)
+    {
+        var workerRoot = Path.Combine(root, "runs", "000002");
+        var layout = new ArtifactLayout(workerRoot);
+        var manifest = await ReadJsonAsync<BenchmarkRunManifest>(layout.Manifest);
+        var report = await ReadJsonAsync<BenchmarkRunReport>(layout.SummaryJson);
+        var benchmarkCase = Assert.Single(report.Cases);
+        Assert.NotEmpty(benchmarkCase.PlanArtifacts);
+        var artifact = benchmarkCase.PlanArtifacts.First();
+        var planPath = Path.Combine(layout.Root, artifact.Replace('/', Path.DirectorySeparatorChar));
+        var sidecarPath = $"{planPath}.assertions.json";
+        return new SealedMeasuredPlan(
+            workerRoot,
+            layout,
+            manifest,
+            report,
+            benchmarkCase,
+            planPath,
+            sidecarPath,
+            await ReadJsonAsync<NativePlanEvidence>(sidecarPath));
+    }
+
+    private static async Task ResealRunGroupWorkerManifestBindingAsync(string root, int ordinal)
+    {
+        var ordinalText = ordinal.ToString("D6");
+        var manifestPath = Path.Combine(root, "runs", ordinalText, "manifest.json");
+        var responsePath = Path.Combine(root, "protocol", "responses", $"{ordinalText}.json");
+        var response = await ReadJsonAsync<BenchmarkWorkerResponse>(responsePath);
+        response = response with
+        {
+            Artifacts = response.Artifacts! with { ManifestDigest = Digest(manifestPath) }
+        };
+        await WriteJsonAsync(responsePath, response);
+
+        var groupPath = Path.Combine(root, "run-group.json");
+        var group = await ReadJsonAsync<BenchmarkRunGroupManifest>(groupPath);
+        var originalEntry = group.Runs.Single(entry => entry.Ordinal == ordinal);
+        var resealedEntry = originalEntry with
+        {
+            WorkerManifestDigest = Digest(manifestPath),
+            ResponseDigest = Digest(responsePath)
+        };
+        await WriteJsonAsync(
+            groupPath,
+            group with
+            {
+                Runs = group.Runs.Select(entry => entry.Ordinal == ordinal ? resealedEntry : entry).ToArray()
+            });
+    }
+
+    private sealed record SealedMeasuredPlan(
+        string Root,
+        ArtifactLayout Layout,
+        BenchmarkRunManifest Manifest,
+        BenchmarkRunReport Report,
+        BenchmarkCaseResult Case,
+        string PlanPath,
+        string SidecarPath,
+        NativePlanEvidence Evidence);
+
     private sealed class ScheduledGroupFixture
     {
         private const string TreeDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -201,6 +517,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
         public sealed record Options
         {
             public bool ForgeMeasuredConsumerResultDigest { get; init; }
+            public bool ForgeMeasuredConcurrentLoadDigest { get; init; }
             public bool TamperMeasuredRawDatabaseSignal { get; init; }
             public bool ForgeMeasuredUnavailableRoundTrips { get; init; }
             public bool ForgeMeasuredObservedCountMismatch { get; init; }
@@ -210,6 +527,9 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             public int MeasuredSampleCount { get; init; } = 30;
             public int OperationsPerSample { get; init; } = 10;
             public long ElapsedNanosecondsPerSample { get; init; } = 1_000_000_000;
+            public BenchmarkWorkload Workload { get; init; } = BenchmarkWorkload.Insert;
+            public int QuerySelectivityBasisPoints { get; init; } =
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints;
         }
 
         public static async Task<ScheduledGroupFixture> CreateAsync(string root, Options? options = null)
@@ -271,12 +591,12 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             };
             var shape = new BenchmarkDataShape(
                 1_000,
-                BenchmarkPayloadProfiles.For(BenchmarkWorkload.Insert),
-                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
+                BenchmarkPayloadProfiles.For(options.Workload),
+                options.QuerySelectivityBasisPoints);
             var request = new BenchmarkRunRequest(
                 Root,
                 configuration,
-                [BenchmarkWorkload.Insert],
+                [options.Workload],
                 workerRoot,
                 null,
                 AllowContainers: false,
@@ -327,7 +647,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     new Dictionary<string, string> { ["mode"] = "fixture" })
             };
             var samples = role == BenchmarkExecutionRole.Measured
-                ? CreateSamples(options)
+                ? CreateSamples(options, options.Workload)
                 : [];
             var forgeUnavailableRoundTrips = options.ForgeMeasuredUnavailableRoundTrips &&
                                                 role == BenchmarkExecutionRole.Measured;
@@ -346,10 +666,24 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             var benchmarkCase = new BenchmarkCase(
                 BenchmarkProvider.Sqlite,
                 PhysicalStorageForm.PhysicalEntityTable,
-                BenchmarkWorkload.Insert);
+                options.Workload);
+            var planArtifacts = role == BenchmarkExecutionRole.Measured
+                ? await NativePlanFixtureArtifacts.WriteCanonicalAsync(
+                    layout,
+                    benchmarkCase,
+                    shape,
+                    CancellationToken.None)
+                : [];
             var report = forgeDatabaseSignal
                 ? CreateForgedDatabaseSignalReport(samples, benchmarkCase, shape, workerRoot)
                 : CreateReport(role, samples, benchmarkCase, shape, workerRoot);
+            if (role == BenchmarkExecutionRole.Measured)
+            {
+                report = report with
+                {
+                    Cases = report.Cases.Select(result => result with { PlanArtifacts = planArtifacts }).ToArray()
+                };
+            }
             var runId = $"scheduled-fixture-{ordinalText}";
             var workerManifest = new BenchmarkRunManifest(
                 BenchmarkProfiles.SchemaVersion,
@@ -366,7 +700,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                 "metadata/machine.json",
                 "metadata/providers.json",
                 "metadata/configuration.json",
-                [],
+                planArtifacts,
                 BaselineRun: null,
                 RegressionConfirmationRun: false,
                 Failure: null,
@@ -416,6 +750,16 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                             Results =
                             [
                                 consumer.Results[0] with { ResultDigest = new string('0', 64) }
+                            ]
+                        };
+                    }
+                    if (options.ForgeMeasuredConcurrentLoadDigest && independentRun == 1)
+                    {
+                        consumer = consumer with
+                        {
+                            Results =
+                            [
+                                consumer.Results[0] with { ConcurrentLoadEvidenceDigest = new string('0', 64) }
                             ]
                         };
                     }
@@ -472,11 +816,18 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
             });
         }
 
-        private static IReadOnlyList<BenchmarkSample> CreateSamples(Options options) =>
+        private static IReadOnlyList<BenchmarkSample> CreateSamples(
+            Options options,
+            BenchmarkWorkload workload) =>
             Enumerable.Range(0, options.MeasuredSampleCount)
-                .Select(iteration => new BenchmarkSample(
+                .Select(iteration =>
+                {
+                    var operations = workload == BenchmarkWorkload.ConcurrentCreate
+                        ? BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration
+                        : options.OperationsPerSample;
+                    return new BenchmarkSample(
                     iteration,
-                    options.OperationsPerSample,
+                    operations,
                     options.ElapsedNanosecondsPerSample,
                     1_000,
                     null,
@@ -485,7 +836,21 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     null,
                     null,
                     new Dictionary<string, long>(),
-                    Enumerable.Repeat(100L, options.OperationsPerSample).ToArray()))
+                    Enumerable.Repeat(100L, operations).ToArray())
+                    {
+                        ConcurrentLoad = workload == BenchmarkWorkload.ConcurrentCreate
+                            ? new ConcurrentLoadEvidence(
+                                BenchmarkProfiles.Scheduled.Concurrency,
+                                WaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                ReleasedTogetherWaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                Attempts: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                Completions: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                SuccessfulOperations: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                ConflictOperations: (BenchmarkProfiles.Scheduled.Concurrency - 1) * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                                PeakInFlightProductionStoreCalls: BenchmarkProfiles.Scheduled.Concurrency)
+                            : null
+                    };
+                })
                 .ToArray();
 
         private static IReadOnlyList<BenchmarkSample> TamperFirstSignal(IReadOnlyList<BenchmarkSample> samples) =>
@@ -592,6 +957,8 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     new RawBenchmarkRecord(benchmarkCase, sample),
                     BenchmarkJson.CompactOptions)));
             await WriteJsonAsync(layout.SummaryJson, report);
+            await WriteJsonAsync(layout.RegressionJson, report.Regressions);
+            await File.WriteAllTextAsync(layout.SummaryMarkdown, "# Forged database-signal fixture");
             await WriteJsonAsync(layout.ElsaMigrationEvidenceJson, ElsaMigrationEvidenceReport.From(report));
             var consumer = BenchmarkConsumerEvidenceReport.Create(
                 report,
@@ -602,24 +969,7 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                 independentRun);
             await WriteJsonAsync(layout.ConsumerEvidenceJson, consumer);
 
-            var artifacts = new[]
-            {
-                layout.RelativePath(layout.Manifest),
-                manifest.RawMeasurements,
-                manifest.Summary,
-                manifest.ElsaMigrationEvidence,
-                manifest.MachineMetadata,
-                manifest.ProviderMetadata,
-                manifest.Configuration,
-                manifest.ConsumerEvidence!
-            }.Order(StringComparer.Ordinal)
-             .Select(relative => new BenchmarkArtifactDigest(
-                 relative,
-                 Digest(Path.Combine(layout.Root, relative.Replace('/', Path.DirectorySeparatorChar)))) )
-             .ToArray();
-            await WriteJsonAsync(
-                layout.ArtifactIntegrityJson,
-                new BenchmarkArtifactIntegrity(BenchmarkArtifactIntegrity.ContractVersion, manifest.RunId, artifacts));
+            await NativePlanFixtureArtifacts.ResealIntegrityAsync(layout.Root, CancellationToken.None);
         }
 
         private static BenchmarkRunReport CreateReport(

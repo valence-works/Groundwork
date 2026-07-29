@@ -26,6 +26,7 @@ public sealed class BaselineEligibilityEvaluatorTests
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("four providers", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("recovery", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("immutable-baseline", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Contains("synchronized-contention", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -56,10 +57,28 @@ public sealed class BaselineEligibilityEvaluatorTests
     private static BenchmarkCaseResult CreateResult(BenchmarkCase benchmarkCase)
     {
         var samples = Enumerable.Range(0, BenchmarkProfiles.Scheduled.MeasurementIterations)
-            .Select(iteration => new BenchmarkSample(
-                iteration, 10, 1_000_000_000, 100, 1, 0, 0, null, null, new Dictionary<string, long>(),
-                Enumerable.Repeat(100L, 10).ToArray())
-                .WithObservedCommandSignal())
+            .Select(iteration =>
+            {
+                var operations = benchmarkCase.Workload == BenchmarkWorkload.ConcurrentCreate
+                    ? BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration
+                    : 10;
+                return new BenchmarkSample(
+                iteration, operations, 1_000_000_000, 100, 1, 0, 0, null, null, new Dictionary<string, long>(),
+                Enumerable.Repeat(100L, operations).ToArray())
+            {
+                ConcurrentLoad = benchmarkCase.Workload == BenchmarkWorkload.ConcurrentCreate
+                    ? new ConcurrentLoadEvidence(
+                        RequestedParallelism: BenchmarkProfiles.Scheduled.Concurrency,
+                        WaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        ReleasedTogetherWaveCount: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        Attempts: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        Completions: BenchmarkProfiles.Scheduled.Concurrency * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        SuccessfulOperations: BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        ConflictOperations: (BenchmarkProfiles.Scheduled.Concurrency - 1) * BenchmarkProfiles.Scheduled.OperationsPerIteration,
+                        PeakInFlightProductionStoreCalls: BenchmarkProfiles.Scheduled.Concurrency)
+                    : null
+            }.WithObservedCommandSignal();
+            })
             .ToArray();
         return new BenchmarkCaseResult(
             benchmarkCase,

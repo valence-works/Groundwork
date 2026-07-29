@@ -39,9 +39,9 @@ public static class BenchmarkRunGroupVerifier
         string runGroupRoot,
         CancellationToken cancellationToken)
     {
-        var root = Path.GetFullPath(runGroupRoot);
+        var root = BenchmarkArtifactPaths.RequireRoot(runGroupRoot, create: false);
         var manifest = await ReadAsync<BenchmarkRunGroupManifest>(
-            Path.Combine(root, "run-group.json"),
+            Resolve(root, "run-group.json"),
             cancellationToken);
         await VerifyAsync(root, manifest, cancellationToken);
         return manifest;
@@ -64,8 +64,37 @@ public static class BenchmarkRunGroupVerifier
         var semanticWorkers = new HashSet<(BenchmarkRunTuple Tuple, BenchmarkExecutionRole Role, int IndependentRun)>();
         foreach (var entry in manifest.Runs)
         {
+            var ordinal = entry.Ordinal.ToString("D6");
+            var expectedRequest = $"protocol/requests/{ordinal}.json";
+            var expectedResponse = $"protocol/responses/{ordinal}.json";
+            var expectedWorkerManifest = $"runs/{ordinal}/manifest.json";
+            var expectedElsaEvidence = $"runs/{ordinal}/reports/elsa-migration-evidence.json";
+            var expectedConsumerEvidence = $"runs/{ordinal}/reports/consumer-evidence.json";
+            RequireExpectedRelative(entry.Request, expectedRequest, "Run-group worker request");
+            RequireExpectedRelative(entry.Response, expectedResponse, "Run-group worker response");
+            RequireExpectedRelative(entry.WorkerManifest, expectedWorkerManifest, "Run-group worker manifest");
+            RequireExpectedRelative(entry.ElsaMigrationEvidence, expectedElsaEvidence, "Run-group Elsa migration evidence");
+            var expectedRequestPath = Resolve(root, expectedRequest);
+            var expectedResponsePath = Resolve(root, expectedResponse);
+            var expectedWorkerManifestPath = Resolve(root, expectedWorkerManifest);
+            var workerRoot = Path.GetDirectoryName(expectedWorkerManifestPath)!;
+            var expectedElsaEvidencePath = Resolve(root, expectedElsaEvidence);
+            var expectedConsumerEvidencePath = entry.Role == BenchmarkExecutionRole.Measured
+                ? Resolve(root, expectedConsumerEvidence)
+                : null;
             var requestPath = Resolve(root, entry.Request);
             var responsePath = Resolve(root, entry.Response);
+            RequireExpectedPath(requestPath, expectedRequestPath, "Run-group worker request");
+            RequireExpectedPath(responsePath, expectedResponsePath, "Run-group worker response");
+            RequireExpectedPath(Resolve(root, entry.WorkerManifest), expectedWorkerManifestPath, "Run-group worker manifest");
+            RequireExpectedPath(Resolve(root, entry.ElsaMigrationEvidence), expectedElsaEvidencePath, "Run-group Elsa migration evidence");
+            if (entry.Role == BenchmarkExecutionRole.Measured)
+            {
+                if (entry.ConsumerEvidence is null)
+                    throw new InvalidOperationException("Measured run-group entry has no consumer evidence path.");
+                RequireExpectedRelative(entry.ConsumerEvidence, expectedConsumerEvidence, "Run-group consumer evidence");
+                RequireExpectedPath(Resolve(root, entry.ConsumerEvidence), expectedConsumerEvidencePath!, "Run-group consumer evidence");
+            }
             VerifyDigest(requestPath, entry.RequestDigest, "worker request");
             VerifyDigest(responsePath, entry.ResponseDigest, "worker response");
             var invocation = await ReadAsync<BenchmarkWorkerInvocation>(requestPath, cancellationToken);
@@ -90,16 +119,16 @@ public static class BenchmarkRunGroupVerifier
             if (response.GitTreeDigest != manifest.GitTreeDigest)
                 throw new InvalidOperationException("Worker and run-group Git tree digests differ.");
 
-            var workerRoot = Path.Combine(root, "runs", entry.Ordinal.ToString("D6"));
             if (!Path.GetFullPath(response.RunDirectory!).Equals(
                     Path.GetFullPath(workerRoot),
                     StringComparison.Ordinal))
                 throw new InvalidOperationException("Worker response run directory does not match its run-group slot.");
-            var workerManifestPath = Resolve(root, entry.WorkerManifest);
+            var workerManifestPath = expectedWorkerManifestPath;
             var responseManifestPath = ResolveWorker(
                 root,
                 entry.Ordinal,
                 response.Artifacts!.Manifest);
+            RequireExpectedRelative(response.Artifacts.Manifest, "manifest.json", "Worker response manifest");
             if (workerManifestPath != responseManifestPath)
                 throw new InvalidOperationException("Worker manifest paths are inconsistent.");
             VerifyDigest(workerManifestPath, entry.WorkerManifestDigest, "worker manifest");
@@ -110,7 +139,28 @@ public static class BenchmarkRunGroupVerifier
                 workerManifest.GitCommit != response.GitCommit ||
                 workerManifest.Mode != invocation.Request.Configuration.Mode)
                 throw new InvalidOperationException("Worker manifest provenance is inconsistent.");
-            var elsaEvidencePath = Resolve(root, entry.ElsaMigrationEvidence);
+            BenchmarkArtifactWriter.VerifyManifestArtifactPaths(new ArtifactLayout(workerRoot), workerManifest);
+            if (entry.Role == BenchmarkExecutionRole.Measured)
+            {
+                if (workerManifest.ConsumerEvidence is null)
+                    throw new InvalidOperationException("Measured worker manifest contains no consumer evidence.");
+            }
+            else if (workerManifest.ConsumerEvidence is not null)
+                throw new InvalidOperationException("Warm-up worker manifest contains consumer evidence.");
+            foreach (var planArtifact in workerManifest.PlanArtifacts)
+            {
+                var resolvedPlan = ResolveWorker(root, entry.Ordinal, planArtifact);
+                if (!BenchmarkArtifactPaths.Relative(workerRoot, resolvedPlan, "Worker plan artifact")
+                        .StartsWith($"plans{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Worker manifest plan artifact is outside the plans directory.");
+                }
+            }
+            var elsaEvidencePath = expectedElsaEvidencePath;
+            RequireExpectedRelative(
+                response.Artifacts.ElsaMigrationEvidence,
+                "reports/elsa-migration-evidence.json",
+                "Worker response Elsa migration evidence");
             if (elsaEvidencePath != ResolveWorker(
                     root,
                     entry.Ordinal,
@@ -124,8 +174,15 @@ public static class BenchmarkRunGroupVerifier
             {
                 if (entry.ConsumerEvidence is null || entry.ConsumerEvidenceDigest is null)
                     throw new InvalidOperationException("Measured run-group entry has no consumer evidence digest.");
-                var consumerEvidencePath = Resolve(root, entry.ConsumerEvidence);
-                var responseConsumerPath = Path.GetFullPath(response.ConsumerEvidence!);
+                var consumerEvidencePath = expectedConsumerEvidencePath!;
+                RequireExpectedRelative(
+                    response.Artifacts.ConsumerEvidence!,
+                    "reports/consumer-evidence.json",
+                    "Worker response consumer evidence");
+                var responseConsumerPath = BenchmarkArtifactPaths.ResolveAbsoluteExisting(
+                    root,
+                    response.ConsumerEvidence!,
+                    "Worker response consumer evidence");
                 var artifactConsumerPath = ResolveWorker(
                     root,
                     entry.Ordinal,
@@ -177,6 +234,10 @@ public static class BenchmarkRunGroupVerifier
         {
             if (manifest.RegressionReportDigest is null)
                 throw new InvalidOperationException("Run-group regression report digest is missing.");
+            RequireExpectedPath(
+                Resolve(root, manifest.RegressionReport),
+                Resolve(root, "reports/regression.json"),
+                "Run-group regression report");
             VerifyDigest(
                 Resolve(root, manifest.RegressionReport),
                 manifest.RegressionReportDigest,
@@ -192,6 +253,7 @@ public static class BenchmarkRunGroupVerifier
 
     internal static async Task<T> ReadAsync<T>(string path, CancellationToken cancellationToken)
     {
+        path = BenchmarkArtifactPaths.RequireExistingFile(path, "Run-group artifact");
         if (!File.Exists(path))
             throw new FileNotFoundException("Required run-group artifact was not found.", path);
         await using var stream = File.OpenRead(path);
@@ -200,31 +262,30 @@ public static class BenchmarkRunGroupVerifier
     }
 
     internal static string Resolve(string root, string relative)
-    {
-        if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative))
-            throw new InvalidOperationException("Run-group artifact paths must be non-empty and relative.");
-        var canonicalRoot = Path.GetFullPath(root);
-        var path = Path.GetFullPath(Path.Combine(
-            canonicalRoot,
-            relative.Replace('/', Path.DirectorySeparatorChar)));
-        if (!path.StartsWith(canonicalRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            throw new InvalidOperationException($"Run-group artifact '{relative}' escapes the group root.");
-        if (!File.Exists(path))
-            throw new FileNotFoundException($"Run-group artifact '{relative}' was not found.", path);
-        return path;
-    }
+        => BenchmarkArtifactPaths.ResolveExisting(root, relative, "Run-group artifact");
 
     private static string ResolveWorker(string root, int ordinal, string relative)
     {
         var workerRoot = Path.Combine(root, "runs", ordinal.ToString("D6"));
         var path = Resolve(workerRoot, relative);
-        if (!path.StartsWith(Path.GetFullPath(workerRoot) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            throw new InvalidOperationException("Worker response artifact escapes its run root.");
         return path;
+    }
+
+    private static void RequireExpectedPath(string actual, string expected, string description)
+    {
+        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            throw new InvalidOperationException($"{description} must use its canonical expected artifact path.");
+    }
+
+    private static void RequireExpectedRelative(string actual, string expected, string description)
+    {
+        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            throw new InvalidOperationException($"{description} must use its canonical expected artifact path.");
     }
 
     private static void VerifyDigest(string path, string expected, string description)
     {
+        path = BenchmarkArtifactPaths.RequireExistingFile(path, description);
         if (string.IsNullOrWhiteSpace(expected) ||
             !CryptographicOperations.FixedTimeEquals(
                 Convert.FromHexString(expected),
@@ -250,7 +311,7 @@ public static class BenchmarkScheduledGroupVerifier
         ArgumentException.ThrowIfNullOrWhiteSpace(runGroupRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedGitCommit);
 
-        var root = Path.GetFullPath(runGroupRoot);
+        var root = BenchmarkArtifactPaths.RequireRoot(runGroupRoot, create: false);
         var runGroup = await BenchmarkRunGroupVerifier.VerifyAsync(root, cancellationToken);
         VerifyGroupProvenance(runGroup, expectedGitCommit);
 
@@ -264,15 +325,18 @@ public static class BenchmarkScheduledGroupVerifier
             VerifyInvocationProvenance(invocation, runGroup, expectedGitCommit);
             VerifyScheduledConfiguration(invocation.Request.Configuration, tuple, invocation.Request.DataShape, "worker request");
 
-            var workerRoot = Path.Combine(root, "runs", entry.Ordinal.ToString("D6"));
+            var workerManifestPath = BenchmarkRunGroupVerifier.Resolve(
+                root,
+                $"runs/{entry.Ordinal:D6}/manifest.json");
+            var workerRoot = Path.GetDirectoryName(workerManifestPath)!;
             var workerManifest = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunManifest>(
-                Path.Combine(workerRoot, "manifest.json"),
+                workerManifestPath,
                 cancellationToken);
             var configuration = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunConfiguration>(
-                Path.Combine(workerRoot, "metadata", "configuration.json"),
+                BenchmarkRunGroupVerifier.Resolve(root, $"runs/{entry.Ordinal:D6}/metadata/configuration.json"),
                 cancellationToken);
             var machine = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkMachineMetadata>(
-                Path.Combine(workerRoot, "metadata", "machine.json"),
+                BenchmarkRunGroupVerifier.Resolve(root, $"runs/{entry.Ordinal:D6}/metadata/machine.json"),
                 cancellationToken);
 
             VerifyWorkerProvenance(
@@ -399,7 +463,9 @@ public static class BenchmarkScheduledGroupVerifier
         }
 
         var report = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunReport>(
-            Path.Combine(workerRoot, "reports", "summary.json"),
+            BenchmarkRunGroupVerifier.Resolve(
+                workerRoot,
+                "reports/summary.json"),
             cancellationToken);
         if (report.SchemaVersion != BenchmarkProfiles.SchemaVersion ||
             report.Mode != BenchmarkRunMode.Scheduled ||
@@ -437,6 +503,7 @@ public static class BenchmarkScheduledGroupVerifier
             throw new InvalidOperationException("Measured scheduled worker summary claims do not match its raw samples.");
 
         var operations = baseline.Records.Sum(record => (long)record.Sample.Operations);
+        var operationLatencyCount = baseline.Records.Sum(record => record.Sample.OperationLatencyNanoseconds.Count);
         var elapsedNanoseconds = baseline.Records.Sum(record => record.Sample.ElapsedNanoseconds);
         if (baseline.Records.Count < baseline.Configuration.MeasurementIterations ||
             operations < BenchmarkProfiles.Scheduled.MinimumMeasuredOperations ||
@@ -445,17 +512,58 @@ public static class BenchmarkScheduledGroupVerifier
             throw new InvalidOperationException(
                 "Measured scheduled worker raw measurements do not satisfy the 100-operation and 30-second protocol floors.");
         }
+        if (baseline.Records.Any(record =>
+                !record.Sample.HasValidConcurrentLoadEvidence(
+                    tuple.Workload,
+                    baseline.Configuration.Concurrency,
+                    baseline.Configuration.OperationsPerIteration)) ||
+            operationLatencyCount != operations)
+        {
+            throw new InvalidOperationException(
+                "Measured scheduled worker concurrent-create samples do not bind configured waves, attempts, and latency observations.");
+        }
 
         var consumerResult = baseline.ConsumerEvidence.Results[0];
         if (consumerResult.ProviderIdentity != BenchmarkConsumerEvidenceReport.ProviderIdentity(tuple.Provider) ||
             consumerResult.StorageForm != tuple.StorageForm ||
             consumerResult.WorkloadIdentity != BenchmarkConsumerEvidenceReport.WorkloadIdentity(tuple.Workload) ||
+            consumerResult.WorkloadVersion != BenchmarkConsumerEvidenceReport.WorkloadVersion(tuple.Workload) ||
             consumerResult.DataShape != tuple.DataShape ||
             consumerResult.IndependentRun != independentRun ||
             consumerResult.RawSampleCount != baseline.Records.Count ||
-            consumerResult.RawOperationLatencyCount != baseline.Records.Sum(record => record.Sample.OperationLatencyNanoseconds.Count))
+            consumerResult.RawOperationLatencyCount != operationLatencyCount ||
+            !HasExpectedConcurrentLoadDigest(
+                tuple.Workload,
+                baseline.Records,
+                baseline.Configuration.Concurrency,
+                baseline.Configuration.OperationsPerIteration,
+                consumerResult.ConcurrentLoadEvidenceDigest))
         {
             throw new InvalidOperationException("Measured scheduled worker consumer evidence does not match its exact tuple and raw sample inventory.");
+        }
+    }
+
+    private static bool HasExpectedConcurrentLoadDigest(
+        BenchmarkWorkload workload,
+        IReadOnlyList<RawBenchmarkRecord> records,
+        int configuredParallelism,
+        int operationsPerIteration,
+        string? digest)
+    {
+        try
+        {
+            var expected = BenchmarkConsumerEvidenceReport.ConcurrentLoadEvidenceDigest(
+                workload,
+                records.Select(record => record.Sample).ToArray(),
+                configuredParallelism,
+                operationsPerIteration);
+            return expected is null
+                ? digest is null
+                : BenchmarkConsumerEvidenceReport.FixedTimeEquals(expected, digest);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
         }
     }
 
@@ -576,8 +684,8 @@ public static class BenchmarkRunGroupRegressionEvaluator
     {
         ArgumentNullException.ThrowIfNull(candidate);
         ArgumentNullException.ThrowIfNull(policy);
-        var canonicalCandidateRoot = Path.GetFullPath(candidateRoot);
-        var canonicalBaselineRoot = Path.GetFullPath(baselineRoot);
+        var canonicalCandidateRoot = BenchmarkArtifactPaths.RequireRoot(candidateRoot, create: false);
+        var canonicalBaselineRoot = BenchmarkArtifactPaths.RequireRoot(baselineRoot, create: false);
         await BenchmarkRunGroupVerifier.VerifyAsync(canonicalCandidateRoot, candidate, cancellationToken);
         var baseline = await BenchmarkRunGroupVerifier.VerifyAsync(canonicalBaselineRoot, cancellationToken);
         var candidateProcesses = await ReadProcessesAsync(
@@ -661,30 +769,28 @@ public static class BenchmarkRunGroupRegressionEvaluator
                 BenchmarkRunGroupVerifier.Resolve(root, entry.Request),
                 cancellationToken);
             var tuple = BenchmarkRunTuple.From(invocation);
-            var raw = await BenchmarkArtifactWriter.ReadRawAsync(
-                Path.Combine(root, "runs", entry.Ordinal.ToString("D6")),
-                cancellationToken);
-            var workerRoot = Path.Combine(root, "runs", entry.Ordinal.ToString("D6"));
-            var configuration = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkRunConfiguration>(
-                Path.Combine(workerRoot, "metadata", "configuration.json"),
-                cancellationToken);
-            var machine = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkMachineMetadata>(
-                Path.Combine(workerRoot, "metadata", "machine.json"),
-                cancellationToken);
-            var providers = await BenchmarkRunGroupVerifier.ReadAsync<IReadOnlyList<BenchmarkProviderMetadata>>(
-                Path.Combine(workerRoot, "metadata", "providers.json"),
-                cancellationToken);
-            var consumer = await BenchmarkRunGroupVerifier.ReadAsync<BenchmarkConsumerEvidenceReport>(
-                Path.Combine(workerRoot, "reports", "consumer-evidence.json"),
-                cancellationToken);
-            var matching = raw
+            var workerRoot = Path.GetDirectoryName(BenchmarkRunGroupVerifier.Resolve(
+                root,
+                $"runs/{entry.Ordinal:D6}/manifest.json"))!;
+            var baseline = await BenchmarkArtifactWriter.ReadBaselineAsync(workerRoot, cancellationToken);
+            if (!baseline.HasProvenance || baseline.Configuration is null || baseline.Machine is null ||
+                baseline.Providers is null || baseline.ConsumerEvidence is null)
+            {
+                throw new InvalidOperationException(
+                    "Measured worker must provide complete sealed baseline provenance before regression comparison.");
+            }
+            var matching = baseline.Records
                 .Where(record => record.Case.Provider == tuple.Provider &&
                                  record.Case.StorageForm == tuple.StorageForm &&
                                  record.Case.Workload == tuple.Workload)
                 .Select(record => record.Sample)
                 .ToArray();
-            if (matching.Length != raw.Count)
+            if (matching.Length != baseline.Records.Count)
                 throw new InvalidOperationException("Measured worker raw data contains a case outside its request tuple.");
+            var configuration = baseline.Configuration;
+            var machine = baseline.Machine;
+            var providers = baseline.Providers;
+            var consumer = baseline.ConsumerEvidence;
             if (matching.Length < configuration.MeasurementIterations ||
                 matching.Sum(sample => (long)sample.Operations) < configuration.MinimumMeasuredOperations ||
                 matching.Sum(sample => sample.ElapsedNanoseconds) <
@@ -693,12 +799,45 @@ public static class BenchmarkRunGroupRegressionEvaluator
                 throw new InvalidOperationException(
                     "Measured worker raw data does not satisfy its iteration, operation, and duration floors.");
             }
+            var operationLatencyCount = matching.Sum(sample => sample.OperationLatencyNanoseconds.Count);
+            if (matching.Any(sample =>
+                    !sample.HasValidConcurrentLoadEvidence(
+                        tuple.Workload,
+                        configuration.Concurrency,
+                        configuration.OperationsPerIteration)) ||
+                operationLatencyCount != matching.Sum(sample => (long)sample.Operations))
+            {
+                throw new InvalidOperationException(
+                    "Measured worker raw data does not bind configured contention waves, attempts, and latency observations.");
+            }
             var semanticEvidence = consumer.Results.SingleOrDefault(result =>
                 result.ProviderIdentity == BenchmarkConsumerEvidenceReport.ProviderIdentity(tuple.Provider) &&
                 result.StorageForm == tuple.StorageForm &&
                 result.DataShape == tuple.DataShape &&
                 result.WorkloadIdentity == BenchmarkConsumerEvidenceReport.WorkloadIdentity(tuple.Workload))
                 ?? throw new InvalidOperationException("Measured worker has no canonical consumer result for its exact tuple.");
+            var rawPath = BenchmarkRunGroupVerifier.Resolve(
+                workerRoot,
+                "raw/measurements.jsonl");
+            var expectedConcurrentDigest = BenchmarkConsumerEvidenceReport.ConcurrentLoadEvidenceDigest(
+                tuple.Workload,
+                matching,
+                configuration.Concurrency,
+                configuration.OperationsPerIteration);
+            if (!BenchmarkConsumerEvidenceReport.FixedTimeEquals(
+                    BenchmarkSubprocessCoordinator.DigestFile(rawPath),
+                    consumer.RawMeasurementsDigest) ||
+                semanticEvidence.RawSampleCount != matching.Length ||
+                semanticEvidence.RawOperationLatencyCount != operationLatencyCount ||
+                (expectedConcurrentDigest is null
+                    ? semanticEvidence.ConcurrentLoadEvidenceDigest is not null
+                    : !BenchmarkConsumerEvidenceReport.FixedTimeEquals(
+                        expectedConcurrentDigest,
+                        semanticEvidence.ConcurrentLoadEvidenceDigest)))
+            {
+                throw new InvalidOperationException(
+                    "Measured worker consumer evidence does not bind its exact raw sample inventory.");
+            }
             result.Add(new BenchmarkProcessEvidence(
                 tuple,
                 entry.IndependentRun,
