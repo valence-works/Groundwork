@@ -21,8 +21,7 @@ public static class PhysicalSchemaTargetCompiler
         new StorageManifestValidator().Validate(manifest).RequireValid();
         PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
             manifest,
-            provider,
-            supportsRelationshipMaterialization: false);
+            provider);
 
         var resolution = PhysicalStorageResolver.Resolve(manifest, namePolicy, providerNames);
         if (!resolution.IsValid)

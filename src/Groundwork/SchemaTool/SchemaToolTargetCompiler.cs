@@ -37,8 +37,7 @@ internal static class SchemaToolTargetCompiler
         {
             PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
                 manifest,
-                descriptor.Identity,
-                supportsRelationshipMaterialization: false);
+                descriptor.Identity);
         }
         catch (PhysicalRelationshipProviderNotSupportedException exception)
         {

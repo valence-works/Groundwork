@@ -1565,7 +1565,7 @@ public sealed class PhysicalQueryPlanCompilerTests
     }
 
     [Fact]
-    public void Provider_admission_rejects_relationship_manifests_until_materialization_is_certified()
+    public void Provider_admission_rejects_relationship_manifests_without_a_public_preview_override()
     {
         var fixture = CreateRelationshipFixture(relatedTarget: false, includeMutation: false);
         var provider = new ProviderIdentity("provider-under-test", "1.0");
@@ -1573,15 +1573,53 @@ public sealed class PhysicalQueryPlanCompilerTests
         var exception = Assert.Throws<PhysicalRelationshipProviderNotSupportedException>(() =>
             PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
                 fixture.Manifest,
-                provider,
-                supportsRelationshipMaterialization: false));
+                provider));
 
         Assert.Contains("GW-RELATIONSHIP-012", exception.Message);
         Assert.Equal(["token-authorization"], exception.RelationshipIdentities);
-        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
-            fixture.Manifest,
-            provider,
-            supportsRelationshipMaterialization: true);
+        Assert.Equal(
+            2,
+            typeof(PhysicalRelationshipProviderAdmission)
+                .GetMethod(nameof(PhysicalRelationshipProviderAdmission.RequireMaterializationSupport))!
+                .GetParameters()
+                .Length);
+    }
+
+    [Fact]
+    public void Relationship_materialization_identity_rejects_invalid_unicode_before_hashing()
+    {
+        var invalid = new string('\uD800', 1);
+        var replacement = "\uFFFD";
+        var invalidFixtures = new[]
+        {
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                includeMutation: false,
+                manifestIdentity: $"manifest-{invalid}"),
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                includeMutation: false,
+                tokenIdentity: $"token-{invalid}"),
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                includeMutation: false,
+                sourceReferencePath: $"authorization-{invalid}"),
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                includeMutation: false,
+                sourceReferenceIndexIdentity: $"token-by-authorization-{invalid}")
+        };
+
+        Assert.All(invalidFixtures, fixture =>
+            Assert.Throws<ArgumentException>(() =>
+                PhysicalRelationshipPlanCompiler.Compile(fixture.RouteSet)));
+
+        var replacementPlan = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                includeMutation: false,
+                manifestIdentity: $"manifest-{replacement}").RouteSet).Plans);
+        Assert.NotEmpty(replacementPlan.Materialization.ReferenceStorageIdentity);
     }
 
     [Fact]
@@ -1594,8 +1632,7 @@ public sealed class PhysicalQueryPlanCompilerTests
         var exception = Assert.Throws<PhysicalRelationshipProviderNotSupportedException>(() =>
             PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
                 guardOnly,
-                provider,
-                supportsRelationshipMaterialization: false));
+                provider));
 
         Assert.Equal(["token-authorization"], exception.RelationshipIdentities);
     }
@@ -4957,7 +4994,10 @@ public sealed class PhysicalQueryPlanCompilerTests
         string sourceReferencePath = "authorizationId",
         string sourceReferenceIndexIdentity = "token-by-authorization-id",
         string targetEqualityIndexIdentity = "authorization-by-id",
-        StringIdentityCasePolicy sourceIdentityCasePolicy = StringIdentityCasePolicy.Ordinal)
+        StringIdentityCasePolicy sourceIdentityCasePolicy = StringIdentityCasePolicy.Ordinal,
+        string? manifestIdentity = null,
+        string authorizationIdentity = "authorization",
+        string tokenIdentity = "token")
     {
         var authorizationStatusIndex = new LogicalIndexDeclaration(
             "authorization-by-status",
@@ -5121,7 +5161,7 @@ public sealed class PhysicalQueryPlanCompilerTests
         var original = template.StorageUnits.Single();
         var authorization = original with
         {
-            Identity = new StorageUnitIdentity("authorization"),
+            Identity = new StorageUnitIdentity(authorizationIdentity),
             DisplayName = "Authorization",
             IdentityPolicy = IdentityPolicy.StringId(stringCasePolicy: targetIdentityCasePolicy),
             Tenancy = authorizationTenancy ?? TenancyPolicy.Scoped,
@@ -5129,7 +5169,7 @@ public sealed class PhysicalQueryPlanCompilerTests
         };
         var token = original with
         {
-            Identity = new StorageUnitIdentity("token"),
+            Identity = new StorageUnitIdentity(tokenIdentity),
             DisplayName = "Token",
             IdentityPolicy = IdentityPolicy.StringId(stringCasePolicy: sourceIdentityCasePolicy),
             Tenancy = tokenTenancy ?? TenancyPolicy.Scoped,
@@ -5137,6 +5177,9 @@ public sealed class PhysicalQueryPlanCompilerTests
         };
         var manifest = template with
         {
+            Identity = manifestIdentity is null
+                ? template.Identity
+                : new StorageManifestIdentity(manifestIdentity),
             StorageUnits = [authorization, token],
             SharedDocumentStorages = [],
             Relationships =
@@ -5160,11 +5203,15 @@ public sealed class PhysicalQueryPlanCompilerTests
         bool relatedTarget)
     {
         var routeSet = CompileRelationshipRouteSet(manifest);
+        var relationship = Assert.Single(manifest.Relationships);
+        var mutationStorageUnit = relatedTarget
+            ? relationship.SourceStorageUnit
+            : relationship.TargetStorageUnit;
         var mutationStorage = manifest.StorageUnits
-            .Single(unit => unit.Identity.Value == (relatedTarget ? "token" : "authorization"))
+            .Single(unit => unit.Identity == mutationStorageUnit)
             .PhysicalStorage!;
         var mutationRoute = routeSet.Routes.Single(route =>
-            route.StorageUnit.Value == (relatedTarget ? "token" : "authorization"));
+            route.StorageUnit == mutationStorageUnit);
         return new RelationshipPlanningFixture(manifest, routeSet, mutationRoute, mutationStorage);
     }
 

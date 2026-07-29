@@ -21,34 +21,44 @@ public sealed record PhysicalRelationshipMaterializationIdentity(
     string FenceStorageIdentity,
     string FenceByTargetIndexIdentity)
 {
+    private static readonly UTF8Encoding StrictUtf8 =
+        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     internal static PhysicalRelationshipMaterializationIdentity Create(
         StorageManifestIdentity manifest,
         ManifestRelationshipDeclaration relationship,
         ExecutableStorageRoute sourceRoute,
         ExecutableStorageRoute targetRoute)
     {
-        var root = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            PhysicalCanonicalEncoding.Join(
-                manifest.Value,
-                relationship.Identity,
-                relationship.SourceStorageUnit.Value,
-                relationship.SourceReferencePath,
-                relationship.SourceReferenceIndexIdentity,
-                relationship.TargetStorageUnit.Value,
-                relationship.TargetIdentityPath,
-                relationship.TargetEqualityIndexIdentity,
-                ((int)relationship.ReferenceCasePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                ((int)sourceRoute.ScopePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                ((int)targetRoute.ScopePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                ((int)sourceRoute.Envelope.Identity.StringCasePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                sourceRoute.Envelope.Identity.ComparisonAlgorithmId,
-                sourceRoute.Envelope.Identity.LookupAlgorithmId,
-                targetRoute.Envelope.Identity.ComparisonAlgorithmId,
-                targetRoute.Envelope.Identity.LookupAlgorithmId)))).ToLowerInvariant();
+        var canonicalFields = new[]
+        {
+            manifest.Value,
+            relationship.Identity,
+            relationship.SourceStorageUnit.Value,
+            relationship.SourceReferencePath,
+            relationship.SourceReferenceIndexIdentity,
+            relationship.TargetStorageUnit.Value,
+            relationship.TargetIdentityPath,
+            relationship.TargetEqualityIndexIdentity,
+            ((int)relationship.ReferenceCasePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            ((int)sourceRoute.ScopePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            ((int)targetRoute.ScopePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            ((int)sourceRoute.Envelope.Identity.StringCasePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            sourceRoute.Envelope.Identity.ComparisonAlgorithmId,
+            sourceRoute.Envelope.Identity.LookupAlgorithmId,
+            targetRoute.Envelope.Identity.ComparisonAlgorithmId,
+            targetRoute.Envelope.Identity.LookupAlgorithmId
+        };
+        foreach (var field in canonicalFields)
+            PhysicalRelationshipMaterializationIdentityValidator.Validate(field, "canonicalField");
+
+        var canonicalIdentity = PhysicalCanonicalEncoding.Join(canonicalFields);
+        var root = Convert.ToHexString(
+            SHA256.HashData(StrictUtf8.GetBytes(canonicalIdentity))).ToLowerInvariant();
         return new(
             $"relationship-reference:{root}",
             $"relationship-reference-by-source:{root}",
@@ -79,8 +89,9 @@ public sealed record PhysicalRelationshipPlan(
 
     /// <summary>
     /// The generated provider-neutral relationship reference and target-key fence schema. This is
-    /// intentionally a pure contract; provider admission remains fail closed until a provider has
-    /// implemented and certified its runtime maintenance protocol.
+    /// intentionally a pure, non-authoritative contract. Relationship manifests remain behind an
+    /// unconditional fail-closed prerequisite boundary: no provider capability can currently be
+    /// advertised and no certification gate exists yet.
     /// </summary>
     public PhysicalRelationshipMaterializationSchema MaterializationSchema =>
         PhysicalRelationshipMaterializationSchema.Create(this);
@@ -263,7 +274,7 @@ public sealed class PhysicalRelationshipProviderNotSupportedException : NotSuppo
         ProviderIdentity provider,
         IReadOnlyList<string> relationshipIdentities)
         : base(
-            $"GW-RELATIONSHIP-012: Provider '{provider.Name}' does not certify relationship materialization and target-key fences for: " +
+            $"GW-RELATIONSHIP-012: Relationship manifests are currently unavailable for provider '{provider.Name}' at the unconditional fail-closed prerequisite boundary: " +
             string.Join(", ", relationshipIdentities))
     {
         Provider = provider;
@@ -276,16 +287,15 @@ public sealed class PhysicalRelationshipProviderNotSupportedException : NotSuppo
 }
 
 /// <summary>
-/// Temporary fail-closed boundary for provider runtimes that have not implemented the admitted
-/// relationship plan. Providers must not perform schema or document I/O until they advertise and
-/// certify the generated reference materialization and target-key fence.
+/// Unconditional fail-closed prerequisite boundary for relationship manifests. Providers must not
+/// perform schema or document I/O for these manifests; no provider capability can currently be
+/// advertised and no certification gate exists yet. There is deliberately no public override.
 /// </summary>
 public static class PhysicalRelationshipProviderAdmission
 {
     public static void RequireMaterializationSupport(
         StorageManifest manifest,
-        ProviderIdentity provider,
-        bool supportsRelationshipMaterialization)
+        ProviderIdentity provider)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(provider);
@@ -298,7 +308,7 @@ public static class PhysicalRelationshipProviderAdmission
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToArray();
-        if (supportsRelationshipMaterialization || relationshipIdentities.Length == 0)
+        if (relationshipIdentities.Length == 0)
             return;
         throw new PhysicalRelationshipProviderNotSupportedException(
             provider,

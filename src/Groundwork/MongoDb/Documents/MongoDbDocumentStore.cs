@@ -52,8 +52,7 @@ public sealed class MongoDbDocumentStore : IDocumentStore
         this.manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
         PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
             this.manifest,
-            new ProviderIdentity("mongodb", "unadvertised"),
-            supportsRelationshipMaterialization: false);
+            new ProviderIdentity("mongodb", "unadvertised"));
         identityBindings = DocumentIdentityBinding.Bind(manifest);
         this.access = access ?? throw new ArgumentNullException(nameof(access));
         this.scopeObserver = scopeObserver ?? NullStorageScopeObserver.Instance;
