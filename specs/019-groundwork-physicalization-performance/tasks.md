@@ -31,3 +31,14 @@
 - [x] T015 Run `dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj`
 - [x] T016 Run `dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj`
 - [x] T017 Run `dotnet test Groundwork.slnx --no-restore`
+
+## Phase 6: Issue #50 Bounded Recovery Evidence
+
+- [ ] T018 Specify the pre-commit and committed-before-acknowledgement process-failure windows and retained nonclaims
+- [ ] T019 Add a versioned recovery request/result/evidence contract and fail-closed schema
+- [ ] T020 Add a distinct-process SQLite recovery worker using the production physical-target admission path
+- [ ] T021 Add a bounded parent orchestrator that releases and terminates the worker at the declared barrier
+- [ ] T022 Bind and verify exact source, provider/form, process outcome, recovered state, and safe retained metadata
+- [ ] T023 Prove pre-commit rollback and committed-before-acknowledgement recovery with real durable SQLite process tests
+- [ ] T024 Add timeout, same-process, incomplete, and resealed-tamper rejection tests
+- [ ] T025 Run the focused/full benchmark gates and record evidence and deliberate nonclaims in the quickstart

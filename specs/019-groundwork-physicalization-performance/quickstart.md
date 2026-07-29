@@ -32,6 +32,20 @@ dotnet test Groundwork.slnx --no-restore
 
 Expected result: all Groundwork and host integration validation tests pass.
 
+## Validate Bounded SQLite Process-Failure Recovery
+
+```bash
+dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --filter ProcessFailureRecovery
+```
+
+Expected result: distinct worker processes are terminated at the pre-commit and
+committed-before-acknowledgement barriers, a distinct recovery process verifies the exact durable
+state within the configured bound, and tampered or incomplete evidence is rejected.
+
+This is a non-promotable SQLite recovery slice. It does not claim controlled four-provider
+execution, immutable-baseline approval, physical-form selection, an EF comparison, or an Elsa
+migration verdict.
+
 ## Issue #50 Execution-Evidence Checkpoint Review
 
 PR #147 is a bounded checkpoint for synchronized-contention and provider-native plan evidence. It
