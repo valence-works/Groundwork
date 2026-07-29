@@ -19,6 +19,7 @@ public sealed class BenchmarkSchemaTests
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/worker-response.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/run-group.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/run-group-regression.schema.json",
+        "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/scheduled-coverage.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/baselines/v1/baseline-index.schema.json"
     };
 
@@ -45,6 +46,25 @@ public sealed class BenchmarkSchemaTests
 
         foreach (var required in root.GetProperty("required").EnumerateArray())
             Assert.True(properties.TryGetProperty(required.GetString()!, out _), $"Missing required property '{required}'.");
+    }
+
+    [Fact]
+    public void Scheduled_coverage_schema_reserves_deep_mode_for_the_complete_production_matrix()
+    {
+        using var schema = Read(
+            "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/scheduled-coverage.schema.json");
+        var production = schema.RootElement.GetProperty("allOf")[0]
+            .GetProperty("then").GetProperty("properties").GetProperty("matrix").GetProperty("properties");
+
+        Assert.Equal(["sqlite", "sqlServer", "postgreSql", "mongoDb"],
+            production.GetProperty("providers").GetProperty("const").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"],
+            production.GetProperty("storageForms").GetProperty("const").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal([1000, 100000, 1000000],
+            production.GetProperty("datasetSizes").GetProperty("const").EnumerateArray().Select(value => value.GetInt32()));
+        Assert.Equal([1000, 5000],
+            production.GetProperty("querySelectivityBasisPoints").GetProperty("const").EnumerateArray().Select(value => value.GetInt32()));
+        Assert.Equal(3, production.GetProperty("independentMeasuredRuns").GetProperty("const").GetInt32());
     }
 
     [Fact]

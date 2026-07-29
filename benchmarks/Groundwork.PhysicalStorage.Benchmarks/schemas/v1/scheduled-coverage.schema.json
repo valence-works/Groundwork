@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ValenceWorks/Groundwork/benchmarks/physical-storage/v1/scheduled-coverage.schema.json",
+  "title": "Groundwork physical-storage scheduled coverage verification v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "verificationMode",
+    "coverageVerified",
+    "deepGroupVerification",
+    "promotable",
+    "matrix",
+    "matrixDigest",
+    "requiredShardCount",
+    "verifiedWorkerCount",
+    "verifiedMeasuredWorkerCount",
+    "resultEqualityGroupCount",
+    "gitCommit",
+    "gitTreeDigest"
+  ],
+  "properties": {
+    "contract": { "const": "groundwork.physical-storage.scheduled-coverage/v1" },
+    "verificationMode": { "enum": ["scheduled-scaffold", "test-fixture-matrix-only"] },
+    "coverageVerified": { "const": true },
+    "deepGroupVerification": { "type": "boolean" },
+    "promotable": { "const": false },
+    "matrix": { "$ref": "#/$defs/matrix" },
+    "matrixDigest": { "$ref": "#/$defs/digest" },
+    "requiredShardCount": { "type": "integer", "minimum": 0 },
+    "verifiedWorkerCount": { "type": "integer", "minimum": 0 },
+    "verifiedMeasuredWorkerCount": { "type": "integer", "minimum": 0 },
+    "resultEqualityGroupCount": { "type": "integer", "minimum": 0 },
+    "gitCommit": { "type": "string", "minLength": 1 },
+    "gitTreeDigest": { "$ref": "#/$defs/digest" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "verificationMode": { "const": "scheduled-scaffold" } } },
+      "then": {
+        "properties": {
+          "deepGroupVerification": { "const": true },
+          "gitCommit": { "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+          "matrix": {
+            "properties": {
+              "providers": { "const": ["sqlite", "sqlServer", "postgreSql", "mongoDb"] },
+              "storageForms": { "const": ["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"] },
+              "datasetSizes": { "const": [1000, 100000, 1000000] },
+              "querySelectivityBasisPoints": { "const": [1000, 5000] },
+              "workloads": {
+                "const": [
+                  "clientResetPointReadBatch",
+                  "reusedClientPointReadBatch",
+                  "indexedQuery",
+                  "mixedCompoundOrdering",
+                  "insert",
+                  "update",
+                  "delete",
+                  "unitOfWork",
+                  "concurrentCreate",
+                  "optimisticConcurrency",
+                  "paginationAndCount",
+                  "backfillMigration",
+                  "clientRestartValidation",
+                  "storageGrowth"
+                ]
+              },
+              "independentMeasuredRuns": { "const": 3 }
+            }
+          }
+        }
+      },
+      "else": { "properties": { "deepGroupVerification": { "const": false } } }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providers",
+        "storageForms",
+        "datasetSizes",
+        "querySelectivityBasisPoints",
+        "workloads",
+        "independentMeasuredRuns"
+      ],
+      "properties": {
+        "providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["sqlite", "sqlServer", "postgreSql", "mongoDb"] }
+        },
+        "storageForms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"] }
+        },
+        "datasetSizes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "querySelectivityBasisPoints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1, "maximum": 9999 }
+        },
+        "workloads": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "clientResetPointReadBatch",
+              "reusedClientPointReadBatch",
+              "indexedQuery",
+              "mixedCompoundOrdering",
+              "insert",
+              "update",
+              "delete",
+              "unitOfWork",
+              "concurrentCreate",
+              "optimisticConcurrency",
+              "paginationAndCount",
+              "backfillMigration",
+              "clientRestartValidation",
+              "storageGrowth"
+            ]
+          }
+        },
+        "independentMeasuredRuns": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

@@ -313,6 +313,14 @@ mismatches, Git drift, and digest mismatches before a group can be used as a bas
 and regression consumers read the same canonical files that those digests bind. Connection strings
 and provider secrets remain excluded.
 
+The aggregate's `coverage-verification.json` has its own strict v1 schema. It records the exact
+provider/form/data-size/selectivity/workload/repetition matrix and a SHA-256 digest over that
+canonical matrix claim. Its verification mode distinguishes the complete deep scheduled-scaffold
+path from the explicitly narrowed, matrix-only test fixture. The `--run-id` argument locates the
+expected shard directories; it is not serialized as attested workflow-run provenance. Both modes
+remain non-promotable: this is a closed execution-coverage claim, not a baseline, attestation, or
+performance verdict.
+
 ## Target-scoped database-work signals
 
 Every measured raw sample now carries a sealed `databaseSignal` object. SQLite and SQL Server

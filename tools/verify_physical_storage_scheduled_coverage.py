@@ -85,6 +85,11 @@ def payload_profile_for(workload: str) -> dict[str, object]:
     }
 
 
+def canonical_json(value: object) -> str:
+    """Produce the one JSON representation used for matrix identity hashing."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
 @dataclass(frozen=True)
 class VerificationMatrix:
     providers: tuple[Provider, ...]
@@ -93,6 +98,111 @@ class VerificationMatrix:
     selectivity_basis_points: tuple[int, ...]
     workloads: tuple[str, ...]
     independent_runs: int
+
+
+def matrix_evidence(matrix: VerificationMatrix) -> tuple[dict[str, object], str]:
+    """Return the closed matrix claim and its canonical SHA-256 identity.
+
+    The aggregate has always checked these dimensions while reading shards. Retaining
+    them in its own artifact makes the successful aggregate independently auditable
+    without turning a non-promotable harness result into a performance baseline.
+    """
+    claim: dict[str, object] = {
+        "providers": [provider.request_token for provider in matrix.providers],
+        "storageForms": [FORMS[form] for form in matrix.forms],
+        "datasetSizes": list(matrix.datasets),
+        "querySelectivityBasisPoints": list(matrix.selectivity_basis_points),
+        "workloads": list(matrix.workloads),
+        "independentMeasuredRuns": matrix.independent_runs,
+    }
+    return claim, hashlib.sha256(canonical_json(claim).encode("utf-8")).hexdigest()
+
+
+def validate_coverage_artifact(artifact: dict[str, object]) -> None:
+    """Fail closed if this writer drifts from the published v1 coverage contract."""
+    required = {
+        "contract", "verificationMode", "coverageVerified", "deepGroupVerification",
+        "promotable", "matrix", "matrixDigest", "requiredShardCount",
+        "verifiedWorkerCount", "verifiedMeasuredWorkerCount", "resultEqualityGroupCount",
+        "gitCommit", "gitTreeDigest",
+    }
+    if set(artifact) != required:
+        raise SystemExit("scheduled coverage artifact does not match the strict v1 property set")
+    if artifact["contract"] != "groundwork.physical-storage.scheduled-coverage/v1":
+        raise SystemExit("scheduled coverage artifact has an unsupported contract version")
+    if artifact["verificationMode"] not in {"scheduled-scaffold", "test-fixture-matrix-only"}:
+        raise SystemExit("scheduled coverage artifact has an unsupported verification mode")
+    if artifact["coverageVerified"] is not True or artifact["promotable"] is not False:
+        raise SystemExit("scheduled coverage artifact must be verified and non-promotable")
+    matrix = artifact["matrix"]
+    if not isinstance(matrix, dict):
+        raise SystemExit("scheduled coverage artifact has no matrix claim")
+    required_matrix_properties = {
+        "providers", "storageForms", "datasetSizes", "querySelectivityBasisPoints",
+        "workloads", "independentMeasuredRuns",
+    }
+    if set(matrix) != required_matrix_properties:
+        raise SystemExit("scheduled coverage artifact matrix does not match the strict v1 property set")
+
+    def require_closed_list(name: str, allowed: set[object]) -> None:
+        values = matrix[name]
+        serialized_values = (
+            [canonical_json(value) for value in values]
+            if isinstance(values, list)
+            else []
+        )
+        if (
+                not isinstance(values, list)
+                or not values
+                or any(
+                    not any(type(value) is type(candidate) and value == candidate for candidate in allowed)
+                    for value in values)
+                or len(serialized_values) != len(set(serialized_values))):
+            raise SystemExit(f"scheduled coverage artifact has an invalid {name} matrix dimension")
+
+    require_closed_list("providers", {provider.request_token for provider in PROVIDERS})
+    require_closed_list("storageForms", set(FORMS.values()))
+    require_closed_list("workloads", set(WORKLOADS))
+    require_closed_list("datasetSizes", set(DATASETS))
+    require_closed_list("querySelectivityBasisPoints", set(SELECTIVITY_BASIS_POINTS))
+    independent_runs = matrix["independentMeasuredRuns"]
+    if type(independent_runs) is not int or independent_runs < 1:
+        raise SystemExit("scheduled coverage artifact has an invalid independentMeasuredRuns matrix dimension")
+    matrix_digest = artifact["matrixDigest"]
+    if not isinstance(matrix_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", matrix_digest):
+        raise SystemExit("scheduled coverage artifact has an invalid matrix digest")
+    expected_digest = hashlib.sha256(canonical_json(artifact["matrix"]).encode("utf-8")).hexdigest()
+    if matrix_digest != expected_digest:
+        raise SystemExit("scheduled coverage artifact matrix digest does not bind its matrix claim")
+    if artifact["verificationMode"] == "scheduled-scaffold" and artifact["deepGroupVerification"] is not True:
+        raise SystemExit("scheduled scaffold coverage requires deep group verification")
+    if artifact["verificationMode"] == "test-fixture-matrix-only" and artifact["deepGroupVerification"] is not False:
+        raise SystemExit("matrix-only fixture coverage cannot claim deep group verification")
+    if artifact["verificationMode"] == "scheduled-scaffold":
+        production_matrix, _ = matrix_evidence(VerificationMatrix(
+            PROVIDERS,
+            tuple(FORMS),
+            DATASETS,
+            SELECTIVITY_BASIS_POINTS,
+            WORKLOADS,
+            3))
+        if matrix != production_matrix:
+            raise SystemExit("scheduled scaffold coverage must bind the complete production matrix")
+    if any(
+            type(artifact[name]) is not int or artifact[name] < 0
+            for name in (
+                "requiredShardCount", "verifiedWorkerCount", "verifiedMeasuredWorkerCount",
+                "resultEqualityGroupCount",
+            )):
+        raise SystemExit("scheduled coverage artifact has invalid count fields")
+    if not isinstance(artifact["gitCommit"], str) or not artifact["gitCommit"]:
+        raise SystemExit("scheduled coverage artifact has no Git commit")
+    if (
+            artifact["verificationMode"] == "scheduled-scaffold"
+            and not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", artifact["gitCommit"])):
+        raise SystemExit("scheduled scaffold coverage has an invalid Git commit")
+    if not isinstance(artifact["gitTreeDigest"], str) or not re.fullmatch(r"[0-9a-f]{64}", artifact["gitTreeDigest"]):
+        raise SystemExit("scheduled coverage artifact has an invalid Git tree digest")
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,6 +250,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("matrix overrides require --test-mode; production verification is fixed at 36 shards and 4,032 workers")
     if args.skip_deep_verification and not args.test_mode:
         parser.error("--skip-deep-verification is only permitted with --test-mode")
+    if args.test_mode and not args.skip_deep_verification:
+        parser.error("--test-mode requires --skip-deep-verification and cannot claim scheduled-scaffold evidence")
     if args.group_verifier is not None and args.skip_deep_verification:
         parser.error("--group-verifier and --skip-deep-verification cannot be used together")
     if args.group_verifier is None and not args.skip_deep_verification:
@@ -442,11 +554,17 @@ def verify(
     if len(git_tree_digests) != 1:
         raise SystemExit(f"scheduled evidence spans multiple Git tree digests: {sorted(git_tree_digests)}")
 
+    matrix_claim, matrix_digest = matrix_evidence(matrix)
     return {
         "contract": "groundwork.physical-storage.scheduled-coverage/v1",
+        "verificationMode": (
+            "test-fixture-matrix-only" if skip_deep_verification else "scheduled-scaffold"
+        ),
         "coverageVerified": True,
         "deepGroupVerification": not skip_deep_verification,
         "promotable": False,
+        "matrix": matrix_claim,
+        "matrixDigest": matrix_digest,
         "requiredShardCount": len(expected_shards),
         "verifiedWorkerCount": len(actual_workers),
         "verifiedMeasuredWorkerCount": measured_count,
@@ -465,6 +583,7 @@ def main() -> None:
         matrix_from_args(args),
         args.group_verifier,
         args.skip_deep_verification)
+    validate_coverage_artifact(verification)
     (args.root / "coverage-verification.json").write_text(
         json.dumps(verification, indent=2, sort_keys=True) + "\n")
     print(json.dumps(verification, indent=2, sort_keys=True))
