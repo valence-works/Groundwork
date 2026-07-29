@@ -303,6 +303,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
     private readonly IReadOnlyDictionary<string, RelationalPhysicalMutationSql> mutationSql;
     private readonly RelationalPhysicalDocumentDialect dialect;
     private readonly ProviderIdentity? physicalSchemaProvider;
+    private readonly string? admittedPhysicalSchemaTargetFingerprint;
     private readonly IStorageScopeObserver scopeObserver;
     private readonly Func<CancellationToken, ValueTask>? beforeNonSuccessAbort;
     private readonly Func<DbTransaction, IRelationalPhysicalMutationTransaction> createMutationTransaction;
@@ -317,7 +318,8 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         RelationalPhysicalDocumentDialect dialect,
         DocumentStoreAccess access,
         IStorageScopeObserver? scopeObserver = null,
-        ProviderIdentity? physicalSchemaProvider = null)
+        ProviderIdentity? physicalSchemaProvider = null,
+        string? admittedPhysicalSchemaTargetFingerprint = null)
         : this(
             connection ?? throw new ArgumentNullException(nameof(connection)),
             null,
@@ -327,7 +329,8 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
             access,
             scopeObserver,
             null,
-            physicalSchemaProvider)
+            physicalSchemaProvider,
+            admittedPhysicalSchemaTargetFingerprint)
     {
     }
 
@@ -339,7 +342,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         DocumentStoreAccess access,
         Func<CancellationToken, ValueTask> beforeNonSuccessAbort,
         IStorageScopeObserver? scopeObserver = null)
-        : this(connection, null, manifest, routes, dialect, access, scopeObserver, null, null)
+        : this(connection, null, manifest, routes, dialect, access, scopeObserver, null, null, null)
     {
         this.beforeNonSuccessAbort = beforeNonSuccessAbort ??
             throw new ArgumentNullException(nameof(beforeNonSuccessAbort));
@@ -362,6 +365,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
             access,
             scopeObserver,
             createMutationTransaction ?? throw new ArgumentNullException(nameof(createMutationTransaction)),
+            null,
             null)
     {
     }
@@ -373,7 +377,8 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         RelationalPhysicalDocumentDialect dialect,
         DocumentStoreAccess access,
         IStorageScopeObserver? scopeObserver = null,
-        ProviderIdentity? physicalSchemaProvider = null)
+        ProviderIdentity? physicalSchemaProvider = null,
+        string? admittedPhysicalSchemaTargetFingerprint = null)
         : this(
             null,
             sessionFactory ?? throw new ArgumentNullException(nameof(sessionFactory)),
@@ -383,7 +388,8 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
             access,
             scopeObserver,
             null,
-            physicalSchemaProvider)
+            physicalSchemaProvider,
+            admittedPhysicalSchemaTargetFingerprint)
     {
     }
 
@@ -396,13 +402,18 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         DocumentStoreAccess access,
         IStorageScopeObserver? scopeObserver,
         Func<DbTransaction, IRelationalPhysicalMutationTransaction>? createMutationTransaction,
-        ProviderIdentity? physicalSchemaProvider)
+        ProviderIdentity? physicalSchemaProvider,
+        string? admittedPhysicalSchemaTargetFingerprint)
     {
         this.connection = connection;
         this.sessionFactory = sessionFactory;
         this.manifest = manifest ?? throw new ArgumentNullException(nameof(manifest));
         this.dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
         this.physicalSchemaProvider = physicalSchemaProvider ?? dialect.PhysicalSchemaProvider;
+        this.admittedPhysicalSchemaTargetFingerprint =
+            string.IsNullOrWhiteSpace(admittedPhysicalSchemaTargetFingerprint)
+                ? null
+                : admittedPhysicalSchemaTargetFingerprint;
         PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
             this.manifest,
             this.physicalSchemaProvider ?? new ProviderIdentity("relational", "unadvertised"),
@@ -694,9 +705,11 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
             transaction,
             RelationalPhysicalSchemaLockResource.For(target),
             cancellationToken);
+        var expectedTargetFingerprint = admittedPhysicalSchemaTargetFingerprint;
         await using var command = CreatePhysicalCommand(
             current,
-            "SELECT applied_state_json FROM groundwork_physical_schema_state WHERE " +
+            $"SELECT {(expectedTargetFingerprint is null ? "applied_state_json" : "target_fingerprint")} " +
+            "FROM groundwork_physical_schema_state WHERE " +
             dialect.PhysicalSchemaAppliedStatePredicate + ";",
             transaction);
         AddPhysicalParameter(command, "manifestId", manifest.Identity.Value);
@@ -712,6 +725,12 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         }
         if (json is null)
             throw UpgradeRequired(provider);
+        if (expectedTargetFingerprint is not null)
+        {
+            if (!string.Equals(json, expectedTargetFingerprint, StringComparison.Ordinal))
+                throw UpgradeRequired(provider);
+            return;
+        }
 
         PhysicalSchemaAppliedState applied;
         try

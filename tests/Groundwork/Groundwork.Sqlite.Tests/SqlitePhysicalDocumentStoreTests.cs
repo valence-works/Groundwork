@@ -463,6 +463,43 @@ public sealed class SqlitePhysicalDocumentStoreTests
     }
 
     [Fact]
+    public async Task ConcurrentFactoryReusesAdmittedTargetAcrossParallelOperations()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"groundwork-concurrent-store-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var connectionString = $"Data Source={Path.Combine(directory, "groundwork.db")}";
+        try
+        {
+            var (manifest, target) = SqlitePhysicalSchemaExecutorTests.CreateModel(
+                PhysicalStorageForm.PhysicalEntityTable,
+                includePriority: true);
+            await using (var admissionConnection = new SqliteConnection(connectionString))
+            {
+                await PhysicalSchemaApplication.ApplyAsync(
+                    target,
+                    new SqlitePhysicalSchemaExecutor(admissionConnection));
+            }
+            var store = SqlitePhysicalDocumentStore.CreateConcurrent(
+                connectionString,
+                manifest,
+                target,
+                DocumentStoreAccess.Global);
+            Assert.Equal(
+                DocumentStoreWriteStatus.Saved,
+                (await store.SaveAsync(Save("one", "tools", 1, 0))).Status);
+
+            var loaded = await Task.WhenAll(Enumerable.Range(0, 20)
+                .Select(_ => store.LoadAsync("configurationDocument", "one")));
+
+            Assert.All(loaded, Assert.NotNull);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task FailedStatelessUnitOfWorkRollsBackAndReleasesItsOwnedSession()
     {
         var database = Path.Combine(Path.GetTempPath(), $"groundwork-physical-uow-{Guid.NewGuid():N}.db");
