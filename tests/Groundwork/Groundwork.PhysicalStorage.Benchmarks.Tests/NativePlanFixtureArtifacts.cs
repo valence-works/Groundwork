@@ -56,6 +56,7 @@ internal static class NativePlanFixtureArtifacts
                 {
                     CommandBinding = CommandBinding(benchmarkCase.Provider, request, assertionMode)
                 },
+                assertionMode,
                 cancellationToken));
         }
         return artifacts;
@@ -228,6 +229,8 @@ internal static class NativePlanFixtureArtifacts
             layout.RelativePath(layout.Manifest),
             manifest.RawMeasurements,
             manifest.Summary,
+            layout.RelativePath(layout.SummaryMarkdown),
+            layout.RelativePath(layout.RegressionJson),
             manifest.ElsaMigrationEvidence,
             manifest.MachineMetadata,
             manifest.ProviderMetadata,

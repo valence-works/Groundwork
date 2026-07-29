@@ -90,7 +90,11 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
             BenchmarkWorkload.IndexedQuery);
         await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
-        var artifact = await writer.WritePlanAsync(benchmarkCase, Evidence(), CancellationToken.None);
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            Evidence(),
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None);
         var sidecarPath = Path.Combine(root, $"{artifact}.assertions.json");
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(sidecarPath));
 
@@ -98,6 +102,35 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         Assert.Equal(NativePlanEvidence.SidecarSchemaVersion,
             document.RootElement.GetProperty("schemaVersion").GetString());
         Assert.True(document.RootElement.GetProperty("commandBinding").TryGetProperty("parameterizedCommand", out _));
+    }
+
+    [Fact]
+    public async Task Writer_rejects_unsafe_evidence_before_writing_either_plan_artifact()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.Sqlite,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = Evidence();
+        evidence = evidence with
+        {
+            CommandBinding = evidence.CommandBinding! with
+            {
+                ParameterizedCommand =
+                    $"{evidence.CommandBinding!.ParameterizedCommand}; Server=example; Password=synthetic-test-value"
+            }
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
     }
 
     public void Dispose()

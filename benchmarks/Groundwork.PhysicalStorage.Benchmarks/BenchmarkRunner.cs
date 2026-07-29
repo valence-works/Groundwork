@@ -150,7 +150,11 @@ public sealed class BenchmarkRunner
                         foreach (var item in evidence)
                         {
                             var planCase = new BenchmarkCase(provider, form, item.Request.Workload);
-                            var isolatedPlanArtifact = await writer.WritePlanAsync(planCase, item, cancellationToken);
+                            var isolatedPlanArtifact = await writer.WritePlanAsync(
+                                planCase,
+                                item,
+                                planAssertionMode,
+                                cancellationToken);
                             planArtifacts.Add(isolatedPlanArtifact);
                             var key = (provider, form, item.Request.Workload);
                             if (!casePlanArtifacts.TryGetValue(key, out var artifacts))

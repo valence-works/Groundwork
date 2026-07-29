@@ -301,6 +301,8 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             Layout.RelativePath(Layout.Manifest),
             manifest.RawMeasurements,
             manifest.Summary,
+            Layout.RelativePath(Layout.SummaryMarkdown),
+            Layout.RelativePath(Layout.RegressionJson),
             manifest.ElsaMigrationEvidence,
             manifest.MachineMetadata,
             manifest.ProviderMetadata,
@@ -349,15 +351,31 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     public async Task<string> WritePlanAsync(
         BenchmarkCase benchmarkCase,
         NativePlanEvidence evidence,
+        NativePlanAssertionMode assertionMode,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(benchmarkCase);
         ArgumentNullException.ThrowIfNull(evidence);
         NativePlanEvidenceSidecar.ValidateForWrite(evidence);
-        if (benchmarkCase.Workload != evidence.Request.Workload)
+        if (benchmarkCase.Workload != evidence.Request.Workload ||
+            benchmarkCase.Provider != evidence.Provider ||
+            benchmarkCase.StorageForm != evidence.StorageForm ||
+            !string.Equals(
+                evidence.QueryIdentity,
+                BenchmarkModelFactory.QueryIdentityFor(evidence.Request.Ordered),
+                StringComparison.Ordinal) ||
+            !NativePlanEvidenceAssertions.Matches(
+                assertionMode,
+                evidence.Request,
+                benchmarkCase.Provider,
+                evidence.IndexName,
+                evidence.PhysicalObject,
+                evidence.CommandBinding,
+                evidence.NativePlan,
+                evidence.Assertions))
         {
             throw new InvalidOperationException(
-                $"Plan evidence for '{evidence.Request.Workload}' cannot be written for case '{benchmarkCase.Identity}'.");
+                $"Native-plan evidence cannot be admitted for case '{benchmarkCase.Identity}'.");
         }
         var extension = PlanExtension(benchmarkCase.Provider);
         var path = Layout.WritablePath(
@@ -525,6 +543,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         var required = new[]
         {
             layout.RelativePath(layout.Manifest), manifest.RawMeasurements, manifest.Summary,
+            layout.RelativePath(layout.SummaryMarkdown), layout.RelativePath(layout.RegressionJson),
             manifest.ElsaMigrationEvidence, manifest.MachineMetadata, manifest.ProviderMetadata,
             manifest.Configuration
         }.Concat(manifest.ConsumerEvidence is null ? [] : [manifest.ConsumerEvidence])

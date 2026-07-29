@@ -466,6 +466,90 @@ public sealed class NativePlanEvidenceValidatorTests
     }
 
     [Fact]
+    public void MongoDB_rejects_an_aggregate_page_with_sort_after_limit()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.PaginationAndCount])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        const NativePlanAssertionMode mode = NativePlanAssertionMode.ScanCharacterization;
+        var original = Binding(BenchmarkProvider.MongoDb, request, mode);
+        var binding = original with
+        {
+            MongoCommandReceipt = new NativePlanMongoCommandReceipt(
+                PhysicalDocumentQueryCommandKind.Page,
+                """
+                { "aggregate": "expected_table", "pipeline": [
+                  { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+                  { "$limit": 20 },
+                  { "$sort": { "rank": -1 } }
+                ] }
+                """)
+        };
+
+        Assert.False(Matches(
+            BenchmarkProvider.MongoDb,
+            mode,
+            request,
+            binding,
+            NativePlan(BenchmarkProvider.MongoDb)));
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_aggregate_page_that_contains_a_count_terminal()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.PaginationAndCount])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        const NativePlanAssertionMode mode = NativePlanAssertionMode.ScanCharacterization;
+        var original = Binding(BenchmarkProvider.MongoDb, request, mode);
+        var binding = original with
+        {
+            MongoCommandReceipt = new NativePlanMongoCommandReceipt(
+                PhysicalDocumentQueryCommandKind.Page,
+                """
+                { "aggregate": "expected_table", "pipeline": [
+                  { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+                  { "$count": "<redacted>" },
+                  { "$limit": 20 }
+                ] }
+                """)
+        };
+
+        Assert.False(Matches(
+            BenchmarkProvider.MongoDb,
+            mode,
+            request,
+            binding,
+            NativePlan(BenchmarkProvider.MongoDb)));
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_aggregate_count_with_page_stages()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.PaginationAndCount])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Count);
+        const NativePlanAssertionMode mode = NativePlanAssertionMode.ScanCharacterization;
+        var original = Binding(BenchmarkProvider.MongoDb, request, mode);
+        var binding = original with
+        {
+            MongoCommandReceipt = new NativePlanMongoCommandReceipt(
+                PhysicalDocumentQueryCommandKind.Count,
+                """
+                { "aggregate": "expected_table", "pipeline": [
+                  { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+                  { "$limit": 20 },
+                  { "$count": "<redacted>" }
+                ] }
+                """)
+        };
+
+        Assert.False(Matches(
+            BenchmarkProvider.MongoDb,
+            mode,
+            request,
+            binding,
+            NativePlan(BenchmarkProvider.MongoDb)));
+    }
+
+    [Fact]
     public void MongoDB_receipt_binds_exact_provider_physical_fields()
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])

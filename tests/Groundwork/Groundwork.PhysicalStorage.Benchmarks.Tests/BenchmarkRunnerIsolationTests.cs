@@ -511,15 +511,16 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
                 command,
                 parameters,
                 NativePlanTestBindings.CanonicalFields);
+            const string nativePlan = "SEARCH l USING INDEX index (status=?)";
             return new NativePlanEvidence(
                 request,
                 Provider,
                 StorageForm,
-                "query",
+                BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
                 "table",
                 "index",
-                "plan",
-                ["assertion"])
+                nativePlan,
+                NativePlanEvidenceAssertions.ForSqlite(assertionMode, "index", nativePlan))
             {
                 CommandBinding = new NativePlanCommandBinding("table", "l", command, receipt.Shape, receipt)
                 {

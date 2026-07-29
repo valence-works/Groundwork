@@ -897,6 +897,16 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
         Assert.Equal(BenchmarkProfiles.ReproducibleSeed, baseline.Configuration!.Seed);
         Assert.Equal(BenchmarkProvider.Sqlite, Assert.Single(baseline.Providers!).Provider);
 
+        foreach (var retainedReport in new[] { layout.SummaryMarkdown, layout.RegressionJson })
+        {
+            var original = await File.ReadAllBytesAsync(retainedReport);
+            await File.AppendAllTextAsync(retainedReport, Environment.NewLine);
+            var reportTampered = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                BenchmarkArtifactWriter.ReadBaselineAsync(root, CancellationToken.None));
+            Assert.Contains("integrity verification failed", reportTampered.Message, StringComparison.Ordinal);
+            await File.WriteAllBytesAsync(retainedReport, original);
+        }
+
         await File.AppendAllTextAsync(layout.SummaryJson, Environment.NewLine);
         var tampered = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             BenchmarkArtifactWriter.ReadBaselineAsync(root, CancellationToken.None));
@@ -1006,6 +1016,8 @@ public sealed class BenchmarkArtifactWriterTests : IAsyncDisposable
             layout.RelativePath(layout.Manifest),
             manifest.RawMeasurements,
             manifest.Summary,
+            layout.RelativePath(layout.SummaryMarkdown),
+            layout.RelativePath(layout.RegressionJson),
             manifest.ElsaMigrationEvidence,
             manifest.MachineMetadata,
             manifest.ProviderMetadata,

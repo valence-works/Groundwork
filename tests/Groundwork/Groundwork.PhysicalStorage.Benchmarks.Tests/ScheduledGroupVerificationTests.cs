@@ -957,6 +957,8 @@ public sealed class ScheduledGroupVerificationTests : IAsyncLifetime
                     new RawBenchmarkRecord(benchmarkCase, sample),
                     BenchmarkJson.CompactOptions)));
             await WriteJsonAsync(layout.SummaryJson, report);
+            await WriteJsonAsync(layout.RegressionJson, report.Regressions);
+            await File.WriteAllTextAsync(layout.SummaryMarkdown, "# Forged database-signal fixture");
             await WriteJsonAsync(layout.ElsaMigrationEvidenceJson, ElsaMigrationEvidenceReport.From(report));
             var consumer = BenchmarkConsumerEvidenceReport.Create(
                 report,

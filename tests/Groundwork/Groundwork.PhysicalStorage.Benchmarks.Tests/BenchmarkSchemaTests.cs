@@ -14,6 +14,7 @@ public sealed class BenchmarkSchemaTests
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/raw-measurement.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/elsa-migration-evidence.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/consumer-evidence.schema.json",
+        "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/native-plan-assertions.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/worker-invocation.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/worker-response.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/run-group.schema.json",
