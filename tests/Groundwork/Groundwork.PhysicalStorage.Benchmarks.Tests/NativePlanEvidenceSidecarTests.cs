@@ -402,6 +402,39 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
     }
 
     [Fact]
+    public async Task Writer_rejects_a_PostgreSQL_relation_identity_on_a_non_relation_node()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = PostgreSqlEvidenceWithSecret() with
+        {
+            NativePlan = """
+                [{ "Plan": {
+                  "Node Type": "Append",
+                  "Relation Name": "fixture_table",
+                  "Plans": [{
+                    "Node Type": "Bitmap Index Scan",
+                    "Index Name": "fixture_index"
+                  }]
+                } }]
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
     public async Task Writer_retains_a_PostgreSQL_bitmap_index_child_for_the_bound_relation()
     {
         var benchmarkCase = new BenchmarkCase(
