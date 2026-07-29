@@ -66,15 +66,17 @@ public sealed class MongoDbBenchmarkTarget(
         CancellationToken cancellationToken)
     {
         var route = Model.Routes.Single();
-        var indexName = route.Indexes.Single().Name.Identifier;
+        var fields = BenchmarkModelFactory.FieldBindingFor(route);
         var evidence = new List<NativePlanEvidence>(requests.Count);
         foreach (var request in requests)
         {
+            var indexName = BenchmarkModelFactory.IndexFor(route, request.Ordered).Name.Identifier;
             var query = Query(request.Skip, request.Take, request.Ordered);
             var operation = request.Operation == NativePlanOperation.Selection
                 ? BoundedQueryResultOperation.Documents
                 : BoundedQueryResultOperation.Count;
-            var explanation = await tenantAHandle!.Store.ExplainAsync(query.Select(operation), cancellationToken);
+            var executedQuery = query.Select(operation);
+            var explanation = await tenantAHandle!.Store.ExplainAsync(executedQuery, cancellationToken);
             var commandKind = request.Operation == NativePlanOperation.Selection
                 ? PhysicalDocumentQueryCommandKind.Page
                 : PhysicalDocumentQueryCommandKind.Count;
@@ -87,14 +89,25 @@ public sealed class MongoDbBenchmarkTarget(
                     $"MongoDB native-plan gate rejected {request.Workload}/{request.Operation}. Expected IXSCAN '{indexName}'.{Environment.NewLine}{plan}");
             }
             var physicalObject = (route.LinkedIndexStorage ?? route.PrimaryStorage).Name.Identifier;
+            var mongoReceipt = NativePlanMongoCommandReceipt.FromExplain(planDocument, command.Kind, fields);
+            var queryReceipt = NativePlanQueryReceipt.FromMongoDb(request, assertionMode, mongoReceipt, fields);
             evidence.Add(new NativePlanEvidence(
                 request,
-                Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
+                Provider, StorageForm, BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
                 physicalObject,
                 indexName, plan,
                 NativePlanEvidenceAssertions.ForMongoDb(assertionMode, indexName))
             {
-                CommandBinding = new NativePlanCommandBinding(physicalObject, null, null)
+                CommandBinding = new NativePlanCommandBinding(
+                    physicalObject,
+                    null,
+                    null,
+                    queryReceipt.Shape,
+                    queryReceipt)
+                {
+                    Fields = fields,
+                    MongoCommandReceipt = mongoReceipt
+                }
             });
         }
         return evidence;

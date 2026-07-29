@@ -22,13 +22,17 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         await target.InitializeAsync(CancellationToken.None);
         await target.SeedAsync(
             BenchmarkProfiles.ReproducibleSeed,
-            new BenchmarkDataShape(250, 0, 100),
+            new BenchmarkDataShape(
+                250,
+                0,
+                BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints),
             CancellationToken.None);
 
         var correctness = await target.RunCorrectnessGateAsync(CancellationToken.None);
         var beforePlans = await target.CaptureStorageAsync(CancellationToken.None);
         var plans = await target.CaptureNativePlansAsync(
-            BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery]),
+            BenchmarkPlanRequests.ForWorkloads(
+                [BenchmarkWorkload.IndexedQuery, BenchmarkWorkload.MixedCompoundOrdering, BenchmarkWorkload.PaginationAndCount]),
             NativePlanAssertionMode.RequireDeclaredIndex,
             CancellationToken.None);
         var afterPlans = await target.CaptureStorageAsync(CancellationToken.None);
@@ -38,12 +42,25 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         Assert.True(correctness.UnitOfWorkRollback);
         Assert.True(correctness.BoundedQuery);
         Assert.True(correctness.MixedOrdering);
-        Assert.Equal(2, plans.Count);
+        Assert.Equal(6, plans.Count);
+        Assert.Contains(plans, plan =>
+            plan.Request.Workload == BenchmarkWorkload.IndexedQuery &&
+            plan.Request.Operation == NativePlanOperation.Selection);
+        Assert.Contains(plans, plan =>
+            plan.Request.Workload == BenchmarkWorkload.MixedCompoundOrdering &&
+            plan.Request.Operation == NativePlanOperation.Count);
+        Assert.Contains(plans, plan =>
+            plan.Request.Workload == BenchmarkWorkload.PaginationAndCount &&
+            plan.Request.Operation == NativePlanOperation.Selection);
+        Assert.Contains(plans, plan =>
+            plan.Request.Workload == BenchmarkWorkload.PaginationAndCount &&
+            plan.Request.Operation == NativePlanOperation.Count);
         Assert.All(plans, plan =>
         {
             Assert.Contains(plan.IndexName, plan.NativePlan, StringComparison.OrdinalIgnoreCase);
             Assert.True(NativePlanEvidenceAssertions.Matches(
                 NativePlanAssertionMode.RequireDeclaredIndex,
+                plan.Request,
                 BenchmarkProvider.Sqlite,
                 plan.IndexName,
                 plan.PhysicalObject,
@@ -53,6 +70,46 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         });
         Assert.Equal(beforePlans.PrimaryRows, afterPlans.PrimaryRows);
         Assert.Equal(beforePlans.LinkedRows, afterPlans.LinkedRows);
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task SQLite_scan_characterization_retains_actual_receipts_for_every_query_branch(PhysicalStorageForm form)
+    {
+        await using var target = new SqliteBenchmarkTarget(form, Guid.NewGuid().ToString("N")[..8], scratch, 5);
+        await target.InitializeAsync(CancellationToken.None);
+        await target.SeedAsync(
+            BenchmarkProfiles.ReproducibleSeed,
+            new BenchmarkDataShape(
+                250,
+                0,
+                BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints),
+            CancellationToken.None);
+
+        var plans = await target.CaptureNativePlansAsync(
+            BenchmarkPlanRequests.ForWorkloads(
+                [BenchmarkWorkload.IndexedQuery, BenchmarkWorkload.MixedCompoundOrdering, BenchmarkWorkload.PaginationAndCount]),
+            NativePlanAssertionMode.ScanCharacterization,
+            CancellationToken.None);
+
+        Assert.Equal(6, plans.Count);
+        Assert.All(plans, plan =>
+        {
+            Assert.NotNull(plan.CommandBinding);
+            Assert.NotNull(plan.CommandBinding!.QueryReceipt);
+            Assert.NotNull(plan.CommandBinding.ParameterizedCommand);
+            Assert.True(NativePlanEvidenceAssertions.Matches(
+                NativePlanAssertionMode.ScanCharacterization,
+                plan.Request,
+                BenchmarkProvider.Sqlite,
+                plan.IndexName,
+                plan.PhysicalObject,
+                plan.CommandBinding,
+                plan.NativePlan,
+                plan.Assertions));
+        });
     }
 
     [Theory]
@@ -103,7 +160,7 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
                 async (connectionString, model, cancellationToken) =>
                     await DropIndexAsync(
                         new SqliteConnectionStringBuilder(connectionString).DataSource,
-                        model.Route.Indexes.Single().Name.Identifier,
+                        BenchmarkModelFactory.IndexFor(model.Route, ordered: false).Name.Identifier,
                         cancellationToken),
                 CancellationToken.None));
 
@@ -254,7 +311,7 @@ public sealed class SqliteBenchmarkTargetTests : IAsyncDisposable
         string databasePath,
         BenchmarkPhysicalModel model)
     {
-        var indexName = model.Route.Indexes.Single().Name.Identifier;
+        var indexName = BenchmarkModelFactory.IndexFor(model.Route, ordered: false).Name.Identifier;
         var table = (model.Route.LinkedIndexStorage ?? model.Route.PrimaryStorage).Name.Identifier;
         var rank = model.Route.ProjectedColumns.Single(column => column.Definition.Path == "rank").Column.Identifier;
         await using var connection = new SqliteConnection(

@@ -23,12 +23,17 @@ public sealed class BenchmarkModelFactoryTests
         Assert.Equal(form, model.Route.Form);
         Assert.Equal(expectsLinkedStorage, model.Route.LinkedIndexStorage is not null);
         Assert.Collection(
-            Assert.Single(model.Route.Indexes).Columns,
+            BenchmarkModelFactory.IndexFor(model.Route, ordered: false).Columns,
+            scope => Assert.Equal("storage_scope", scope.Column.LogicalName),
+            status => Assert.Equal(PhysicalSortDirection.Ascending, status.Direction));
+        Assert.Collection(
+            BenchmarkModelFactory.IndexFor(model.Route, ordered: true).Columns,
             scope => Assert.Equal("storage_scope", scope.Column.LogicalName),
             status => Assert.Equal(PhysicalSortDirection.Ascending, status.Direction),
             rank => Assert.Equal(PhysicalSortDirection.Descending, rank.Direction));
-        Assert.Equal(BenchmarkModelFactory.QueryIdentity,
-            Assert.Single(model.Manifest.StorageUnits.Single().PhysicalStorage!.BoundedQueries).Identity);
+        Assert.Equal(
+            [BenchmarkModelFactory.IndexedQueryIdentity, BenchmarkModelFactory.QueryIdentity],
+            model.Manifest.StorageUnits.Single().PhysicalStorage!.BoundedQueries.Select(query => query.Identity));
     }
 
     [Theory]
@@ -50,6 +55,6 @@ public sealed class BenchmarkModelFactoryTests
             BenchmarkModelFactory.NamePolicy(instance));
 
         Assert.Equal(factoryTarget.Fingerprint, model.Target.Fingerprint);
-        Assert.Equal(factoryTarget.Routes.Single().Indexes.Single(), model.Route.Indexes.Single());
+        Assert.Equal(factoryTarget.Routes.Single().Indexes, model.Route.Indexes);
     }
 }

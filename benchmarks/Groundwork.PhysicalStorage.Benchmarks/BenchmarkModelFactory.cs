@@ -16,8 +16,35 @@ public sealed record BenchmarkPhysicalModel(
 public static class BenchmarkModelFactory
 {
     public const string DocumentKind = "benchmarkItem";
+    public const string IndexedQueryIdentity = "list-by-status";
     public const string QueryIdentity = "list-by-status-rank";
+    public const string IndexedIndexIdentity = "by-status";
     public const string CompoundIndexIdentity = "by-status-rank";
+
+    public static string QueryIdentityFor(bool ordered) =>
+        ordered ? QueryIdentity : IndexedQueryIdentity;
+
+    public static string IndexIdentityFor(bool ordered) =>
+        ordered ? CompoundIndexIdentity : IndexedIndexIdentity;
+
+    public static ExecutablePhysicalIndexRoute IndexFor(
+        ExecutableStorageRoute route,
+        bool ordered)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        var identity = IndexIdentityFor(ordered);
+        return route.Indexes.Single(index => index.Identity == identity);
+    }
+
+    public static NativePlanFieldBinding FieldBindingFor(ExecutableStorageRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        return new NativePlanFieldBinding(
+            route.ScopeKey.Column.Identifier,
+            route.Discriminator.Column.Identifier,
+            route.ProjectedColumns.Single(column => column.Definition.Path == "status").Column.Identifier,
+            route.ProjectedColumns.Single(column => column.Definition.Path == "rank").Column.Identifier);
+    }
 
     public static StorageManifest CreateManifest(
         PhysicalStorageForm form,
@@ -34,7 +61,13 @@ public static class BenchmarkModelFactory
         if (includeCategory)
             columns.Add(new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String, Length: 64));
 
-        var index = new PhysicalIndexDefinition(
+        var indexedIndex = new PhysicalIndexDefinition(
+            IndexedIndexIdentity,
+            [
+                new PhysicalIndexColumnDefinition("storage_scope", 0),
+                new PhysicalIndexColumnDefinition("status", 1)
+            ]);
+        var orderedIndex = new PhysicalIndexDefinition(
             CompoundIndexIdentity,
             [
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
@@ -46,47 +79,33 @@ public static class BenchmarkModelFactory
             PhysicalStorageForm.SharedDocuments => PhysicalTableDefinition.SharedDocuments(
                 binding,
                 columns,
-                [index],
+                [indexedIndex, orderedIndex],
                 linkedProjectionLogicalName: "benchmark_items_lookup"),
             PhysicalStorageForm.DedicatedDocumentTable => PhysicalTableDefinition.DedicatedDocumentTable(
                 "benchmark_items",
-                indexes: [index],
+                indexes: [indexedIndex, orderedIndex],
                 linkedProjectedColumns: columns,
                 linkedProjectionLogicalName: "benchmark_items_lookup"),
             PhysicalStorageForm.PhysicalEntityTable => PhysicalTableDefinition.PhysicalEntityTable(
                 "benchmark_items",
                 columns,
-                indexes: [index]),
+                indexes: [indexedIndex, orderedIndex]),
             _ => throw new ArgumentOutOfRangeException(nameof(form), form, null)
         };
-        var logical = new LogicalIndexDeclaration(
+        var indexedLogical = new LogicalIndexDeclaration(
+            IndexedIndexIdentity,
+            [new IndexField("status", IndexValueKind.Keyword)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var orderedLogical = new LogicalIndexDeclaration(
             CompoundIndexIdentity,
             [new IndexField("status", IndexValueKind.Keyword), new IndexField("rank", IndexValueKind.Number)],
             IndexValueKind.Keyword,
             false,
             MissingValueBehavior.Excluded);
-        var query = new BoundedQueryDeclaration(
-            QueryIdentity,
-            logical.Identity,
-            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-            QuerySortSupport.Descending,
-            QueryPagingSupport.Offset,
-            BoundedQueryExecutionClass.ScaleBearing,
-            supportsTotalCount: true,
-            sortFields: [new BoundedQuerySortField("rank", PhysicalSortDirection.Descending)],
-            predicateFields:
-            [
-                new BoundedQueryPredicateField(
-                    "status",
-                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal })
-            ],
-            resultOperations: new HashSet<BoundedQueryResultOperation>
-            {
-                BoundedQueryResultOperation.Documents,
-                BoundedQueryResultOperation.Count,
-                BoundedQueryResultOperation.Any,
-                BoundedQueryResultOperation.First
-            });
+        var indexedQuery = QueryDeclaration(IndexedQueryIdentity, indexedLogical.Identity, ordered: false);
+        var orderedQuery = QueryDeclaration(QueryIdentity, orderedLogical.Identity, ordered: true);
         var unit = new StorageUnit(
             new StorageUnitIdentity(DocumentKind),
             "Physical storage benchmark item",
@@ -103,8 +122,8 @@ public static class BenchmarkModelFactory
             PhysicalStorage = new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(table),
-                [logical],
-                [query])
+                [indexedLogical, orderedLogical],
+                [indexedQuery, orderedQuery])
         };
         return new StorageManifest(
             new StorageManifestIdentity($"benchmark.{instance}"),
@@ -119,6 +138,33 @@ public static class BenchmarkModelFactory
                 : []
         };
     }
+
+    private static BoundedQueryDeclaration QueryDeclaration(
+        string identity,
+        string indexIdentity,
+        bool ordered) =>
+        new(
+            identity,
+            indexIdentity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            ordered ? QuerySortSupport.Descending : QuerySortSupport.None,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true,
+            sortFields: ordered ? [new BoundedQuerySortField("rank", PhysicalSortDirection.Descending)] : [],
+            predicateFields:
+            [
+                new BoundedQueryPredicateField(
+                    "status",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal })
+            ],
+            resultOperations: new HashSet<BoundedQueryResultOperation>
+            {
+                BoundedQueryResultOperation.Documents,
+                BoundedQueryResultOperation.Count,
+                BoundedQueryResultOperation.Any,
+                BoundedQueryResultOperation.First
+            });
 
     public static BenchmarkPhysicalModel CompileRelational(
         PhysicalStorageForm form,

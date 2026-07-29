@@ -480,8 +480,52 @@ public sealed class BenchmarkRunnerIsolationTests : IAsyncDisposable
         {
             PlanCalls++;
             PlanAssertionModes.Add(assertionMode);
-            return Task.FromResult<IReadOnlyList<NativePlanEvidence>>(requests.Select(request => new NativePlanEvidence(
-                request, Provider.ToString(), StorageForm.ToString(), "query", "table", "index", "plan", ["assertion"])).ToArray());
+            return Task.FromResult<IReadOnlyList<NativePlanEvidence>>(requests
+                .Select(request => PlanEvidence(request, assertionMode))
+                .ToArray());
+        }
+
+        private NativePlanEvidence PlanEvidence(
+            BenchmarkPlanRequest request,
+            NativePlanAssertionMode assertionMode)
+        {
+            var command = request.Operation == NativePlanOperation.Count
+                ? "SELECT COUNT(*) FROM \"table\" AS l WHERE l.\"storage_scope\" = @scope AND l.\"document_kind\" = @kind AND l.\"status\" = @q0"
+                : $"SELECT * FROM \"table\" AS l WHERE l.\"storage_scope\" = @scope AND l.\"document_kind\" = @kind AND l.\"status\" = @q0" +
+                  (request.Ordered ? " ORDER BY l.\"rank\" DESC" : string.Empty) +
+                  " LIMIT @take OFFSET @skip";
+            var parameters = new List<(string Name, object? Value)>
+            {
+                ("scope", "tenant-a"),
+                ("kind", "benchmark-document"),
+                ("q0", "open")
+            };
+            if (request.Operation == NativePlanOperation.Selection)
+            {
+                parameters.Add(("skip", request.Skip ?? 0));
+                parameters.Add(("take", request.Take));
+            }
+            var receipt = NativePlanQueryReceipt.FromRelational(
+                request,
+                assertionMode,
+                command,
+                parameters,
+                NativePlanTestBindings.CanonicalFields);
+            return new NativePlanEvidence(
+                request,
+                Provider,
+                StorageForm,
+                "query",
+                "table",
+                "index",
+                "plan",
+                ["assertion"])
+            {
+                CommandBinding = new NativePlanCommandBinding("table", "l", command, receipt.Shape, receipt)
+                {
+                    Fields = NativePlanTestBindings.CanonicalFields
+                }
+            };
         }
 
         public Task PrepareWorkloadAsync(BenchmarkWorkload workload, int totalIterations, int operationsPerIteration, CancellationToken cancellationToken) =>

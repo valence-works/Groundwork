@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ValenceWorks/Groundwork/benchmarks/physical-storage/v1/native-plan-assertions.schema.json",
+  "title": "Groundwork physical-storage native-plan assertion sidecar v1",
+  "description": "Versioned, redacted structural binding between one benchmark plan request, the actual provider command receipt, and its provider-native plan. It detects internal semantic inconsistencies in a sealed artifact tree; it is not an external authenticity root.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "request", "provider", "storageForm", "queryIdentity", "physicalObject",
+    "indexName", "nativePlan", "assertions", "commandBinding"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "groundwork.physical-storage.native-plan-assertions/v1" },
+    "request": { "$ref": "#/$defs/request" },
+    "provider": { "enum": ["sqlite", "sqlServer", "postgreSql", "mongoDb"] },
+    "storageForm": { "enum": ["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"] },
+    "queryIdentity": { "type": "string", "minLength": 1 },
+    "physicalObject": { "type": "string", "minLength": 1 },
+    "indexName": { "type": "string", "minLength": 1 },
+    "nativePlan": { "type": "string", "minLength": 1 },
+    "assertions": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "commandBinding": { "$ref": "#/$defs/commandBinding" }
+  },
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workload", "operation", "ordered"],
+      "properties": {
+        "workload": { "enum": ["indexedQuery", "mixedCompoundOrdering", "paginationAndCount"] },
+        "operation": { "enum": ["selection", "count"] },
+        "ordered": { "type": "boolean" },
+        "skip": { "type": ["integer", "null"], "minimum": 0 },
+        "take": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "operator", "parameter"],
+      "properties": {
+        "field": { "enum": ["storage-scope", "document-kind", "status"] },
+        "operator": { "const": "equal" },
+        "parameter": { "enum": ["scope", "kind", "q0"] }
+      }
+    },
+    "order": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "direction"],
+      "properties": {
+        "field": { "const": "rank" },
+        "direction": { "const": "descending" }
+      }
+    },
+    "shape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workload", "operation", "terminal", "filters", "order", "querySelectivityBasisPoints"],
+      "properties": {
+        "workload": { "enum": ["indexedQuery", "mixedCompoundOrdering", "paginationAndCount"] },
+        "operation": { "enum": ["selection", "count"] },
+        "terminal": { "enum": ["documents", "count"] },
+        "filters": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "$ref": "#/$defs/filter" } },
+        "order": { "type": "array", "maxItems": 1, "items": { "$ref": "#/$defs/order" } },
+        "skip": { "type": ["integer", "null"], "minimum": 0 },
+        "take": { "type": ["integer", "null"], "minimum": 1 },
+        "querySelectivityBasisPoints": { "enum": [1000, 5000] }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "role", "valueClassification"],
+      "properties": {
+        "name": { "enum": ["scope", "kind", "q0", "skip", "take"] },
+        "role": { "enum": ["storage-scope", "document-kind", "predicate", "pagination-skip", "pagination-take"] },
+        "structuralValue": { "type": ["integer", "null"], "minimum": 0 },
+        "valueClassification": { "enum": ["benchmark-tenant", "benchmark-document-kind", "benchmark-selected-status", "structural"] }
+      }
+    },
+    "queryReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shape", "parameters"],
+      "properties": {
+        "shape": { "$ref": "#/$defs/shape" },
+        "parameters": { "type": "array", "minItems": 3, "maxItems": 5, "items": { "$ref": "#/$defs/parameter" } }
+      }
+    },
+    "baseBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["physicalObject", "requestShape", "queryReceipt", "fields"],
+      "properties": {
+        "physicalObject": { "type": "string", "minLength": 1 },
+        "alias": { "type": ["string", "null"], "minLength": 1 },
+        "parameterizedCommand": { "type": ["string", "null"], "minLength": 1 },
+        "requestShape": { "$ref": "#/$defs/shape" },
+        "queryReceipt": { "$ref": "#/$defs/queryReceipt" },
+        "fields": { "$ref": "#/$defs/fieldBinding" },
+        "mongoCommandReceipt": { "type": ["object", "null"] }
+      }
+    },
+    "fieldBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storageScope", "documentKind", "status", "rank"],
+      "properties": {
+        "storageScope": { "type": "string", "minLength": 1 },
+        "documentKind": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 },
+        "rank": { "type": "string", "minLength": 1 }
+      }
+    },
+    "mongoReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "redactedCommand"],
+      "properties": {
+        "kind": { "enum": ["page", "count"] },
+        "redactedCommand": { "type": "string", "minLength": 1 }
+      }
+    },
+    "commandBinding": {
+      "allOf": [
+        { "$ref": "#/$defs/baseBinding" },
+        {
+          "oneOf": [
+            {
+              "required": ["parameterizedCommand"],
+              "properties": {
+                "parameterizedCommand": { "type": "string", "minLength": 1 },
+                "mongoCommandReceipt": { "type": "null" }
+              }
+            },
+            {
+              "required": ["mongoCommandReceipt"],
+              "properties": {
+                "parameterizedCommand": { "type": "null" },
+                "mongoCommandReceipt": { "$ref": "#/$defs/mongoReceipt" }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

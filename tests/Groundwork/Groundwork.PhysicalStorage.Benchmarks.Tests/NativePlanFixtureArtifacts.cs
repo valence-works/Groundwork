@@ -3,6 +3,15 @@ using System.Text.Json;
 
 namespace Groundwork.PhysicalStorage.Benchmarks.Tests;
 
+internal static class NativePlanTestBindings
+{
+    public static NativePlanFieldBinding CanonicalFields { get; } = new(
+        "storage_scope",
+        "document_kind",
+        "status",
+        "rank");
+}
+
 internal static class NativePlanFixtureArtifacts
 {
     private const string PhysicalObject = "fixture-physical-object";
@@ -37,39 +46,112 @@ internal static class NativePlanFixtureArtifacts
                 benchmarkCase,
                 new NativePlanEvidence(
                     request,
-                    benchmarkCase.Provider.ToString(),
-                    benchmarkCase.StorageForm.ToString(),
-                    BenchmarkModelFactory.QueryIdentity,
+                    benchmarkCase.Provider,
+                    benchmarkCase.StorageForm,
+                    BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
                     PhysicalObject,
                     IndexName,
                     nativePlan,
                     Assertions(benchmarkCase.Provider, assertionMode, nativePlan))
                 {
-                    CommandBinding = CommandBinding(benchmarkCase.Provider)
+                    CommandBinding = CommandBinding(benchmarkCase.Provider, request, assertionMode)
                 },
                 cancellationToken));
         }
         return artifacts;
     }
 
-    private static NativePlanCommandBinding CommandBinding(BenchmarkProvider provider) =>
-        provider switch
+    private static NativePlanCommandBinding CommandBinding(
+        BenchmarkProvider provider,
+        BenchmarkPlanRequest request,
+        NativePlanAssertionMode assertionMode)
+    {
+        if (provider == BenchmarkProvider.MongoDb)
         {
-            BenchmarkProvider.Sqlite => new(
+            var command = new NativePlanMongoCommandReceipt(
+                request.Operation == NativePlanOperation.Selection
+                    ? Groundwork.Documents.Store.PhysicalDocumentQueryCommandKind.Page
+                    : Groundwork.Documents.Store.PhysicalDocumentQueryCommandKind.Count,
+                MongoCommand(request));
+            var mongoQueryReceipt = NativePlanQueryReceipt.FromMongoDb(
+                request,
+                assertionMode,
+                command,
+                NativePlanTestBindings.CanonicalFields);
+            return new NativePlanCommandBinding(
                 PhysicalObject,
-                "l",
-                $"SELECT * FROM \"{PhysicalObject}\" AS l INDEXED BY \"{IndexName}\" WHERE l.\"status\" = @value"),
-            BenchmarkProvider.PostgreSql => new(
-                PhysicalObject,
-                "l",
-                $"SELECT * FROM \"{PhysicalObject}\" l WHERE l.\"status\" = @value"),
-            BenchmarkProvider.SqlServer => new(
-                PhysicalObject,
-                "l",
-                $"SELECT * FROM [{PhysicalObject}] AS l WITH (INDEX([{IndexName}])) WHERE l.[status] = @value"),
-            BenchmarkProvider.MongoDb => new(PhysicalObject, null, null),
-            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+                null,
+                null,
+                mongoQueryReceipt.Shape,
+                mongoQueryReceipt)
+            {
+                Fields = NativePlanTestBindings.CanonicalFields,
+                MongoCommandReceipt = command
+            };
+        }
+
+        var commandText = RelationalCommand(provider, request);
+        var relationalQueryReceipt = NativePlanQueryReceipt.FromRelational(
+            request,
+            assertionMode,
+            commandText,
+            Parameters(request),
+            NativePlanTestBindings.CanonicalFields);
+        return new NativePlanCommandBinding(
+            PhysicalObject,
+            "l",
+            commandText,
+            relationalQueryReceipt.Shape,
+            relationalQueryReceipt)
+        {
+            Fields = NativePlanTestBindings.CanonicalFields
         };
+    }
+
+    private static IReadOnlyList<(string Name, object? Value)> Parameters(BenchmarkPlanRequest request)
+    {
+        var values = new List<(string Name, object? Value)>
+        {
+            ("scope", "tenant-a"),
+            ("kind", "benchmark-document"),
+            ("q0", "open")
+        };
+        if (request.Operation == NativePlanOperation.Selection)
+        {
+            values.Add(("skip", request.Skip ?? 0));
+            values.Add(("take", request.Take));
+        }
+        return values;
+    }
+
+    private static string RelationalCommand(BenchmarkProvider provider, BenchmarkPlanRequest request)
+    {
+        var quote = provider == BenchmarkProvider.SqlServer ? ("[", "]") : ("\"", "\"");
+        var source = $"{quote.Item1}{PhysicalObject}{quote.Item2}";
+        var filters = $"l.{quote.Item1}storage_scope{quote.Item2} = @scope AND l.{quote.Item1}document_kind{quote.Item2} = @kind AND l.{quote.Item1}status{quote.Item2} = @q0";
+        if (request.Operation == NativePlanOperation.Count)
+            return $"SELECT COUNT(*) FROM {source} AS l WHERE {filters}";
+        var order = request.Ordered ? $" ORDER BY l.{quote.Item1}rank{quote.Item2} DESC" : string.Empty;
+        var paging = provider == BenchmarkProvider.SqlServer
+            ? " OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY"
+            : " LIMIT @take OFFSET @skip";
+        return $"SELECT * FROM {source} AS l WHERE {filters}{order}{paging}";
+    }
+
+    private static string MongoCommand(BenchmarkPlanRequest request)
+    {
+        var order = request.Operation == NativePlanOperation.Selection && request.Ordered
+            ? ", { \"$sort\": { \"rank\": -1 } }"
+            : string.Empty;
+        var paging = request.Operation == NativePlanOperation.Selection
+            ? $", {{ \"$skip\": {request.Skip ?? 0} }}, {{ \"$limit\": {request.Take} }}"
+            : ", { \"$count\": \"<redacted>\" }";
+        return $$"""
+            { "aggregate": "{{PhysicalObject}}", "pipeline": [
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } }{{order}}{{paging}}
+            ] }
+            """;
+    }
 
     private static string NativePlan(BenchmarkProvider provider) =>
         provider switch

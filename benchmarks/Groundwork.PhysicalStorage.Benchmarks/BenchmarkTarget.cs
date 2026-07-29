@@ -1,4 +1,6 @@
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Documents.Store;
+using MongoDB.Bson;
 
 namespace Groundwork.PhysicalStorage.Benchmarks;
 
@@ -37,21 +39,257 @@ public static class BenchmarkPlanRequests
 
 public sealed record NativePlanEvidence(
     BenchmarkPlanRequest Request,
-    string Provider,
-    string StorageForm,
+    BenchmarkProvider Provider,
+    PhysicalStorageForm StorageForm,
     string QueryIdentity,
     string PhysicalObject,
     string IndexName,
     string NativePlan,
     IReadOnlyList<string> Assertions)
 {
+    /// <summary>
+    /// Version of the strict sidecar contract written next to every native plan.
+    /// This is deliberately independent from the broader benchmark report schema.
+    /// </summary>
+    public const string SidecarSchemaVersion = "groundwork.physical-storage.native-plan-assertions/v1";
+
+    public string SchemaVersion { get; init; } = SidecarSchemaVersion;
     public NativePlanCommandBinding? CommandBinding { get; init; }
 }
 
 public sealed record NativePlanCommandBinding(
     string PhysicalObject,
     string? Alias,
-    string? ParameterizedCommand);
+    string? ParameterizedCommand,
+    NativePlanRequestShape? RequestShape = null,
+    NativePlanQueryReceipt? QueryReceipt = null)
+{
+    public NativePlanFieldBinding? Fields { get; init; }
+
+    /// <summary>
+    /// MongoDB exposes the executed command inside its explain response rather than as SQL.
+    /// The retained value is a structurally complete, value-redacted rendering of that command.
+    /// </summary>
+    public NativePlanMongoCommandReceipt? MongoCommandReceipt { get; init; }
+}
+
+public sealed record NativePlanFieldBinding(
+    string StorageScope,
+    string DocumentKind,
+    string Status,
+    string Rank);
+
+public enum NativePlanTerminalOperation
+{
+    Documents,
+    Count,
+    Any,
+    First
+}
+
+public sealed record NativePlanFilterShape(
+    string Field,
+    string Operator,
+    string Parameter);
+
+public sealed record NativePlanOrderShape(
+    string Field,
+    PhysicalSortDirection Direction);
+
+public sealed record NativePlanParameterReceipt(
+    string Name,
+    string Role,
+    int? StructuralValue,
+    string ValueClassification);
+
+public sealed record NativePlanQueryReceipt(
+    NativePlanRequestShape Shape,
+    IReadOnlyList<NativePlanParameterReceipt> Parameters)
+{
+    public static NativePlanQueryReceipt FromRelational(
+        BenchmarkPlanRequest request,
+        NativePlanAssertionMode assertionMode,
+        string parameterizedCommand,
+        IReadOnlyList<(string Name, object? Value)> parameters,
+        NativePlanFieldBinding fields)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(parameterizedCommand);
+        ArgumentNullException.ThrowIfNull(parameters);
+        ArgumentNullException.ThrowIfNull(fields);
+        var redactedParameters = parameters.Select(Parameter).ToArray();
+        var shape = NativePlanRequestShape.FromRelationalCommand(
+            request,
+            assertionMode,
+            parameterizedCommand,
+            redactedParameters,
+            fields);
+        return new NativePlanQueryReceipt(
+            shape,
+            redactedParameters);
+    }
+
+    public static NativePlanQueryReceipt FromMongoDb(
+        BenchmarkPlanRequest request,
+        NativePlanAssertionMode assertionMode,
+        NativePlanMongoCommandReceipt command,
+        NativePlanFieldBinding fields)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(fields);
+        var parameters = new List<NativePlanParameterReceipt>
+        {
+            new("scope", "storage-scope", null, "benchmark-tenant"),
+            new("kind", "document-kind", null, "benchmark-document-kind"),
+            new("q0", "predicate", null, "benchmark-selected-status")
+        };
+        if (request.Operation == NativePlanOperation.Selection)
+        {
+            parameters.Add(new("skip", "pagination-skip", request.Skip ?? 0, "structural"));
+            if (request.Take is { } take)
+                parameters.Add(new("take", "pagination-take", take, "structural"));
+        }
+
+        return new NativePlanQueryReceipt(
+            NativePlanRequestShape.FromMongoCommand(request, assertionMode, command, fields),
+            parameters);
+    }
+
+    private static NativePlanParameterReceipt Parameter((string Name, object? Value) parameter) =>
+        parameter.Name switch
+        {
+            "scope" when parameter.Value is string =>
+                new(parameter.Name, "storage-scope", null, "benchmark-tenant"),
+            "kind" when parameter.Value is string =>
+                new(parameter.Name, "document-kind", null, "benchmark-document-kind"),
+            "q0" when string.Equals(parameter.Value as string, "open", StringComparison.Ordinal) =>
+                new(parameter.Name, "predicate", null, "benchmark-selected-status"),
+            "skip" when parameter.Value is not null =>
+                new(parameter.Name, "pagination-skip", Convert.ToInt32(parameter.Value), "structural"),
+            "take" when parameter.Value is not null =>
+                new(parameter.Name, "pagination-take", Convert.ToInt32(parameter.Value), "structural"),
+            _ => throw new InvalidOperationException(
+                $"Native-plan command contains an unsupported or unredactable parameter '{parameter.Name}'.")
+        };
+}
+
+/// <summary>
+/// A value-redacted copy of the actual MongoDB command passed to <c>explain</c>.
+/// Object names, operators, ordering, and pagination remain observable; predicate values do not.
+/// </summary>
+public sealed record NativePlanMongoCommandReceipt(
+    PhysicalDocumentQueryCommandKind Kind,
+    string RedactedCommand)
+{
+    public static NativePlanMongoCommandReceipt FromExplain(
+        BsonDocument explain,
+        PhysicalDocumentQueryCommandKind kind,
+        NativePlanFieldBinding fields)
+    {
+        ArgumentNullException.ThrowIfNull(explain);
+        ArgumentNullException.ThrowIfNull(fields);
+        if (!explain.TryGetValue("command", out var commandValue) || !commandValue.IsBsonDocument)
+        {
+            throw new InvalidOperationException(
+                "MongoDB explain evidence did not retain the executed command required for native-plan binding.");
+        }
+
+        var command = commandValue.AsBsonDocument;
+        if (!NativePlanCommandParsing.MongoCommandContainsSelectedStatus(command, fields))
+        {
+            throw new InvalidOperationException(
+                "MongoDB explain command did not retain the benchmark selected-status predicate.");
+        }
+
+        return new NativePlanMongoCommandReceipt(
+            kind,
+            NativePlanCommandParsing.RedactMongoCommand(command).ToJson());
+    }
+}
+
+public sealed record NativePlanRequestShape(
+    BenchmarkWorkload Workload,
+    NativePlanOperation Operation,
+    NativePlanTerminalOperation Terminal,
+    IReadOnlyList<NativePlanFilterShape> Filters,
+    IReadOnlyList<NativePlanOrderShape> Order,
+    int? Skip,
+    int? Take,
+    int QuerySelectivityBasisPoints)
+{
+    internal static readonly IReadOnlyList<NativePlanFilterShape> CanonicalFilters =
+    [
+        new("storage-scope", "equal", "scope"),
+        new("document-kind", "equal", "kind"),
+        new("status", "equal", "q0")
+    ];
+
+    public static NativePlanRequestShape For(
+        BenchmarkPlanRequest request,
+        NativePlanAssertionMode assertionMode)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return new NativePlanRequestShape(
+            request.Workload,
+            request.Operation,
+            request.Operation == NativePlanOperation.Selection
+                ? NativePlanTerminalOperation.Documents
+                : NativePlanTerminalOperation.Count,
+            CanonicalFilters,
+            request.Operation == NativePlanOperation.Selection && request.Ordered
+                ? [new NativePlanOrderShape("rank", PhysicalSortDirection.Descending)]
+                : [],
+            request.Operation == NativePlanOperation.Selection ? request.Skip : null,
+            request.Operation == NativePlanOperation.Selection ? request.Take : null,
+            assertionMode == NativePlanAssertionMode.ScanCharacterization
+                ? BenchmarkSelectivityPolicy.ScanCharacterizationBasisPoints
+                : BenchmarkSelectivityPolicy.IndexedQueryAcceptanceBasisPoints);
+    }
+
+    public static NativePlanRequestShape FromRelationalCommand(
+        BenchmarkPlanRequest request,
+        NativePlanAssertionMode assertionMode,
+        string command,
+        IReadOnlyList<NativePlanParameterReceipt> parameters,
+        NativePlanFieldBinding fields)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(command);
+        ArgumentNullException.ThrowIfNull(parameters);
+        ArgumentNullException.ThrowIfNull(fields);
+        var expected = For(request, assertionMode);
+        var terminal = NativePlanCommandParsing.IsCount(command)
+            ? NativePlanTerminalOperation.Count
+            : NativePlanTerminalOperation.Documents;
+        var filters = NativePlanCommandParsing.RelationalFilters(command, parameters, fields);
+        var order = NativePlanCommandParsing.RelationalOrder(command, fields);
+        var pagination = NativePlanCommandParsing.RelationalPagination(command, parameters, terminal);
+        return new NativePlanRequestShape(
+            request.Workload,
+            terminal == NativePlanTerminalOperation.Count
+                ? NativePlanOperation.Count
+                : NativePlanOperation.Selection,
+            terminal,
+            filters,
+            order,
+            pagination.Skip,
+            pagination.Take,
+            expected.QuerySelectivityBasisPoints);
+    }
+
+    public static NativePlanRequestShape FromMongoCommand(
+        BenchmarkPlanRequest request,
+        NativePlanAssertionMode assertionMode,
+        NativePlanMongoCommandReceipt command,
+        NativePlanFieldBinding fields)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(fields);
+        return NativePlanCommandParsing.MongoShape(request, assertionMode, command, fields);
+    }
+}
 
 public static class NativePlanEvidenceAssertions
 {
@@ -123,6 +361,7 @@ public static class NativePlanEvidenceAssertions
 
     public static bool Matches(
         NativePlanAssertionMode assertionMode,
+        BenchmarkPlanRequest request,
         BenchmarkProvider provider,
         string indexName,
         string physicalObject,
@@ -130,7 +369,8 @@ public static class NativePlanEvidenceAssertions
         string nativePlan,
         IReadOnlyList<string>? assertions)
     {
-        if (string.IsNullOrWhiteSpace(indexName) ||
+        if (request is null ||
+            string.IsNullOrWhiteSpace(indexName) ||
             string.IsNullOrWhiteSpace(physicalObject) ||
             string.IsNullOrWhiteSpace(nativePlan) ||
             assertions is null)
@@ -147,6 +387,8 @@ public static class NativePlanEvidenceAssertions
         if (!expected.SequenceEqual(assertions, StringComparer.Ordinal))
             return false;
         if (!NativePlanEvidenceValidator.Matches(
+                assertionMode,
+                request,
                 provider,
                 physicalObject,
                 indexName,

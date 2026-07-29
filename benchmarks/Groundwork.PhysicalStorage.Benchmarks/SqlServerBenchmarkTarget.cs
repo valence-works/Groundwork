@@ -52,10 +52,11 @@ public sealed class SqlServerBenchmarkTarget(
         var store = RelationalTenantA;
         await using var connection = new SqlConnection(ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        var indexName = Model.Route.Indexes.Single().Name.Identifier;
+        var fields = BenchmarkModelFactory.FieldBindingFor(Model.Route);
         var evidence = new List<NativePlanEvidence>(requests.Count);
         foreach (var request in requests)
         {
+            var indexName = BenchmarkModelFactory.IndexFor(Model.Route, request.Ordered).Name.Identifier;
             var rendered = RenderPlan(request, store);
             await using var command = connection.CreateCommand();
             command.CommandText = $"SET STATISTICS XML ON; {rendered.CommandText} SET STATISTICS XML OFF;";
@@ -72,9 +73,15 @@ public sealed class SqlServerBenchmarkTarget(
                 throw new InvalidOperationException(
                     $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.");
             }
+            var queryReceipt = NativePlanQueryReceipt.FromRelational(
+                request,
+                assertionMode,
+                rendered.CommandText,
+                rendered.Parameters,
+                fields);
             evidence.Add(new NativePlanEvidence(
                 request,
-                Provider.ToString(), StorageForm.ToString(), BenchmarkModelFactory.QueryIdentity,
+                Provider, StorageForm, BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
                 physicalObject,
                 indexName, plan,
                 NativePlanEvidenceAssertions.ForSqlServer(assertionMode))
@@ -82,7 +89,12 @@ public sealed class SqlServerBenchmarkTarget(
                 CommandBinding = new NativePlanCommandBinding(
                     physicalObject,
                     Model.Route.LinkedIndexStorage is null ? "p" : "l",
-                    rendered.CommandText)
+                    rendered.CommandText,
+                    queryReceipt.Shape,
+                    queryReceipt)
+                {
+                    Fields = fields
+                }
             });
         }
         return evidence;

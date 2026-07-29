@@ -41,6 +41,10 @@ collection, relation, table, or SQLite alias to the exact parameterized command/
 captured by the production query path. Parameterized SQL is retained without connection data or
 literal query values. This binding strengthens sealed-directory internal consistency; like the
 artifact-integrity ledger, it is not an external authenticity or cryptographic-provenance root.
+The unordered equality workload and the ordered/paged workloads use separate declared query
+identities and physical indexes (`by-status` and `by-status-rank`). This prevents the query plan's
+default compound order from silently making `indexed-query` and `mixed-compound-ordering` the same
+physical operation, and lets the retained command receipt prove which shape actually executed.
 
 After materialization, SQLite, SQL Server, and PostgreSQL stores are opened through their public
 production `OpenPhysicalAsync` factories. Factory admission must succeed before correctness gates
@@ -238,6 +242,7 @@ runs/<ordinal>/metadata/configuration.json
 runs/<ordinal>/metadata/machine.json
 runs/<ordinal>/metadata/providers.json
 runs/<ordinal>/plans/<provider>/<form>/<workload>-<selection|count>.<native-extension>
+runs/<ordinal>/plans/<provider>/<form>/<workload>-<selection|count>.<native-extension>.assertions.json
 runs/<ordinal>/raw/measurements.jsonl
 runs/<ordinal>/reports/summary.json
 runs/<ordinal>/reports/summary.md
@@ -255,6 +260,13 @@ The v1 JSON Schemas live in [`schemas/v1`](schemas/v1). The evidence report deli
 - `remainingAcceptanceWork` for the later Elsa-owned evidence join.
 
 No artifact in this slice is a migration decision or baseline-promotion authorization.
+
+Every native-plan file has a required versioned `.assertions.json` sibling. The sidecar records the
+canonical typed request, plan identity, a redacted actual-command receipt, parsed filter/order/
+terminal/pagination shape, parameter roles, and the 1,000 or 5,000 basis-point policy. The verifier
+reparses that receipt and rejects a substituted selection/count, ordering, page, physical object,
+or provider-plan pairing even if the artifact-integrity tree has been resealed. It does not claim
+to turn the local integrity ledger into an external provenance signature.
 
 The preceding warm-up worker executes the configured untimed warm-up iterations as a preflight and
 emits no consumer evidence. Each independent measured worker also executes its own configured

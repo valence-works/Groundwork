@@ -279,7 +279,7 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
     protected static DocumentQuery Query(int? skip = null, int? take = null, bool includeOrdering = true) =>
         new(
             BenchmarkModelFactory.DocumentKind,
-            BenchmarkModelFactory.QueryIdentity,
+            BenchmarkModelFactory.QueryIdentityFor(includeOrdering),
             [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "open"))],
             includeOrdering ? [new DocumentQueryOrder("rank", PhysicalSortDirection.Descending)] : null,
             skip,
@@ -598,7 +598,10 @@ public abstract class PhysicalStorageBenchmarkTarget : IPhysicalStorageBenchmark
             batches * concurrency,
             payloadBytes,
             batches,
-            observableResultVector: observed.Build()) with { ConcurrentLoad = concurrentEvidence };
+            observableResultVector: observed.Build()) with
+        {
+            ConcurrentLoad = concurrentEvidence
+        };
     }
 
     private async Task<WorkloadExecution> PaginationAndCountAsync(

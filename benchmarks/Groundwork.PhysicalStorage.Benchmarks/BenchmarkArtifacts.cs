@@ -353,6 +353,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(benchmarkCase);
         ArgumentNullException.ThrowIfNull(evidence);
+        NativePlanEvidenceSidecar.ValidateForWrite(evidence);
         if (benchmarkCase.Workload != evidence.Request.Workload)
         {
             throw new InvalidOperationException(
@@ -593,7 +594,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             foreach (var artifact in casePlans)
             {
                 var path = ResolveArtifact(layout, artifact);
-                var sidecar = await ReadJsonAsync<NativePlanEvidence>(
+                var sidecar = await NativePlanEvidenceSidecar.ReadAsync(
                     ResolveArtifact(layout, $"{artifact}.assertions.json"),
                     cancellationToken);
                 if (sidecar.Request is null || !canonicalRequests.Contains(sidecar.Request) || !seenRequests.Add(sidecar.Request))
@@ -610,8 +611,8 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
                         $"Baseline case '{result.Case.Identity}' native-plan artifact does not use the canonical request path.");
                 }
 
-                if (!string.Equals(sidecar.Provider, result.Case.Provider.ToString(), StringComparison.Ordinal) ||
-                    !string.Equals(sidecar.StorageForm, result.Case.StorageForm.ToString(), StringComparison.Ordinal))
+                if (sidecar.Provider != result.Case.Provider ||
+                    sidecar.StorageForm != result.Case.StorageForm)
                 {
                     throw new InvalidOperationException(
                         $"Baseline case '{result.Case.Identity}' native-plan sidecar does not match its provider/storage tuple.");
@@ -633,7 +634,10 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
                         $"Baseline case '{result.Case.Identity}' native-plan evidence is missing physical, query, or index identity.");
                 }
 
-                if (!string.Equals(sidecar.QueryIdentity, BenchmarkModelFactory.QueryIdentity, StringComparison.Ordinal))
+                if (!string.Equals(
+                        sidecar.QueryIdentity,
+                        BenchmarkModelFactory.QueryIdentityFor(sidecar.Request.Ordered),
+                        StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException(
                         $"Baseline case '{result.Case.Identity}' native-plan evidence has an unexpected query identity.");
@@ -641,6 +645,7 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
 
                 if (!NativePlanEvidenceAssertions.Matches(
                         assertionMode,
+                        sidecar.Request,
                         result.Case.Provider,
                         sidecar.IndexName,
                         sidecar.PhysicalObject,

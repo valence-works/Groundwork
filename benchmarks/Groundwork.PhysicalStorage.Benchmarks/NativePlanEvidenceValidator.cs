@@ -20,6 +20,8 @@ internal static partial class NativePlanEvidenceValidator
     };
 
     public static bool Matches(
+        NativePlanAssertionMode assertionMode,
+        BenchmarkPlanRequest request,
         BenchmarkProvider provider,
         string physicalObject,
         string indexName,
@@ -28,7 +30,10 @@ internal static partial class NativePlanEvidenceValidator
     {
         if (binding is null ||
             string.IsNullOrWhiteSpace(binding.PhysicalObject) ||
-            !string.Equals(binding.PhysicalObject, physicalObject, StringComparison.Ordinal))
+            !string.Equals(binding.PhysicalObject, physicalObject, StringComparison.Ordinal) ||
+            !MatchesRequestShape(binding.RequestShape, request, assertionMode) ||
+            !MatchesQueryReceipt(binding) ||
+            !MatchesExecutionReceipt(assertionMode, request, provider, binding))
         {
             return false;
         }
@@ -96,7 +101,10 @@ internal static partial class NativePlanEvidenceValidator
         string indexName,
         string nativePlan)
     {
-        if (binding.Alias is not null || binding.ParameterizedCommand is not null)
+        if (binding.Alias is not null ||
+            binding.ParameterizedCommand is not null ||
+            binding.MongoCommandReceipt is null ||
+            !NativePlanCommandParsing.MongoCommandBindsObject(binding.MongoCommandReceipt, binding.PhysicalObject))
             return false;
 
         var explain = BsonDocument.Parse(nativePlan);
@@ -206,6 +214,138 @@ internal static partial class NativePlanEvidenceValidator
         !ConnectionData().IsMatch(binding.ParameterizedCommand) &&
         !SqlStringLiteral().IsMatch(binding.ParameterizedCommand);
 
+    private static bool MatchesRequestShape(
+        NativePlanRequestShape? shape,
+        BenchmarkPlanRequest request,
+        NativePlanAssertionMode assertionMode)
+    {
+        if (shape is null || shape.Filters is null || shape.Order is null)
+            return false;
+        return ShapesEqual(shape, NativePlanRequestShape.For(request, assertionMode));
+    }
+
+    private static bool MatchesExecutionReceipt(
+        NativePlanAssertionMode assertionMode,
+        BenchmarkPlanRequest request,
+        BenchmarkProvider provider,
+        NativePlanCommandBinding binding)
+    {
+        if (binding.QueryReceipt is null ||
+            binding.RequestShape is null ||
+            binding.Fields is null)
+            return false;
+
+        if (provider == BenchmarkProvider.MongoDb)
+        {
+            if (binding.MongoCommandReceipt is null ||
+                !NativePlanCommandParsing.MongoReceiptIsStrictlyRedacted(binding.MongoCommandReceipt))
+            {
+                return false;
+            }
+
+            try
+            {
+                return ShapesEqual(
+                    NativePlanRequestShape.FromMongoCommand(
+                        request,
+                        assertionMode,
+                        binding.MongoCommandReceipt,
+                        binding.Fields),
+                    binding.QueryReceipt.Shape);
+            }
+            catch (Exception exception) when (exception is FormatException or InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        if (binding.MongoCommandReceipt is not null || !HasSafeParameterizedCommand(binding))
+            return false;
+
+        return ShapesEqual(
+            NativePlanRequestShape.FromRelationalCommand(
+                request,
+                assertionMode,
+                binding.ParameterizedCommand!,
+                binding.QueryReceipt.Parameters,
+                binding.Fields),
+            binding.QueryReceipt.Shape);
+    }
+
+    private static bool MatchesQueryReceipt(NativePlanCommandBinding binding)
+    {
+        var receipt = binding.QueryReceipt;
+        if (receipt is null ||
+            binding.RequestShape is null ||
+            receipt.Shape is null ||
+            receipt.Parameters is null ||
+            !ShapesEqual(receipt.Shape, binding.RequestShape) ||
+            receipt.Parameters.Any(parameter =>
+                string.IsNullOrWhiteSpace(parameter.Name) ||
+                string.IsNullOrWhiteSpace(parameter.Role)) ||
+            receipt.Parameters.Select(parameter => parameter.Name)
+                .Distinct(StringComparer.Ordinal).Count() != receipt.Parameters.Count)
+        {
+            return false;
+        }
+
+        foreach (var filter in receipt.Shape.Filters)
+        {
+            var (expectedRole, expectedValueClassification) = filter.Parameter switch
+            {
+                "scope" => ("storage-scope", "benchmark-tenant"),
+                "kind" => ("document-kind", "benchmark-document-kind"),
+                "q0" => ("predicate", "benchmark-selected-status"),
+                _ => (null, null)
+            };
+            if (expectedRole is null || !receipt.Parameters.Any(parameter =>
+                    parameter.Name == filter.Parameter &&
+                    parameter.Role == expectedRole &&
+                    parameter.StructuralValue is null &&
+                    parameter.ValueClassification == expectedValueClassification))
+            {
+                return false;
+            }
+        }
+
+        var pagination = receipt.Parameters.Where(parameter =>
+            parameter.Role.StartsWith("pagination-", StringComparison.Ordinal)).ToArray();
+        if (receipt.Shape.Terminal != NativePlanTerminalOperation.Documents)
+        {
+            return pagination.Length == 0;
+        }
+
+        return pagination.Length == 2 &&
+               pagination.Any(parameter =>
+                   parameter.Name == "skip" &&
+                   parameter.Role == "pagination-skip" &&
+                   parameter.StructuralValue == (receipt.Shape.Skip ?? 0) &&
+                   parameter.ValueClassification == "structural") &&
+               pagination.Any(parameter =>
+                   parameter.Name == "take" &&
+                   parameter.Role == "pagination-take" &&
+                   parameter.StructuralValue == receipt.Shape.Take &&
+                   parameter.ValueClassification == "structural");
+    }
+
+    private static bool ShapesEqual(
+        NativePlanRequestShape? actual,
+        NativePlanRequestShape? expected) =>
+        actual is not null &&
+        expected is not null &&
+        actual.Filters is not null &&
+        expected.Filters is not null &&
+        actual.Order is not null &&
+        expected.Order is not null &&
+        actual.Workload == expected.Workload &&
+        actual.Operation == expected.Operation &&
+        actual.Terminal == expected.Terminal &&
+        actual.Skip == expected.Skip &&
+        actual.Take == expected.Take &&
+        actual.QuerySelectivityBasisPoints == expected.QuerySelectivityBasisPoints &&
+        actual.Filters.SequenceEqual(expected.Filters) &&
+        actual.Order.SequenceEqual(expected.Order);
+
     private static bool CommandBindsObject(
         NativePlanCommandBinding binding,
         char quoteStart,
@@ -214,7 +354,7 @@ internal static partial class NativePlanEvidenceValidator
         var quotedObject = $"{quoteStart}{binding.PhysicalObject}{quoteEnd}";
         return Regex.IsMatch(
             binding.ParameterizedCommand!,
-            $@"\b(?:FROM|JOIN)\s+{Regex.Escape(quotedObject)}\s+(?:AS\s+)?{Regex.Escape(binding.Alias!)}\b",
+            $@"\b(?:FROM|JOIN)\s+{Regex.Escape(quotedObject)}\s+(?:AS\s+)?{NativePlanCommandParsing.Identifier(binding.Alias!)}",
             RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     }
 
@@ -312,4 +452,5 @@ internal static partial class NativePlanEvidenceValidator
 
     [GeneratedRegex(@"'(?:''|[^'])*'", RegexOptions.CultureInvariant)]
     private static partial Regex SqlStringLiteral();
+
 }
