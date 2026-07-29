@@ -519,6 +519,82 @@ public sealed class SqlitePhysicalSchemaExecutorTests
     }
 
     [Fact]
+    public async Task SharedTransitionLeasesOverlapAndExcludeApplicationLease()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"groundwork-shared-transition-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        IAsyncDisposable? first = null;
+        IAsyncDisposable? second = null;
+        try
+        {
+            var connectionString = $"Data Source={Path.Combine(directory, "groundwork.db")}";
+            var target = CreateModel(PhysicalStorageForm.PhysicalEntityTable, includePriority: true).Target.Identity;
+            first = await SqlitePhysicalSchemaTransitionLock.AcquireSharedAsync(
+                connectionString,
+                target,
+                CancellationToken.None);
+            using (var acquisition = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+            {
+                second = await SqlitePhysicalSchemaTransitionLock.AcquireSharedAsync(
+                    connectionString,
+                    target,
+                    acquisition.Token);
+            }
+
+            var exclusive = SqlitePhysicalSchemaTransitionLock.AcquireAsync(
+                connectionString,
+                target,
+                CancellationToken.None).AsTask();
+            await Task.Delay(TimeSpan.FromMilliseconds(75));
+            Assert.False(exclusive.IsCompleted);
+
+            await second.DisposeAsync();
+            second = null;
+            await Task.Delay(TimeSpan.FromMilliseconds(75));
+            Assert.False(exclusive.IsCompleted);
+
+            await first.DisposeAsync();
+            first = null;
+            await using var applicationLease = await exclusive.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            if (second is not null)
+                await second.DisposeAsync();
+            if (first is not null)
+                await first.DisposeAsync();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ApplicationLeaseExcludesSharedTransitionLease()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"groundwork-exclusive-transition-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var connectionString = $"Data Source={Path.Combine(directory, "groundwork.db")}";
+            var target = CreateModel(PhysicalStorageForm.PhysicalEntityTable, includePriority: true).Target.Identity;
+            await using var applicationLease = await SqlitePhysicalSchemaTransitionLock.AcquireAsync(
+                connectionString,
+                target,
+                CancellationToken.None);
+            using var acquisition = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await SqlitePhysicalSchemaTransitionLock.AcquireSharedAsync(
+                    connectionString,
+                    target,
+                    acquisition.Token));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ConcurrentApplicantsSerializeAcrossIndependentFileConnections()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"groundwork-physical-{Guid.NewGuid():N}");
@@ -1407,7 +1483,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             var oldStore = new SqlitePhysicalDocumentStore(
                 connectionString,
                 initial.Manifest,
-                initial.Target.Routes,
+                initial.Target,
                 DocumentStoreAccess.Global);
             await oldStore.SaveAsync(new SaveDocumentRequest(
                 "configurationDocument",
@@ -1481,7 +1557,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             var restarted = new SqlitePhysicalDocumentStore(
                 connectionString,
                 additive.Manifest,
-                additive.Target.Routes,
+                additive.Target,
                 DocumentStoreAccess.Global);
             Assert.Equal(DocumentStoreWriteStatus.Saved, (await restarted.SaveAsync(new SaveDocumentRequest(
                 "configurationDocument",
@@ -1597,7 +1673,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             var oldStore = new SqlitePhysicalDocumentStore(
                 connectionString,
                 initial.Manifest,
-                initial.Target.Routes,
+                initial.Target,
                 DocumentStoreAccess.Global);
 
             await Assert.ThrowsAsync<InjectedTransitionException>(() =>
@@ -1621,7 +1697,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             var newStore = new SqlitePhysicalDocumentStore(
                 connectionString,
                 additive.Manifest,
-                additive.Target.Routes,
+                additive.Target,
                 DocumentStoreAccess.Global);
             await Assert.ThrowsAsync<PhysicalSchemaUpgradeRequiredException>(() => newStore.SaveAsync(
                 new SaveDocumentRequest(

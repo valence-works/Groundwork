@@ -15,6 +15,23 @@ internal static class SqliteRelationalSessions
     public static RelationalSessionFactory CreateSerializedImmediate(string connectionString) =>
         CreateSerializedImmediate(connectionString, null);
 
+    public static RelationalSessionFactory CreateConcurrentImmediate(
+        string connectionString,
+        SqliteConnectionPragmaOptions? options = null)
+    {
+        ValidateStatelessConnectionString(connectionString);
+        options ??= SqliteConnectionPragmaOptions.Default;
+
+        return RelationalSessionFactory.Concurrent(
+            () => SqliteConnectionFactory.Create(connectionString, options),
+            static (connection, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.FromResult<System.Data.Common.DbTransaction>(
+                    ((SqliteConnection)connection).BeginTransaction(deferred: false));
+            });
+    }
+
     internal static RelationalSessionFactory CreateSerializedImmediate(
         string connectionString,
         SqliteImmediateTransactionObserver? observer)
