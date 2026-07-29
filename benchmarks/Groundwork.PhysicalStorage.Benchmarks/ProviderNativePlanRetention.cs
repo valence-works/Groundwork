@@ -120,9 +120,12 @@ internal static class ProviderNativePlanRetention
     }
 
     private static string RetainSqliteAlias(string observedAlias, string boundAlias) =>
-        string.Equals(observedAlias, boundAlias, StringComparison.Ordinal)
-            ? boundAlias
-            : UnrelatedAliasRedacted;
+        observedAlias switch
+        {
+            "p" or "l" => observedAlias,
+            _ when string.Equals(observedAlias, boundAlias, StringComparison.Ordinal) => boundAlias,
+            _ => UnrelatedAliasRedacted
+        };
 
     private static string RetainSqliteIndex(
         Match match,

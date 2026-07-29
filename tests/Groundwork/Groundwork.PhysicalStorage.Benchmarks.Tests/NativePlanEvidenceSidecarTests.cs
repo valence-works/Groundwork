@@ -399,6 +399,33 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
     }
 
     [Fact]
+    public async Task Writer_rejects_a_SQLite_primary_scan_in_declared_index_mode()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.Sqlite,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = Evidence() with
+        {
+            NativePlan = """
+                SEARCH l USING INDEX fixture_index (status=?)
+                SCAN p
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
     public async Task Writer_retains_PostgreSQL_scan_characterization_without_requiring_an_index()
     {
         var benchmarkCase = new BenchmarkCase(
