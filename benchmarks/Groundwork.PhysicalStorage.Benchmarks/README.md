@@ -49,6 +49,9 @@ elements, known gate-bearing access operators, and bound table/index identities;
 tree plus allowlisted operator/relation/index/estimate members, and MongoDB keeps only the bound
 namespace plus winning stage/index topology. Statement text, expressions, predicates, commands,
 aliases, namespace declarations, comments, and processing instructions are discarded.
+Declared-index gates reject any different bound index. Scan characterization instead retains a
+provider-selected alternative as `alternative-index-redacted`, preserving the access-path fact
+without disclosing its identity or making a declared-index claim.
 MongoDB command admission binds the renderer's complete canonical sort: optional semantic rank
 first, followed by the scope and identity-comparison tie breaks in their exact directions.
 The unordered equality workload and the ordered/paged workloads use separate declared query

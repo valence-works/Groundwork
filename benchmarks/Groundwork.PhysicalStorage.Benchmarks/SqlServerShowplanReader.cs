@@ -38,7 +38,13 @@ internal static class SqlServerShowplanReader
                     string stringValue when isShowplanColumn => stringValue,
                     _ => null
                 };
-                if (text is not null && TryRetainSafeStructure(text, null, null, out var retained))
+                if (text is not null &&
+                    TryRetainSafeStructure(
+                        text,
+                        null,
+                        null,
+                        NativePlanAssertionMode.ScanCharacterization,
+                        out var retained))
                     plans.Add(retained);
             }
         } while (await reader.NextResultAsync(cancellationToken));
@@ -82,9 +88,10 @@ internal static class SqlServerShowplanReader
     internal static string RetainSafeStructure(
         string value,
         string? physicalObject = null,
-        string? indexName = null)
+        string? indexName = null,
+        NativePlanAssertionMode assertionMode = NativePlanAssertionMode.ScanCharacterization)
     {
-        if (!TryRetainSafeStructure(value, physicalObject, indexName, out var retained))
+        if (!TryRetainSafeStructure(value, physicalObject, indexName, assertionMode, out var retained))
             throw new InvalidOperationException("SQL Server native-plan evidence is not ShowPlan XML.");
         return retained;
     }
@@ -122,6 +129,7 @@ internal static class SqlServerShowplanReader
         string value,
         string? physicalObject,
         string? indexName,
+        NativePlanAssertionMode assertionMode,
         out string retained)
     {
         try
@@ -133,7 +141,7 @@ internal static class SqlServerShowplanReader
                 return false;
             }
 
-            retained = new XDocument(RetainElement(document.Root, physicalObject, indexName))
+            retained = new XDocument(RetainRoot(document.Root, physicalObject, indexName, assertionMode))
                 .ToString(SaveOptions.DisableFormatting);
             return true;
         }
@@ -144,10 +152,50 @@ internal static class SqlServerShowplanReader
         }
     }
 
-    private static XElement RetainElement(
+    private static XElement RetainRoot(
         XElement source,
         string? physicalObject,
-        string? indexName)
+        string? indexName,
+        NativePlanAssertionMode assertionMode)
+    {
+        var retained = new XElement(XName.Get("ShowPlanXML", ShowplanNamespace));
+        foreach (var child in RetainStructuralDescendants(source, physicalObject, indexName, assertionMode))
+            retained.Add(child);
+        return retained;
+    }
+
+    private static IEnumerable<XElement> RetainStructuralDescendants(
+        XElement source,
+        string? physicalObject,
+        string? indexName,
+        NativePlanAssertionMode assertionMode)
+    {
+        foreach (var child in source.Elements().Where(element =>
+                     element.Name.NamespaceName == ShowplanNamespace))
+        {
+            if (child.Name.LocalName is not ("RelOp" or "Object"))
+            {
+                foreach (var descendant in RetainStructuralDescendants(
+                             child,
+                             physicalObject,
+                             indexName,
+                             assertionMode))
+                {
+                    yield return descendant;
+                }
+                continue;
+            }
+
+            var retained = RetainStructuralElement(child, physicalObject, indexName, assertionMode);
+            yield return retained;
+        }
+    }
+
+    private static XElement RetainStructuralElement(
+        XElement source,
+        string? physicalObject,
+        string? indexName,
+        NativePlanAssertionMode assertionMode)
     {
         var retained = new XElement(XName.Get(source.Name.LocalName, ShowplanNamespace));
         var bindsObject = physicalObject is not null &&
@@ -157,7 +205,8 @@ internal static class SqlServerShowplanReader
         if (bindsObject &&
             source.Attribute("Index") is { } observedIndex &&
             indexName is not null &&
-            !IsIndex(observedIndex.Value, indexName))
+            !IsIndex(observedIndex.Value, indexName) &&
+            assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
         {
             throw new InvalidOperationException(
                 "SQL Server native-plan evidence selected an unexpected index on the bound table.");
@@ -166,15 +215,17 @@ internal static class SqlServerShowplanReader
                      !attribute.IsNamespaceDeclaration &&
                      attribute.Name.NamespaceName.Length == 0))
         {
-            var value = RetainedAttributeValue(attribute, physicalObject, indexName, bindsObject);
+            var value = RetainedAttributeValue(
+                attribute,
+                physicalObject,
+                indexName,
+                bindsObject,
+                assertionMode);
             if (value is not null)
                 retained.Add(new XAttribute(attribute.Name.LocalName, value));
         }
-        foreach (var child in source.Elements().Where(element =>
-                     element.Name.NamespaceName == ShowplanNamespace))
-        {
-            retained.Add(RetainElement(child, physicalObject, indexName));
-        }
+        foreach (var child in RetainStructuralDescendants(source, physicalObject, indexName, assertionMode))
+            retained.Add(child);
         return retained;
     }
 
@@ -182,7 +233,8 @@ internal static class SqlServerShowplanReader
         XAttribute attribute,
         string? physicalObject,
         string? indexName,
-        bool bindsObject) =>
+        bool bindsObject,
+        NativePlanAssertionMode assertionMode) =>
         attribute.Name.LocalName switch
         {
             "PhysicalOp" when RetainedPhysicalOperators.Contains(attribute.Value) => attribute.Value,
@@ -190,6 +242,9 @@ internal static class SqlServerShowplanReader
             "Table" when bindsObject => $"[{physicalObject}]",
             "Index" when indexName is null => attribute.Value,
             "Index" when bindsObject && IsIndex(attribute.Value, indexName) => $"[{indexName}]",
+            "Index" when bindsObject &&
+                         assertionMode == NativePlanAssertionMode.ScanCharacterization =>
+                $"[{ProviderNativePlanRetention.AlternativeIndexRedacted}]",
             _ => null
         };
 

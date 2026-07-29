@@ -7,6 +7,8 @@ namespace Groundwork.PhysicalStorage.Benchmarks;
 
 internal static class ProviderNativePlanRetention
 {
+    internal const string AlternativeIndexRedacted = "alternative-index-redacted";
+
     private static readonly ISet<string> PostgreSqlNodeTypes = new HashSet<string>(StringComparer.Ordinal)
     {
         "Aggregate", "Append", "Bitmap Heap Scan", "Bitmap Index Scan", "Gather", "Gather Merge",
@@ -44,11 +46,12 @@ internal static class ProviderNativePlanRetention
         NativePlanAssertionMode assertionMode) =>
         provider switch
         {
-            BenchmarkProvider.Sqlite => RetainSqlite(nativePlan, indexName, alias),
+            BenchmarkProvider.Sqlite => RetainSqlite(nativePlan, indexName, alias, assertionMode),
             BenchmarkProvider.SqlServer => SqlServerShowplanReader.RetainSafeStructure(
                 nativePlan,
                 physicalObject,
-                indexName),
+                indexName,
+                assertionMode),
             BenchmarkProvider.PostgreSql => RetainPostgreSql(
                 nativePlan,
                 physicalObject,
@@ -65,11 +68,12 @@ internal static class ProviderNativePlanRetention
     private static string RetainSqlite(
         string nativePlan,
         string indexName,
-        string? boundAlias)
+        string? boundAlias,
+        NativePlanAssertionMode assertionMode)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(boundAlias);
         var retained = nativePlan.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .Select(line => RetainSqliteLine(line.Trim(), indexName, boundAlias))
+            .Select(line => RetainSqliteLine(line.Trim(), indexName, boundAlias, assertionMode))
             .ToArray();
         if (retained.Length == 0)
             throw new InvalidOperationException("SQLite native-plan evidence is empty.");
@@ -79,7 +83,8 @@ internal static class ProviderNativePlanRetention
     private static string RetainSqliteLine(
         string line,
         string indexName,
-        string boundAlias)
+        string boundAlias,
+        NativePlanAssertionMode assertionMode)
     {
         var search = SqliteSearch.Match(line);
         if (search.Success)
@@ -87,7 +92,7 @@ internal static class ProviderNativePlanRetention
             var alias = search.Groups["alias"].Value;
             if (search.Groups["primary"].Success)
                 return $"SEARCH {alias} USING INTEGER PRIMARY KEY (predicate-redacted)";
-            return $"SEARCH {alias} USING INDEX {RetainSqliteIndex(search, alias, boundAlias, indexName)} (predicate-redacted)";
+            return $"SEARCH {alias} USING INDEX {RetainSqliteIndex(search, alias, boundAlias, indexName, assertionMode)} (predicate-redacted)";
         }
 
         var scan = SqliteScan.Match(line);
@@ -95,7 +100,7 @@ internal static class ProviderNativePlanRetention
         {
             var alias = scan.Groups["alias"].Value;
             return scan.Groups["index"].Success
-                ? $"SCAN {alias} USING INDEX {RetainSqliteIndex(scan, alias, boundAlias, indexName)}"
+                ? $"SCAN {alias} USING INDEX {RetainSqliteIndex(scan, alias, boundAlias, indexName, assertionMode)}"
                 : $"SCAN {alias}";
         }
 
@@ -115,13 +120,18 @@ internal static class ProviderNativePlanRetention
         Match match,
         string observedAlias,
         string boundAlias,
-        string indexName)
+        string indexName,
+        NativePlanAssertionMode assertionMode)
     {
         var observedIndex = match.Groups["index"].Value;
         if (!string.Equals(observedAlias, boundAlias, StringComparison.Ordinal))
             return "unrelated-index-redacted";
         if (!string.Equals(observedIndex, indexName, StringComparison.OrdinalIgnoreCase))
+        {
+            if (assertionMode == NativePlanAssertionMode.ScanCharacterization)
+                return AlternativeIndexRedacted;
             throw new InvalidOperationException("SQLite native-plan evidence selected an unexpected bound index.");
+        }
         return indexName;
     }
 
@@ -159,6 +169,7 @@ internal static class ProviderNativePlanRetention
                 plan,
                 physicalObject,
                 indexName,
+                assertionMode,
                 withinBoundRelation: false)
         })
             .ToJsonString(BenchmarkJson.CompactOptions);
@@ -168,6 +179,7 @@ internal static class ProviderNativePlanRetention
         JsonElement source,
         string physicalObject,
         string indexName,
+        NativePlanAssertionMode assertionMode,
         bool withinBoundRelation)
     {
         if (!source.TryGetProperty("Node Type", out var nodeType) ||
@@ -184,18 +196,27 @@ internal static class ProviderNativePlanRetention
             retained["Relation Name"] = physicalObject;
         if (source.TryGetProperty("Index Name", out var observedIndex))
         {
-            var matchesIndex = observedIndex.ValueKind == JsonValueKind.String &&
-                               string.Equals(
-                                   observedIndex.GetString(),
-                                   indexName,
-                                   StringComparison.OrdinalIgnoreCase);
-            if (boundScope && !matchesIndex)
+            if (observedIndex.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidOperationException(
+                    "PostgreSQL native-plan evidence contains a malformed index identity.");
+            }
+            var matchesIndex = string.Equals(
+                observedIndex.GetString(),
+                indexName,
+                StringComparison.OrdinalIgnoreCase);
+            if (boundScope && !matchesIndex &&
+                assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
             {
                 throw new InvalidOperationException(
                     "PostgreSQL native-plan evidence selected an unexpected index on the bound relation.");
             }
-            if (boundScope && matchesIndex)
-                retained["Index Name"] = indexName;
+            if (boundScope)
+            {
+                retained["Index Name"] = matchesIndex
+                    ? indexName
+                    : AlternativeIndexRedacted;
+            }
         }
         foreach (var member in PostgreSqlSafeScalarMembers)
         {
@@ -217,6 +238,7 @@ internal static class ProviderNativePlanRetention
                     child,
                     physicalObject,
                     indexName,
+                    assertionMode,
                     boundScope))
                 .Cast<JsonNode?>()
                 .ToArray());
@@ -255,14 +277,25 @@ internal static class ProviderNativePlanRetention
                 var retained = new BsonDocument("stage", document["stage"].AsString);
                 if (document.TryGetValue("indexName", out var observedIndex))
                 {
-                    if (!observedIndex.IsString ||
-                        !string.Equals(observedIndex.AsString, indexName, StringComparison.Ordinal))
+                    if (!observedIndex.IsString)
+                    {
+                        throw new InvalidOperationException(
+                            "MongoDB native-plan evidence contains a malformed index identity.");
+                    }
+                    var matchesIndex = string.Equals(
+                        observedIndex.AsString,
+                        indexName,
+                        StringComparison.Ordinal);
+                    if (!matchesIndex &&
+                        assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
                     {
                         throw new InvalidOperationException(
                             "MongoDB native-plan evidence selected an unexpected index.");
                     }
-                    hasExpectedIndex = true;
-                    retained["indexName"] = indexName;
+                    hasExpectedIndex |= matchesIndex;
+                    retained["indexName"] = matchesIndex
+                        ? indexName
+                        : AlternativeIndexRedacted;
                 }
                 return retained;
             })

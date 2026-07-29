@@ -331,6 +331,67 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData(BenchmarkProvider.Sqlite)]
+    [InlineData(BenchmarkProvider.SqlServer)]
+    [InlineData(BenchmarkProvider.PostgreSql)]
+    [InlineData(BenchmarkProvider.MongoDb)]
+    public async Task Writer_retains_an_alternative_index_without_claiming_its_identity_during_scan_characterization(
+        BenchmarkProvider provider)
+    {
+        const string alternativeIndex = "Secret:synthetic-alternative-index";
+        var benchmarkCase = new BenchmarkCase(
+            provider,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = provider switch
+        {
+            BenchmarkProvider.Sqlite => Evidence(NativePlanAssertionMode.ScanCharacterization) with
+            {
+                NativePlan = $"SEARCH l USING INDEX {alternativeIndex} (status=?)"
+            },
+            BenchmarkProvider.SqlServer => SqlServerEvidenceWithSecret(
+                    NativePlanAssertionMode.ScanCharacterization) with
+            {
+                NativePlan = $"""
+                    <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+                      <RelOp PhysicalOp="Index Seek">
+                        <Object Table="[fixture_table]" Index="[{alternativeIndex}]" />
+                      </RelOp>
+                    </ShowPlanXML>
+                    """
+            },
+            BenchmarkProvider.PostgreSql => PostgreSqlEvidenceWithSecret(
+                    NativePlanAssertionMode.ScanCharacterization) with
+            {
+                NativePlan = PostgreSqlEvidenceWithSecret(
+                        NativePlanAssertionMode.ScanCharacterization)
+                    .NativePlan
+                    .Replace("fixture_index", alternativeIndex, StringComparison.Ordinal)
+            },
+            BenchmarkProvider.MongoDb => MongoDbEvidenceWithSecret(
+                    NativePlanAssertionMode.ScanCharacterization) with
+            {
+                NativePlan = MongoDbEvidenceWithSecret(
+                        NativePlanAssertionMode.ScanCharacterization)
+                    .NativePlan
+                    .Replace("fixture_index", alternativeIndex, StringComparison.Ordinal)
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.ScanCharacterization,
+            CancellationToken.None);
+
+        var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
+        Assert.Contains(ProviderNativePlanRetention.AlternativeIndexRedacted, plan, StringComparison.Ordinal);
+        Assert.DoesNotContain(alternativeIndex, plan, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Writer_retains_PostgreSQL_scan_characterization_without_requiring_an_index()
     {
@@ -395,14 +456,15 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             Directory.Delete(root, recursive: true);
     }
 
-    private static NativePlanEvidence Evidence()
+    private static NativePlanEvidence Evidence(
+        NativePlanAssertionMode assertionMode = NativePlanAssertionMode.RequireDeclaredIndex)
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
             .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
         const string command = "SELECT * FROM \"fixture_table\" AS l WHERE l.\"storage_scope\" = @scope AND l.\"document_kind\" = @kind AND l.\"status\" = @q0 LIMIT @take OFFSET @skip";
         var receipt = NativePlanQueryReceipt.FromRelational(
             request,
-            NativePlanAssertionMode.RequireDeclaredIndex,
+            assertionMode,
             command,
             [
                 ("scope", (object?)"tenant-a"),
@@ -421,7 +483,7 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             "fixture_index",
             "SEARCH l USING INDEX fixture_index (status=?)",
             NativePlanEvidenceAssertions.ForSqlite(
-                NativePlanAssertionMode.RequireDeclaredIndex,
+                assertionMode,
                 "fixture_index",
                 "SEARCH l USING INDEX fixture_index (status=?)"))
         {
@@ -432,14 +494,15 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         };
     }
 
-    private static NativePlanEvidence SqlServerEvidenceWithSecret()
+    private static NativePlanEvidence SqlServerEvidenceWithSecret(
+        NativePlanAssertionMode assertionMode = NativePlanAssertionMode.RequireDeclaredIndex)
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
             .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
         const string command = "SELECT * FROM [fixture_table] AS l WHERE l.[storage_scope] = @scope AND l.[document_kind] = @kind AND l.[status] = @q0 OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY";
         var receipt = NativePlanQueryReceipt.FromRelational(
             request,
-            NativePlanAssertionMode.RequireDeclaredIndex,
+            assertionMode,
             command,
             [
                 ("scope", (object?)"tenant-a"),
@@ -462,7 +525,12 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
                     <RelOp PhysicalOp="Secret:synthetic-test-value" LogicalOp="operator-payload">
                       <Object Table="[Secret:synthetic-test-value]" Index="[Secret:synthetic-test-value]" />
                     </RelOp>
-                    <RelOp PhysicalOp="Index Seek"><IndexScan>
+                    <Secret-synthetic-test-value>
+                      <Nested-secret-synthetic-test-value />
+                    </Secret-synthetic-test-value>
+                    <RelOp PhysicalOp="Index Seek">
+                    <Nested-secret-synthetic-test-value />
+                    <IndexScan>
                     <DefinedValues><DefinedValue><ColumnReference Column="[Secret:synthetic-test-value]" /></DefinedValue></DefinedValues>
                     <Predicate><ScalarOperator ScalarString="[Secret:synthetic-test-value]" /></Predicate>
                     <Object Table="[fixture_table]" Index="[fixture_index]" Alias="[l]" />
@@ -480,7 +548,7 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             "fixture_table",
             "fixture_index",
             nativePlan,
-            NativePlanEvidenceAssertions.ForSqlServer(NativePlanAssertionMode.RequireDeclaredIndex))
+            NativePlanEvidenceAssertions.ForSqlServer(assertionMode))
         {
             CommandBinding = new NativePlanCommandBinding("fixture_table", "l", command, receipt.Shape, receipt)
             {
@@ -575,7 +643,8 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         };
     }
 
-    private static NativePlanEvidence MongoDbEvidenceWithSecret()
+    private static NativePlanEvidence MongoDbEvidenceWithSecret(
+        NativePlanAssertionMode assertionMode = NativePlanAssertionMode.RequireDeclaredIndex)
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
             .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
@@ -591,7 +660,7 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             """);
         var receipt = NativePlanQueryReceipt.FromMongoDb(
             request,
-            NativePlanAssertionMode.RequireDeclaredIndex,
+            assertionMode,
             command,
             NativePlanTestBindings.CanonicalFields);
         const string nativePlan = """
@@ -617,7 +686,7 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             "fixture_index",
             nativePlan,
             NativePlanEvidenceAssertions.ForMongoDb(
-                NativePlanAssertionMode.RequireDeclaredIndex,
+                assertionMode,
                 "fixture_index"))
         {
             CommandBinding = new NativePlanCommandBinding("fixture_table", null, null, receipt.Shape, receipt)

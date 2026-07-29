@@ -42,10 +42,10 @@ internal static partial class NativePlanEvidenceValidator
         {
             return provider switch
             {
-                BenchmarkProvider.Sqlite => MatchesSqlite(binding, indexName, nativePlan),
-                BenchmarkProvider.MongoDb => MatchesMongoDb(binding, indexName, nativePlan),
-                BenchmarkProvider.PostgreSql => MatchesPostgreSql(binding, indexName, nativePlan),
-                BenchmarkProvider.SqlServer => MatchesSqlServer(binding, indexName, nativePlan),
+                BenchmarkProvider.Sqlite => MatchesSqlite(assertionMode, binding, indexName, nativePlan),
+                BenchmarkProvider.MongoDb => MatchesMongoDb(assertionMode, binding, indexName, nativePlan),
+                BenchmarkProvider.PostgreSql => MatchesPostgreSql(assertionMode, binding, indexName, nativePlan),
+                BenchmarkProvider.SqlServer => MatchesSqlServer(assertionMode, binding, indexName, nativePlan),
                 _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
             };
         }
@@ -57,6 +57,7 @@ internal static partial class NativePlanEvidenceValidator
     }
 
     private static bool MatchesSqlite(
+        NativePlanAssertionMode assertionMode,
         NativePlanCommandBinding binding,
         string indexName,
         string nativePlan)
@@ -83,7 +84,7 @@ internal static partial class NativePlanEvidenceValidator
                     : null;
                 if (observedIndex is not null &&
                     string.Equals(alias, binding.Alias, StringComparison.Ordinal) &&
-                    !string.Equals(observedIndex, indexName, StringComparison.OrdinalIgnoreCase))
+                    !MatchesRetainedIndex(assertionMode, observedIndex, indexName))
                 {
                     return false;
                 }
@@ -98,6 +99,7 @@ internal static partial class NativePlanEvidenceValidator
     }
 
     private static bool MatchesMongoDb(
+        NativePlanAssertionMode assertionMode,
         NativePlanCommandBinding binding,
         string indexName,
         string nativePlan)
@@ -137,10 +139,14 @@ internal static partial class NativePlanEvidenceValidator
             .Where(document =>
                 document.TryGetValue("indexName", out var observedIndex) &&
                 observedIndex.IsString)
-            .All(document => document["indexName"].AsString.Equals(indexName, StringComparison.Ordinal));
+            .All(document => MatchesRetainedIndex(
+                assertionMode,
+                document["indexName"].AsString,
+                indexName));
     }
 
     private static bool MatchesPostgreSql(
+        NativePlanAssertionMode assertionMode,
         NativePlanCommandBinding binding,
         string indexName,
         string nativePlan)
@@ -180,10 +186,11 @@ internal static partial class NativePlanEvidenceValidator
         return matchingRelations.Length > 0 &&
                matchingRelations.All(node =>
                    PostgreSqlIndexNames(node).All(observedIndex =>
-                       string.Equals(observedIndex, indexName, StringComparison.OrdinalIgnoreCase)));
+                       MatchesRetainedIndex(assertionMode, observedIndex, indexName)));
     }
 
     private static bool MatchesSqlServer(
+        NativePlanAssertionMode assertionMode,
         NativePlanCommandBinding binding,
         string indexName,
         string nativePlan)
@@ -210,8 +217,22 @@ internal static partial class NativePlanEvidenceValidator
         return objects.Length > 0 &&
                objects.All(element =>
                    element.Attribute("Index") is not { } observedIndex ||
-                   IdentifierMatches(observedIndex.Value, indexName));
+                   MatchesRetainedIndex(
+                       assertionMode,
+                       observedIndex.Value.Trim('[', ']'),
+                       indexName));
     }
+
+    private static bool MatchesRetainedIndex(
+        NativePlanAssertionMode assertionMode,
+        string observedIndex,
+        string expectedIndex) =>
+        string.Equals(observedIndex, expectedIndex, StringComparison.OrdinalIgnoreCase) ||
+        assertionMode == NativePlanAssertionMode.ScanCharacterization &&
+        string.Equals(
+            observedIndex,
+            ProviderNativePlanRetention.AlternativeIndexRedacted,
+            StringComparison.Ordinal);
 
     private static bool HasSafeParameterizedCommand(NativePlanCommandBinding binding)
     {
