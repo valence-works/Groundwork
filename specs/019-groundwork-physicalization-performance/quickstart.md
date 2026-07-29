@@ -46,6 +46,27 @@ This is a non-promotable SQLite recovery slice. It does not claim controlled fou
 execution, immutable-baseline approval, physical-form selection, an EF comparison, or an Elsa
 migration verdict.
 
+### Bounded recovery checkpoint verification
+
+Container-free candidate verification on 2026-07-29:
+
+- 41/41 focused recovery and schema tests passed.
+- 351/351 benchmark-project tests passed with the live MongoDB and relational-server integration
+  classes excluded; no database-server container or benchmark measurement ran.
+- The benchmark executable and its test project built with compiler warnings treated as errors.
+  The existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` audit advisory was retained as a
+  warning rather than hidden.
+- Targeted `dotnet format --verify-no-changes` passed for every changed C# file, and
+  `git diff --check` passed. Whole-project format verification still reports pre-existing
+  whitespace findings in untouched benchmark files.
+- Root review caught and remediated an unbounded failure-cleanup wait, a recovery reopen path that
+  could create a missing database, incomplete retained-source validation, a process-global SQLite
+  pool reset that broke a parallel existing test, and omission of default-valued required JSON
+  members without invalidating the seal.
+
+The retained evidence is a bounded process-failure correctness receipt, not a promoted performance
+artifact. The exact-range adversarial review record will be appended after the candidate is frozen.
+
 ## Issue #50 Execution-Evidence Checkpoint Review
 
 PR #147 is a bounded checkpoint for synchronized-contention and provider-native plan evidence. It

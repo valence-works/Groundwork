@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ValenceWorks/Groundwork/benchmarks/physical-storage/v1/recovery-evidence.schema.json",
+  "title": "Groundwork bounded SQLite recovery evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "source", "provider", "storageForm", "failurePoint", "workerProcessId",
+    "workerTerminationMethod", "workerExitCode", "workerTerminated", "recoveryProcessId",
+    "recoveredVersion", "recoveredStateDigest", "retryOutcome", "configuredBoundMilliseconds",
+    "elapsedMilliseconds", "completedWithinBound", "promotable", "seal"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "groundwork.physical-storage.recovery-evidence/v1" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gitCommit", "gitDirty", "gitTreeDigest", "harnessAssemblySha256"],
+      "properties": {
+        "gitCommit": { "type": "string", "minLength": 1 },
+        "gitDirty": { "type": "boolean" },
+        "gitTreeDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "harnessAssemblySha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "provider": { "const": "sqlite" },
+    "storageForm": { "enum": ["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"] },
+    "failurePoint": { "enum": ["preCommit", "committedBeforeAcknowledgement"] },
+    "workerProcessId": { "type": "integer", "minimum": 1 },
+    "workerTerminationMethod": { "const": "process.kill-tree" },
+    "workerExitCode": { "type": "integer", "not": { "const": 0 } },
+    "workerTerminated": { "const": true },
+    "recoveryProcessId": { "type": "integer", "minimum": 1 },
+    "recoveredVersion": { "type": "integer", "enum": [1, 2] },
+    "recoveredStateDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "retryOutcome": { "enum": ["notAttempted", "concurrencyConflict"] },
+    "configuredBoundMilliseconds": { "type": "integer", "minimum": 1 },
+    "elapsedMilliseconds": { "type": "integer", "minimum": 0 },
+    "completedWithinBound": { "type": "boolean" },
+    "promotable": { "const": false },
+    "seal": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

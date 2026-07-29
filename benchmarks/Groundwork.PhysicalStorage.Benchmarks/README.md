@@ -11,6 +11,29 @@ reviewed payload-profile bindings, and a ratified selectivity policy: 10% is the
 indexed-query acceptance shape and 50% is a retained scan characterization. The harness contains no EF Core comparison, cannot promote
 baselines, and cannot make an Elsa migration go/no-go decision.
 
+## Bounded SQLite process-failure proof
+
+The `recovery-proof` command creates a durable SQLite target through the production physical-target
+admission path, starts a distinct mutation worker, kills that process tree at one declared
+transaction boundary, and verifies the exact durable state in another process:
+
+```bash
+dotnet run --project benchmarks/Groundwork.PhysicalStorage.Benchmarks -- \
+  recovery-proof \
+  --form shared \
+  --failure-point pre-commit \
+  --output artifacts/recovery-pre-commit.json
+```
+
+Run the command separately with `committed-before-ack` to prove that a committed mutation survives
+and a retry with the original expected version conflicts. The retained document binds the exact Git
+snapshot and harness assembly, provider/form, distinct process receipts, forced termination,
+recovered version/state digest, retry outcome, and configured whole-proof bound. It deliberately
+contains no database path, connection value, or credential and is always marked non-promotable.
+
+This is one SQLite correctness slice. It does not prove four-provider recovery, approve an immutable
+baseline, select a physical form, compare EF, or issue an Elsa migration verdict.
+
 ## Current correctness and plan gates
 
 Before timing, every selected provider and storage form must prove:
@@ -435,8 +458,10 @@ non-decision smoke remained green.
   under controlled live evidence for all providers. The current observable client signals do not
   by themselves close the provider-work acceptance item.
 - Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
-- Capture actual crash/failure recovery evidence required by issue #50. Client pool reset/reopen
-  validation is not crash or failure recovery evidence and does not close that acceptance work.
+- Extend the bounded SQLite process-failure slice to the remaining providers and any additional
+  ratified crash/failure modes required for issue #50. The current slice is real process
+  termination evidence, but it is deliberately non-promotable and does not close that acceptance
+  work by itself.
 
 Until all applicable items are ratified and complete, the harness stays non-promotable and
 non-decisional.

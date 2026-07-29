@@ -6,6 +6,12 @@ internal static class Program
     {
         if (args.Length > 0 && args[0].Equals("worker", StringComparison.OrdinalIgnoreCase))
             return await RunWorkerAsync(args);
+        if (args.Length > 0 && args[0].Equals("recovery-worker", StringComparison.OrdinalIgnoreCase))
+            return await RunRecoveryWorkerAsync(args, verify: false);
+        if (args.Length > 0 && args[0].Equals("recovery-verify", StringComparison.OrdinalIgnoreCase))
+            return await RunRecoveryWorkerAsync(args, verify: true);
+        if (args.Length > 0 && args[0].Equals("recovery-proof", StringComparison.OrdinalIgnoreCase))
+            return await RunRecoveryProofAsync(args);
         try
         {
             if (args.Length > 0 && args[0].Equals("verify-scheduled-group", StringComparison.OrdinalIgnoreCase))
@@ -111,6 +117,53 @@ internal static class Program
             responsePath,
             CancellationToken.None,
             BenchmarkSubprocessCoordinator.DigestFile(requestPath));
+    }
+
+    private static async Task<int> RunRecoveryWorkerAsync(IReadOnlyList<string> args, bool verify)
+    {
+        if (args.Count != 3 || args[1] != "--request" || string.IsNullOrWhiteSpace(args[2]))
+            return 1;
+        try
+        {
+            if (verify)
+            {
+                var request = await RecoveryProtocol.ReadAsync<RecoveryVerificationRequest>(args[2], CancellationToken.None);
+                await SqliteRecoveryWorker.VerifyAsync(request, CancellationToken.None);
+            }
+            else
+            {
+                var request = await RecoveryProtocol.ReadAsync<RecoveryWorkerRequest>(args[2], CancellationToken.None);
+                await SqliteRecoveryWorker.RunMutationAsync(request, CancellationToken.None);
+            }
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunRecoveryProofAsync(IReadOnlyList<string> args)
+    {
+        try
+        {
+            var command = RecoveryProofCommandLine.Parse(args);
+            var evidence = await SqliteProcessFailureRecovery.RunAsync(
+                command.StorageForm,
+                Path.Combine(Path.GetTempPath(), "groundwork-recovery-proof"),
+                command.FailurePoint,
+                CancellationToken.None,
+                command.Bound,
+                command.OutputPath);
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(evidence, BenchmarkJson.CompactOptions));
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 1;
+        }
     }
 
     private static string FindRepositoryRoot(string start)
