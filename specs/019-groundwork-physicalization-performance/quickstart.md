@@ -99,3 +99,52 @@ Confirmed findings were remediated and re-verified before those passes:
 This review record is the only change after the frozen source head. Before merge, all three
 reviewers re-verify the final record-only head so this durable account and the PR candidate cannot
 diverge.
+
+## Issue #50 Scheduled-Coverage Matrix Checkpoint Review
+
+PR #152 is a container-free checkpoint that binds the scheduled aggregate to its exact closed
+provider/form/dataset/selectivity/workload/repetition matrix. It does not execute that matrix,
+publish or approve a baseline, select a physical form, produce a performance verdict, or close
+issue #50.
+
+Initial review range:
+`b5d59f1abb080d2ae2d2d1f1bd0505da11f79f80..a7091f75101ffab09676166d23843c0574042569`.
+
+Remediated source range:
+`b5d59f1abb080d2ae2d2d1f1bd0505da11f79f80..c5dcdd624fb053c3945a5cca31a74a24cf9bfad7`.
+
+Local verification on the remediated source head:
+
+- 42/42 container-free `BenchmarkSchemaTests` and `BenchmarkWorkflowContractTests` passed.
+- `python3 -m py_compile tools/verify_physical_storage_scheduled_coverage.py` passed.
+- `git diff --check` passed.
+- No database-server containers, provider suites, or benchmark measurements ran.
+- The only warnings were the existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisories.
+
+Three adversarial read-only reviewers re-verified the complete remediated source range:
+
+- Correctness/mechanism: PASS. Test mode must remain shallow and cannot emit
+  `scheduled-scaffold`; both runtime validation and the published schema reserve deep mode for the
+  complete fixed production matrix.
+- Evidence integrity/security: PASS. The aggregate no longer serializes or claims `runId` as
+  attested provenance; exact top-level/nested members, matrix dimensions, digest, mode, integer
+  counts, deep-mode Git identity, and non-promotability fail closed.
+- Scope/test preservation: PASS. Changes remain within the #50 aggregate verifier, its strict
+  schema/documentation, and covering tests; no workflow, provider implementation, workload,
+  baseline registry, or existing test was removed or weakened.
+
+Confirmed findings and dispositions:
+
+- BLOCKER: a narrowed `--test-mode` run with a group verifier could be labeled
+  `scheduled-scaffold`. Disposition: test mode now requires `--skip-deep-verification`, group
+  verification is incompatible with that mode, and regression coverage proves rejection.
+- BLOCKER: the emitted `runId` was only a caller-controlled shard-directory label, not bound
+  workflow-run provenance. Disposition: remove it from the artifact/schema, retain it only as a
+  shard locator, and disclose explicitly that this checkpoint is not run attestation.
+- HIGH: the writer-side validator was weaker than the published nested schema and accepted Boolean
+  counts. Disposition: enforce the exact nested matrix contract, complete deep-mode matrix,
+  non-Boolean integer counts, digest/mode/Git constraints, and negative regressions.
+
+This review record is the only change after the remediated source head. Before merge, the three
+reviewers re-verify the final record-only head so the durable account and PR candidate cannot
+diverge.
