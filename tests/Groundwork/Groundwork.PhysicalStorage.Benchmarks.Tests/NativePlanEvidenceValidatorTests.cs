@@ -399,7 +399,7 @@ public sealed class NativePlanEvidenceValidatorTests
             MongoCommandReceipt = command
         };
 
-        Assert.Empty(receipt.Shape.Order);
+        Assert.NotEmpty(receipt.Shape.Order);
         Assert.False(Matches(
             BenchmarkProvider.MongoDb,
             mode,
@@ -441,7 +441,7 @@ public sealed class NativePlanEvidenceValidatorTests
             MongoCommandReceipt = command
         };
 
-        Assert.Empty(receipt.Shape.Order);
+        Assert.NotEmpty(receipt.Shape.Order);
         Assert.False(Matches(
             BenchmarkProvider.MongoDb,
             mode,
@@ -704,6 +704,7 @@ public sealed class NativePlanEvidenceValidatorTests
             """
             { "aggregate": "expected_table", "pipeline": [
               { "$match": { "gw_storage_scope": "<redacted>", "gw_document_kind": "<redacted>", "gw_status": "<redacted>" } },
+              { "$sort": { "gw_storage_scope": 1, "gw_id_comparison_key": 1 } },
               { "$limit": 20 }
             ] }
             """);
@@ -731,6 +732,41 @@ public sealed class NativePlanEvidenceValidatorTests
             request,
             binding with { Fields = NativePlanTestBindings.CanonicalFields },
             NativePlan(BenchmarkProvider.MongoDb)));
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_unordered_page_without_renderer_tie_breaks()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+              { "$limit": 20 }
+            ] }
+            """);
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_unordered_page_with_an_extra_primary_sort()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+              { "$sort": { "category": 1, "storage_scope": 1, "id_comparison_key": 1 } },
+              { "$limit": 20 }
+            ] }
+            """);
     }
 
     private static bool Matches(

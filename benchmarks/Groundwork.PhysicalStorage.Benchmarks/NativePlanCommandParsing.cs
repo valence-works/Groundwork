@@ -362,7 +362,7 @@ internal static partial class NativePlanCommandParsing
             !sorts[0].IsBsonDocument ||
             !MongoSortExactlyMatches(sorts[0].AsBsonDocument, expected))
         {
-            return [];
+            return [new NativePlanOrderShape("__invalid-mongo-sort__", PhysicalSortDirection.Ascending)];
         }
         return request.Ordered
             ? [new NativePlanOrderShape("rank", PhysicalSortDirection.Descending)]

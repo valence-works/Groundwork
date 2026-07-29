@@ -43,9 +43,11 @@ admission check; the sidecar retains its SHA-256 identity plus the typed query/p
 never raw command text, connection data, or literal query values. This binding strengthens
 sealed-directory internal consistency; like the artifact-integrity ledger, it is not an external
 authenticity or cryptographic-provenance root.
-SQL Server ShowPlan retention constructs a fresh structural document containing only ShowPlan
-elements and an allowlist of operator, estimate, table, and index attributes; statement text,
-expressions, aliases, namespace declarations, comments, and processing instructions are discarded.
+Provider plan retention constructs fresh structural documents: SQL Server keeps only ShowPlan
+elements and allowlisted operator/estimate/table/index attributes, PostgreSQL keeps only the plan
+tree plus allowlisted operator/relation/index/estimate members, and MongoDB keeps only the bound
+namespace plus winning stage/index topology. Statement text, expressions, predicates, commands,
+aliases, namespace declarations, comments, and processing instructions are discarded.
 MongoDB command admission binds the renderer's complete canonical sort: optional semantic rank
 first, followed by the scope and identity-comparison tie breaks in their exact directions.
 The unordered equality workload and the ordered/paged workloads use separate declared query

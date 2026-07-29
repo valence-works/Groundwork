@@ -356,9 +356,14 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(benchmarkCase);
         ArgumentNullException.ThrowIfNull(evidence);
-        var admittedEvidence = evidence.Provider == BenchmarkProvider.SqlServer
-            ? evidence with { NativePlan = SqlServerShowplanReader.RetainSafeStructure(evidence.NativePlan) }
-            : evidence;
+        var admittedEvidence = evidence with
+        {
+            NativePlan = ProviderNativePlanRetention.Retain(
+                evidence.Provider,
+                evidence.NativePlan,
+                evidence.PhysicalObject,
+                evidence.IndexName)
+        };
         if (benchmarkCase.Workload != admittedEvidence.Request.Workload ||
             benchmarkCase.Provider != admittedEvidence.Provider ||
             benchmarkCase.StorageForm != admittedEvidence.StorageForm ||

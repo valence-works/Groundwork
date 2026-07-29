@@ -172,6 +172,91 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
     }
 
     [Theory]
+    [InlineData(BenchmarkProvider.PostgreSql)]
+    [InlineData(BenchmarkProvider.MongoDb)]
+    public async Task Writer_projects_JSON_plans_to_secret_safe_structure(BenchmarkProvider provider)
+    {
+        var benchmarkCase = new BenchmarkCase(
+            provider,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = provider switch
+        {
+            BenchmarkProvider.PostgreSql => PostgreSqlEvidenceWithSecret(),
+            BenchmarkProvider.MongoDb => MongoDbEvidenceWithSecret(),
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None);
+
+        var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
+        var sidecar = await File.ReadAllTextAsync(Path.Combine(root, $"{artifact}.assertions.json"));
+        foreach (var retained in new[] { plan, sidecar })
+        {
+            Assert.DoesNotContain("synthetic-test-value", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"Output\"", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"Filter\"", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"command\"", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"serverInfo\"", retained, StringComparison.Ordinal);
+        }
+        Assert.Contains("fixture_table", plan, StringComparison.Ordinal);
+        Assert.Contains("fixture_index", plan, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(BenchmarkProvider.PostgreSql)]
+    [InlineData(BenchmarkProvider.MongoDb)]
+    public async Task Writer_rejects_unrecognized_JSON_plan_identity(BenchmarkProvider provider)
+    {
+        var benchmarkCase = new BenchmarkCase(
+            provider,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = provider switch
+        {
+            BenchmarkProvider.PostgreSql => PostgreSqlEvidenceWithSecret() with
+            {
+                NativePlan = """
+                    [{ "Plan": {
+                      "Node Type": "Secret:synthetic-test-value",
+                      "Relation Name": "fixture_table",
+                      "Index Name": "fixture_index"
+                    } }]
+                    """
+            },
+            BenchmarkProvider.MongoDb => MongoDbEvidenceWithSecret() with
+            {
+                NativePlan = """
+                    { "queryPlanner": {
+                      "namespace": "fixture.fixture_table",
+                      "winningPlan": {
+                        "stage": "IXSCAN",
+                        "indexName": "Secret:synthetic-test-value"
+                      }
+                    } }
+                    """
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Theory]
     [InlineData("; Server=example; Password=synthetic-test-value")]
     [InlineData(" /* Pwd=synthetic-test-value */")]
     public async Task Writer_rejects_unsafe_evidence_before_writing_either_plan_artifact(string unsafeSuffix)
@@ -294,6 +379,105 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             CommandBinding = new NativePlanCommandBinding("fixture_table", "l", command, receipt.Shape, receipt)
             {
                 Fields = NativePlanTestBindings.CanonicalFields
+            }
+        };
+    }
+
+    private static NativePlanEvidence PostgreSqlEvidenceWithSecret()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        const string command = "SELECT * FROM \"fixture_table\" AS l WHERE l.\"storage_scope\" = @scope AND l.\"document_kind\" = @kind AND l.\"status\" = @q0 LIMIT @take OFFSET @skip";
+        var receipt = NativePlanQueryReceipt.FromRelational(
+            request,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            command,
+            [
+                ("scope", (object?)"tenant-a"),
+                ("kind", "benchmark-document"),
+                ("q0", "open"),
+                ("skip", 0),
+                ("take", 20)
+            ],
+            NativePlanTestBindings.CanonicalFields);
+        const string nativePlan = """
+            [{
+              "Plan": {
+                "Node Type": "Index Scan",
+                "Relation Name": "fixture_table",
+                "Index Name": "fixture_index",
+                "Output": ["Secret:synthetic-test-value"],
+                "Filter": "status = 'synthetic-test-value'",
+                "Index Cond": "status = 'synthetic-test-value'"
+              }
+            }]
+            """;
+        return new NativePlanEvidence(
+            request,
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
+            "fixture_table",
+            "fixture_index",
+            nativePlan,
+            NativePlanEvidenceAssertions.ForPostgreSql(NativePlanAssertionMode.RequireDeclaredIndex))
+        {
+            CommandBinding = new NativePlanCommandBinding("fixture_table", "l", command, receipt.Shape, receipt)
+            {
+                Fields = NativePlanTestBindings.CanonicalFields
+            }
+        };
+    }
+
+    private static NativePlanEvidence MongoDbEvidenceWithSecret()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        var command = new NativePlanMongoCommandReceipt(
+            Groundwork.Documents.Store.PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "fixture_table", "pipeline": [
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+              { "$sort": { "storage_scope": 1, "id_comparison_key": 1 } },
+              { "$skip": 0 },
+              { "$limit": 20 }
+            ] }
+            """);
+        var receipt = NativePlanQueryReceipt.FromMongoDb(
+            request,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            command,
+            NativePlanTestBindings.CanonicalFields);
+        const string nativePlan = """
+            {
+              "queryPlanner": {
+                "namespace": "fixture.fixture_table",
+                "winningPlan": {
+                  "stage": "FETCH",
+                  "inputStage": { "stage": "IXSCAN", "indexName": "fixture_index" }
+                },
+                "parsedQuery": { "status": "synthetic-test-value" }
+              },
+              "command": { "filter": { "status": "synthetic-test-value" } },
+              "serverInfo": { "host": "synthetic-test-value" }
+            }
+            """;
+        return new NativePlanEvidence(
+            request,
+            BenchmarkProvider.MongoDb,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
+            "fixture_table",
+            "fixture_index",
+            nativePlan,
+            NativePlanEvidenceAssertions.ForMongoDb(
+                NativePlanAssertionMode.RequireDeclaredIndex,
+                "fixture_index"))
+        {
+            CommandBinding = new NativePlanCommandBinding("fixture_table", null, null, receipt.Shape, receipt)
+            {
+                Fields = NativePlanTestBindings.CanonicalFields,
+                MongoCommandReceipt = command
             }
         };
     }
