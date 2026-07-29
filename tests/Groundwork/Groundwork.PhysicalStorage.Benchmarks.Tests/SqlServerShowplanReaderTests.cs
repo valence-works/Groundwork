@@ -84,12 +84,14 @@ public sealed class SqlServerShowplanReaderTests
         const string plan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"
                          xmlns:leak="urn:namespace-payload"
-                         Version="1.564">
+                         Version="1.564"
+                         Build="Secret:synthetic-test-value">
               <BatchSequence><Batch><Statements>
                 <StmtSimple StatementText="SELECT 1 AS [Secret:synthetic-test-value]">
                   <QueryPlan>
                     <!-- comment-payload -->
                     <?groundwork processing-payload?>
+                    <RelOp PhysicalOp="Secret:synthetic-test-value" LogicalOp="operator-payload" />
                     <RelOp NodeId="0" PhysicalOp="Index Seek">
                       <IndexScan>
                         <DefinedValues><DefinedValue>
@@ -115,6 +117,8 @@ public sealed class SqlServerShowplanReaderTests
         Assert.DoesNotContain("comment-payload", retained, StringComparison.Ordinal);
         Assert.DoesNotContain("processing-payload", retained, StringComparison.Ordinal);
         Assert.DoesNotContain("namespace-payload", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator-payload", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Build=", retained, StringComparison.Ordinal);
         Assert.DoesNotContain("StatementText", retained, StringComparison.Ordinal);
         Assert.DoesNotContain("ScalarString", retained, StringComparison.Ordinal);
         Assert.DoesNotContain("Column=", retained, StringComparison.Ordinal);

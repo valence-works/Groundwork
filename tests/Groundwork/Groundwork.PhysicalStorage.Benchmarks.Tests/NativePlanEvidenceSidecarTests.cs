@@ -162,6 +162,8 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             Assert.DoesNotContain("comment-payload", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("processing-payload", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("namespace-payload", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("operator-payload", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("Build=", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("StatementText", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("ScalarString", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("Column=", retained, StringComparison.Ordinal);
@@ -254,6 +256,33 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         var plans = Path.Combine(root, "plans");
         Assert.False(Directory.Exists(plans) &&
                      Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
+    public async Task Writer_retains_PostgreSQL_scan_characterization_without_requiring_an_index()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.SharedDocuments,
+            BenchmarkWorkload.IndexedQuery);
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            PostgreSqlEvidenceWithSecret(
+                NativePlanAssertionMode.ScanCharacterization,
+                usesDeclaredIndex: false) with
+            {
+                StorageForm = Groundwork.Core.PhysicalStorage.PhysicalStorageForm.SharedDocuments
+            },
+            NativePlanAssertionMode.ScanCharacterization,
+            CancellationToken.None);
+
+        var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
+        Assert.Contains("\"Node Type\":\"Seq Scan\"", plan, StringComparison.Ordinal);
+        Assert.Contains("\"Relation Name\":\"fixture_table\"", plan, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Index Name\"", plan, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic-test-value", plan, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -350,12 +379,16 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         const string nativePlan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"
                          xmlns:leak="urn:namespace-payload"
-                         Version="1.564">
+                         Version="1.564"
+                         Build="Secret:synthetic-test-value">
               <BatchSequence><Batch><Statements>
                 <StmtSimple StatementText="SELECT 1 AS [Secret:synthetic-test-value]">
                   <QueryPlan>
                     <!-- comment-payload -->
                     <?groundwork processing-payload?>
+                    <RelOp PhysicalOp="Secret:synthetic-test-value" LogicalOp="operator-payload">
+                      <Object Table="[Secret:synthetic-test-value]" Index="[Secret:synthetic-test-value]" />
+                    </RelOp>
                     <RelOp PhysicalOp="Index Seek"><IndexScan>
                     <DefinedValues><DefinedValue><ColumnReference Column="[Secret:synthetic-test-value]" /></DefinedValue></DefinedValues>
                     <Predicate><ScalarOperator ScalarString="[Secret:synthetic-test-value]" /></Predicate>
@@ -383,14 +416,16 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         };
     }
 
-    private static NativePlanEvidence PostgreSqlEvidenceWithSecret()
+    private static NativePlanEvidence PostgreSqlEvidenceWithSecret(
+        NativePlanAssertionMode assertionMode = NativePlanAssertionMode.RequireDeclaredIndex,
+        bool usesDeclaredIndex = true)
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
             .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
         const string command = "SELECT * FROM \"fixture_table\" AS l WHERE l.\"storage_scope\" = @scope AND l.\"document_kind\" = @kind AND l.\"status\" = @q0 LIMIT @take OFFSET @skip";
         var receipt = NativePlanQueryReceipt.FromRelational(
             request,
-            NativePlanAssertionMode.RequireDeclaredIndex,
+            assertionMode,
             command,
             [
                 ("scope", (object?)"tenant-a"),
@@ -400,18 +435,46 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
                 ("take", 20)
             ],
             NativePlanTestBindings.CanonicalFields);
-        const string nativePlan = """
-            [{
-              "Plan": {
-                "Node Type": "Index Scan",
-                "Relation Name": "fixture_table",
-                "Index Name": "fixture_index",
-                "Output": ["Secret:synthetic-test-value"],
-                "Filter": "status = 'synthetic-test-value'",
-                "Index Cond": "status = 'synthetic-test-value'"
-              }
-            }]
-            """;
+        var nativePlan = usesDeclaredIndex
+            ? """
+              [{
+                "Plan": {
+                  "Node Type": "Hash Join",
+                  "Output": ["Secret:synthetic-test-value"],
+                  "Filter": "status = 'synthetic-test-value'",
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Relation Name": "Secret:synthetic-test-value"
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Relation Name": "fixture_table",
+                      "Index Name": "fixture_index",
+                      "Index Cond": "status = 'synthetic-test-value'"
+                    }
+                  ]
+                }
+              }]
+              """
+            : """
+              [{
+                "Plan": {
+                  "Node Type": "Hash Join",
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Relation Name": "Secret:synthetic-test-value"
+                    },
+                    {
+                      "Node Type": "Seq Scan",
+                      "Relation Name": "fixture_table",
+                      "Filter": "status = 'synthetic-test-value'"
+                    }
+                  ]
+                }
+              }]
+              """;
         return new NativePlanEvidence(
             request,
             BenchmarkProvider.PostgreSql,
@@ -420,7 +483,7 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             "fixture_table",
             "fixture_index",
             nativePlan,
-            NativePlanEvidenceAssertions.ForPostgreSql(NativePlanAssertionMode.RequireDeclaredIndex))
+            NativePlanEvidenceAssertions.ForPostgreSql(assertionMode))
         {
             CommandBinding = new NativePlanCommandBinding("fixture_table", "l", command, receipt.Shape, receipt)
             {

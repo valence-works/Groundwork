@@ -9,12 +9,9 @@ internal static class SqlServerShowplanReader
 {
     private const string ShowplanColumnMarker = "XML Showplan";
     private const string ShowplanNamespace = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
-    private static readonly ISet<string> RetainedAttributes = new HashSet<string>(StringComparer.Ordinal)
+    private static readonly ISet<string> RetainedPhysicalOperators = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "Version", "Build", "NodeId", "PhysicalOp", "LogicalOp", "EstimateRows", "EstimateIO",
-        "EstimateCPU", "AvgRowSize", "EstimatedTotalSubtreeCost", "Parallel", "EstimateRebinds",
-        "EstimateRewinds", "EstimatedExecutionMode", "Table", "Index", "IndexKind", "Storage",
-        "Ordered", "ScanDirection"
+        "Index Seek", "Table Scan", "Index Scan", "Clustered Index Scan"
     };
 
     public static async Task<IReadOnlyList<string>> ReadAsync(
@@ -41,7 +38,7 @@ internal static class SqlServerShowplanReader
                     string stringValue when isShowplanColumn => stringValue,
                     _ => null
                 };
-                if (text is not null && TryRetainSafeStructure(text, out var retained))
+                if (text is not null && TryRetainSafeStructure(text, null, null, out var retained))
                     plans.Add(retained);
             }
         } while (await reader.NextResultAsync(cancellationToken));
@@ -82,9 +79,12 @@ internal static class SqlServerShowplanReader
         }
     }
 
-    internal static string RetainSafeStructure(string value)
+    internal static string RetainSafeStructure(
+        string value,
+        string? physicalObject = null,
+        string? indexName = null)
     {
-        if (!TryRetainSafeStructure(value, out var retained))
+        if (!TryRetainSafeStructure(value, physicalObject, indexName, out var retained))
             throw new InvalidOperationException("SQL Server native-plan evidence is not ShowPlan XML.");
         return retained;
     }
@@ -118,7 +118,11 @@ internal static class SqlServerShowplanReader
         return string.Equals(last.Trim('[', ']', '"'), expected, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool TryRetainSafeStructure(string value, out string retained)
+    private static bool TryRetainSafeStructure(
+        string value,
+        string? physicalObject,
+        string? indexName,
+        out string retained)
     {
         try
         {
@@ -129,7 +133,7 @@ internal static class SqlServerShowplanReader
                 return false;
             }
 
-            retained = new XDocument(RetainElement(document.Root))
+            retained = new XDocument(RetainElement(document.Root, physicalObject, indexName))
                 .ToString(SaveOptions.DisableFormatting);
             return true;
         }
@@ -140,23 +144,41 @@ internal static class SqlServerShowplanReader
         }
     }
 
-    private static XElement RetainElement(XElement source)
+    private static XElement RetainElement(
+        XElement source,
+        string? physicalObject,
+        string? indexName)
     {
         var retained = new XElement(XName.Get(source.Name.LocalName, ShowplanNamespace));
         foreach (var attribute in source.Attributes().Where(attribute =>
                      !attribute.IsNamespaceDeclaration &&
-                     attribute.Name.NamespaceName.Length == 0 &&
-                     RetainedAttributes.Contains(attribute.Name.LocalName)))
+                     attribute.Name.NamespaceName.Length == 0))
         {
-            retained.Add(new XAttribute(attribute.Name.LocalName, attribute.Value));
+            var value = RetainedAttributeValue(attribute, physicalObject, indexName);
+            if (value is not null)
+                retained.Add(new XAttribute(attribute.Name.LocalName, value));
         }
         foreach (var child in source.Elements().Where(element =>
                      element.Name.NamespaceName == ShowplanNamespace))
         {
-            retained.Add(RetainElement(child));
+            retained.Add(RetainElement(child, physicalObject, indexName));
         }
         return retained;
     }
+
+    private static string? RetainedAttributeValue(
+        XAttribute attribute,
+        string? physicalObject,
+        string? indexName) =>
+        attribute.Name.LocalName switch
+        {
+            "PhysicalOp" when RetainedPhysicalOperators.Contains(attribute.Value) => attribute.Value,
+            "Table" when physicalObject is null => attribute.Value,
+            "Table" when IsIdentifier(attribute.Value, physicalObject) => $"[{physicalObject}]",
+            "Index" when indexName is null => attribute.Value,
+            "Index" when IsIndex(attribute.Value, indexName) => $"[{indexName}]",
+            _ => null
+        };
 
     private static XDocument Parse(string value)
     {

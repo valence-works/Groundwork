@@ -22,19 +22,32 @@ internal static class ProviderNativePlanRetention
         BenchmarkProvider provider,
         string nativePlan,
         string physicalObject,
-        string indexName) =>
+        string indexName,
+        NativePlanAssertionMode assertionMode) =>
         provider switch
         {
-            BenchmarkProvider.SqlServer => SqlServerShowplanReader.RetainSafeStructure(nativePlan),
-            BenchmarkProvider.PostgreSql => RetainPostgreSql(nativePlan, physicalObject, indexName),
-            BenchmarkProvider.MongoDb => RetainMongoDb(nativePlan, physicalObject, indexName),
+            BenchmarkProvider.SqlServer => SqlServerShowplanReader.RetainSafeStructure(
+                nativePlan,
+                physicalObject,
+                indexName),
+            BenchmarkProvider.PostgreSql => RetainPostgreSql(
+                nativePlan,
+                physicalObject,
+                indexName,
+                assertionMode),
+            BenchmarkProvider.MongoDb => RetainMongoDb(
+                nativePlan,
+                physicalObject,
+                indexName,
+                assertionMode),
             _ => nativePlan
         };
 
     private static string RetainPostgreSql(
         string nativePlan,
         string physicalObject,
-        string indexName)
+        string indexName,
+        NativePlanAssertionMode assertionMode)
     {
         using var document = JsonDocument.Parse(nativePlan);
         if (document.RootElement.ValueKind != JsonValueKind.Array ||
@@ -44,6 +57,14 @@ internal static class ProviderNativePlanRetention
             plan.ValueKind != JsonValueKind.Object)
         {
             throw new InvalidOperationException("PostgreSQL native-plan evidence is not a canonical EXPLAIN JSON plan.");
+        }
+        var nodes = PostgreSqlNodes(plan).ToArray();
+        if (!nodes.Any(node => IdentifierMatches(node, "Relation Name", physicalObject)) ||
+            assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
+            !nodes.Any(node => IdentifierMatches(node, "Index Name", indexName)))
+        {
+            throw new InvalidOperationException(
+                "PostgreSQL native-plan evidence does not bind the required relation and index.");
         }
 
         return new JsonArray(new JsonObject
@@ -66,8 +87,8 @@ internal static class ProviderNativePlanRetention
         }
 
         var retained = new JsonObject { ["Node Type"] = nodeType.GetString() };
-        RetainBoundIdentifier(source, retained, "Relation Name", physicalObject);
-        RetainBoundIdentifier(source, retained, "Index Name", indexName);
+        RetainMatchingIdentifier(source, retained, "Relation Name", physicalObject);
+        RetainMatchingIdentifier(source, retained, "Index Name", indexName);
         foreach (var member in PostgreSqlSafeScalarMembers)
         {
             if (source.TryGetProperty(member, out var value) &&
@@ -91,27 +112,23 @@ internal static class ProviderNativePlanRetention
         return retained;
     }
 
-    private static void RetainBoundIdentifier(
+    private static void RetainMatchingIdentifier(
         JsonElement source,
         JsonObject retained,
         string member,
         string expected)
     {
-        if (!source.TryGetProperty(member, out var value))
-            return;
-        if (value.ValueKind != JsonValueKind.String ||
-            !string.Equals(value.GetString(), expected, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                $"PostgreSQL native-plan evidence has an unexpected '{member}'.");
-        }
-        retained[member] = expected;
+        if (source.TryGetProperty(member, out var value) &&
+            value.ValueKind == JsonValueKind.String &&
+            string.Equals(value.GetString(), expected, StringComparison.OrdinalIgnoreCase))
+            retained[member] = expected;
     }
 
     private static string RetainMongoDb(
         string nativePlan,
         string physicalObject,
-        string indexName)
+        string indexName,
+        NativePlanAssertionMode assertionMode)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(physicalObject);
         var source = BsonDocument.Parse(nativePlan);
@@ -130,25 +147,24 @@ internal static class ProviderNativePlanRetention
             throw new InvalidOperationException("MongoDB native-plan evidence does not bind one physical namespace.");
         }
 
+        var hasExpectedIndex = false;
         var stages = Descendants(planners[0]["winningPlan"])
             .Where(document => document.TryGetValue("stage", out var stage) && stage.IsString)
             .Select(document =>
             {
                 var retained = new BsonDocument("stage", document["stage"].AsString);
-                if (document.TryGetValue("indexName", out var observedIndex))
+                if (document.TryGetValue("indexName", out var observedIndex) &&
+                    observedIndex.IsString &&
+                    string.Equals(observedIndex.AsString, indexName, StringComparison.Ordinal))
                 {
-                    if (!observedIndex.IsString ||
-                        !string.Equals(observedIndex.AsString, indexName, StringComparison.Ordinal))
-                    {
-                        throw new InvalidOperationException(
-                            "MongoDB native-plan evidence has an unexpected index identity.");
-                    }
+                    hasExpectedIndex = true;
                     retained["indexName"] = indexName;
                 }
                 return retained;
             })
             .ToArray();
-        if (stages.Length == 0)
+        if (stages.Length == 0 ||
+            assertionMode == NativePlanAssertionMode.RequireDeclaredIndex && !hasExpectedIndex)
             throw new InvalidOperationException("MongoDB native-plan evidence does not contain a winning-plan stage.");
 
         var winning = stages[0];
@@ -159,6 +175,29 @@ internal static class ProviderNativePlanRetention
             ["namespace"] = $"retained.{physicalObject}",
             ["winningPlan"] = winning
         }).ToJson();
+    }
+
+    private static bool IdentifierMatches(
+        JsonElement source,
+        string member,
+        string expected) =>
+        source.TryGetProperty(member, out var value) &&
+        value.ValueKind == JsonValueKind.String &&
+        string.Equals(value.GetString(), expected, StringComparison.OrdinalIgnoreCase);
+
+    private static IEnumerable<JsonElement> PostgreSqlNodes(JsonElement node)
+    {
+        yield return node;
+        if (!node.TryGetProperty("Plans", out var children) ||
+            children.ValueKind != JsonValueKind.Array)
+            yield break;
+        foreach (var child in children.EnumerateArray())
+        {
+            if (child.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException("PostgreSQL native-plan children are not canonical plan objects.");
+            foreach (var descendant in PostgreSqlNodes(child))
+                yield return descendant;
+        }
     }
 
     private static bool NamespaceMatches(string value, string physicalObject)

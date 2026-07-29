@@ -362,7 +362,8 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
                 evidence.Provider,
                 evidence.NativePlan,
                 evidence.PhysicalObject,
-                evidence.IndexName)
+                evidence.IndexName,
+                assertionMode)
         };
         if (benchmarkCase.Workload != admittedEvidence.Request.Workload ||
             benchmarkCase.Provider != admittedEvidence.Provider ||
