@@ -37,12 +37,14 @@ Expected result: all Groundwork and host integration validation tests pass.
 PR #147 is a bounded checkpoint for synchronized-contention and provider-native plan evidence. It
 does not claim the controlled four-provider matrix or close issue #50.
 
-Frozen source range: `d297147e0cd6b018d70b1f7d61fef771e32b022f..3919499`.
+Frozen source range: `d297147e0cd6b018d70b1f7d61fef771e32b022f..7b5ccf5`.
 
 Local verification on the frozen source head:
 
-- 322/322 container-free benchmark-harness tests passed. The server-backed relational and MongoDB
+- 325/325 container-free benchmark-harness tests passed. The server-backed relational and MongoDB
   test classes were deliberately excluded from this resource-constrained review.
+- The one MongoDB integration test that exposed the hosted failure was reproduced locally and
+  passed after remediation; its Testcontainers MongoDB instance and cleanup sidecar exited.
 - `dotnet build Groundwork.slnx --no-restore` passed with zero errors.
 - Targeted `dotnet format --verify-no-changes` and `git diff --check` passed.
 - The only warnings were the existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisories.
@@ -74,6 +76,9 @@ Confirmed findings were remediated and re-verified before those passes:
   forbidden primary or linked full-table scan cannot be hidden from the strict gate.
 - Reset PostgreSQL relation scope on explicit unrelated relations, carried it only through valid
   bitmap chains, and enforced relation/index fields against their legal node kinds.
+- Bound MongoDB's production `status: {$exists: true}` plus singleton-`$or` predicate exactly:
+  `$exists` is retained as non-secret structural metadata, while false, extra, or malformed guarded
+  predicates fail closed.
 - Added writer-level no-artifact regressions for every fail-closed branch above, including the
   final invalid-relation-node test requested by scope review.
 
