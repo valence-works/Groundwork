@@ -49,14 +49,15 @@ Local verification on the frozen source head:
 - `dotnet build Groundwork.slnx --no-restore` passed with zero errors.
 - Targeted `dotnet format --verify-no-changes` and `git diff --check` passed.
 - The only warnings were the existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisories.
+- Hosted run `30445493298` passed the SQLite shared-form PR smoke on candidate `c66adff`.
 - An exploratory expansion of the real MongoDB runner to the ordered workloads reached the repaired
   command binder, then failed the existing declared-compound-index gate because MongoDB selected the
   simpler status index plus an in-memory sort. The expansion was not retained: weakening that gate
   is outside this checkpoint, and the provider behavior remains part of the open #50 physical-form
   decision.
 
-Three adversarial read-only reviewers independently inspect the exact source range. The final
-re-verification is required after the following originating-review findings were remediated:
+Three adversarial read-only reviewers independently passed the exact source range after the
+following originating-review findings were remediated:
 
 - Correctness/mechanism: PASS. Strict declared-index evidence rejects mixed, malformed, unrelated,
   or node-incompatible identities; scan characterization admits alternate access only through a
