@@ -39,6 +39,6 @@
 - [ ] T020 Add a distinct-process SQLite recovery worker using the production physical-target admission path
 - [ ] T021 Add a bounded parent orchestrator that releases and terminates the worker at the declared barrier
 - [ ] T022 Bind and verify exact source, provider/form, process outcome, recovered state, and safe retained metadata
-- [ ] T023 Prove pre-commit rollback and committed-before-acknowledgement recovery with real durable SQLite process tests
+- [ ] T023 Prove pre-commit rollback, committed-before-acknowledgement recovery, and stale-retry rejection with real durable SQLite process tests
 - [ ] T024 Add timeout, same-process, incomplete, and resealed-tamper rejection tests
 - [ ] T025 Run the focused/full benchmark gates and record evidence and deliberate nonclaims in the quickstart
