@@ -46,8 +46,8 @@ for the detailed barrier, replay, source-binding, timing, and external-digest se
 
 Container-free candidate verification on 2026-07-29:
 
-- 49/49 focused recovery and schema tests passed.
-- 359/359 benchmark-project tests passed with the live MongoDB and relational-server integration
+- 50/50 focused recovery and schema tests passed.
+- 360/360 benchmark-project tests passed with the live MongoDB and relational-server integration
   classes excluded; no database-server container or benchmark measurement ran.
 - The benchmark executable and its test project built with compiler warnings treated as errors.
   The existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` audit advisory was retained as a
@@ -62,7 +62,9 @@ Container-free candidate verification on 2026-07-29:
   could create or mutate a missing/corrupt database, incomplete retained-source validation, a
   process-global SQLite pool reset that broke a parallel existing test, an instrumentation barrier
   mislabeled as requester acknowledgement, self-authenticating checksum language, and omission of
-  default-valued required JSON members.
+  default-valued required JSON members. Final correctness re-review also found and remediated a
+  deadline-exhaustion path that killed a child without waiting through a separate bounded cleanup
+  grace to confirm its exit.
 
 The exact-range adversarial review record will be appended after the candidate is frozen.
 

@@ -133,7 +133,7 @@ internal static class SqliteProcessFailureRecovery
             Exception? cleanupFailure = null;
             try
             {
-                await TerminateIfLiveAsync(recovery, stopwatch, bound);
+                await TerminateIfLiveAsync(recovery);
             }
             catch (Exception exception)
             {
@@ -141,11 +141,11 @@ internal static class SqliteProcessFailureRecovery
             }
             try
             {
-                await TerminateIfLiveAsync(worker, stopwatch, bound);
+                await TerminateIfLiveAsync(worker);
             }
-            catch (Exception exception) when (cleanupFailure is null)
+            catch (Exception exception)
             {
-                cleanupFailure = exception;
+                cleanupFailure ??= exception;
             }
             if (evidenceOutputPath is not null)
                 TryDeleteRunDirectory(runDirectory);
@@ -167,10 +167,7 @@ internal static class SqliteProcessFailureRecovery
         return timeout;
     }
 
-    private static async Task TerminateIfLiveAsync(
-        Process? process,
-        Stopwatch stopwatch,
-        TimeSpan bound)
+    private static async Task TerminateIfLiveAsync(Process? process)
     {
         if (process is null)
             return;
@@ -180,8 +177,16 @@ internal static class SqliteProcessFailureRecovery
                 process.Kill(entireProcessTree: true);
             if (!process.HasExited)
             {
-                using var cleanupTimeout = RemainingCleanupTimeout(stopwatch, bound);
-                await process.WaitForExitAsync(cleanupTimeout.Token);
+                using var cleanupTimeout = new CancellationTokenSource(
+                    TimeSpan.FromMilliseconds(RecoveryProtocol.CleanupTimeoutMilliseconds));
+                try
+                {
+                    await process.WaitForExitAsync(cleanupTimeout.Token);
+                }
+                catch (OperationCanceledException) when (cleanupTimeout.IsCancellationRequested)
+                {
+                    throw new TimeoutException("Recovery child did not exit within the cleanup grace period.");
+                }
             }
         }
         catch (InvalidOperationException) when (process.HasExited)
@@ -191,16 +196,6 @@ internal static class SqliteProcessFailureRecovery
         {
             process.Dispose();
         }
-    }
-
-    private static CancellationTokenSource RemainingCleanupTimeout(Stopwatch stopwatch, TimeSpan bound)
-    {
-        var remaining = bound - stopwatch.Elapsed;
-        if (remaining <= TimeSpan.Zero)
-            throw new TimeoutException("Recovery proof cleanup exceeded its configured bound.");
-        var timeout = new CancellationTokenSource();
-        timeout.CancelAfter(remaining);
-        return timeout;
     }
 
     private static void TryDeleteRunDirectory(string runDirectory)

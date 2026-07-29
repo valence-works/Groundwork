@@ -35,8 +35,9 @@ complete referenced `Groundwork.*` assembly closure, provider/form, three distin
 forced termination, before/after retry state digests, retry outcome, and configured recovery-
 execution bound. The timing interval begins with seed setup and ends after both child exits and the
 exact recovery result; evidence persistence/readback and best-effort scratch deletion are outside
-that field. It contains no database path, connection value, or credential and is always marked
-non-promotable.
+that field. Failed executions use a separate five-second cleanup grace to confirm child termination
+after the recovery deadline. The evidence contains no database path, connection value, or
+credential and is always marked non-promotable.
 
 The command prints a SHA-256 of the exact retained evidence file bytes. CI or workflow metadata must
 retain that digest separately; it is an integrity anchor, not a signature. Verify later with:

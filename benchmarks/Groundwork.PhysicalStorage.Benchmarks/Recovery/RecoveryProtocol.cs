@@ -103,6 +103,7 @@ internal static class RecoveryProtocol
     internal const string EvidenceSchemaVersion = "groundwork.physical-storage.recovery-evidence/v1";
     internal const string DocumentId = "recovery-item";
     internal const int TimeoutMilliseconds = 15_000;
+    internal const int CleanupTimeoutMilliseconds = 5_000;
     internal const string KillTreeMethod = "process.kill-tree";
     internal static string BenchmarkAssemblyPath { get; } = Assembly.GetExecutingAssembly().Location;
 

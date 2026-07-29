@@ -221,6 +221,30 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Exhausted_recovery_deadline_still_confirms_child_exit_within_the_cleanup_grace()
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var workerProcessId = 0;
+
+        var exception = await Record.ExceptionAsync(() => SqliteProcessFailureRecovery.RunAsync(
+            PhysicalStorageForm.SharedDocuments,
+            scratch,
+            RecoveryFailurePoint.PreCommit,
+            CancellationToken.None,
+            TimeSpan.FromSeconds(1),
+            workerStarted: processId =>
+            {
+                workerProcessId = processId;
+                Thread.Sleep(TimeSpan.FromMilliseconds(1_100));
+            }));
+
+        Assert.NotNull(exception);
+        Assert.InRange(stopwatch.Elapsed, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(7));
+        Assert.True(workerProcessId > 0);
+        AssertProcessExited(workerProcessId);
+    }
+
+    [Fact]
     public async Task Retained_evidence_verifier_requires_the_out_of_band_digest_and_current_source()
     {
         var (result, output) = await RunProofAsync(
