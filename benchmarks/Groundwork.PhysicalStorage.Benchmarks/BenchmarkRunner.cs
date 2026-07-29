@@ -150,7 +150,11 @@ public sealed class BenchmarkRunner
                         foreach (var item in evidence)
                         {
                             var planCase = new BenchmarkCase(provider, form, item.Request.Workload);
-                            var isolatedPlanArtifact = await writer.WritePlanAsync(planCase, item, cancellationToken);
+                            var isolatedPlanArtifact = await writer.WritePlanAsync(
+                                planCase,
+                                item,
+                                planAssertionMode,
+                                cancellationToken);
                             planArtifacts.Add(isolatedPlanArtifact);
                             var key = (provider, form, item.Request.Workload);
                             if (!casePlanArtifacts.TryGetValue(key, out var artifacts))
@@ -182,7 +186,7 @@ public sealed class BenchmarkRunner
                     {
                         var benchmarkCase = new BenchmarkCase(provider, form, workload);
                         var warmupOnly = request.Role == BenchmarkExecutionRole.UntimedWarmup;
-                        var warmupIterations = warmupOnly ? request.Configuration.WarmupIterations : 0;
+                        var warmupIterations = request.Configuration.WarmupIterations;
                         var measurementIterations = warmupOnly ? 0 : request.Configuration.MeasurementIterations;
                         progress(
                             $"[{benchmarkCase.Identity}] warmup {warmupIterations}, measure at least " +
@@ -245,6 +249,11 @@ public sealed class BenchmarkRunner
                                 request.Configuration.Concurrency,
                                 cancellationToken);
                             ValidateExecution(execution, benchmarkCase);
+                            ValidateConcurrentLoadEvidence(
+                                execution,
+                                benchmarkCase,
+                                request.Configuration.Concurrency,
+                                request.Configuration.OperationsPerIteration);
                             observableResultVector = RequireStableObservableResult(
                                 benchmarkCase,
                                 observableResultVector,
@@ -277,7 +286,8 @@ public sealed class BenchmarkRunner
                                 Merge(execution.ProviderWork, signalSnapshot.ToProviderWork()),
                                 execution.OperationLatencyNanoseconds)
                             {
-                                DatabaseSignal = signalSnapshot.Evidence
+                                DatabaseSignal = signalSnapshot.Evidence,
+                                ConcurrentLoad = execution.ConcurrentLoad
                             };
                             samples.Add(sample);
                             measuredOperations += sample.Operations;
@@ -404,6 +414,36 @@ public sealed class BenchmarkRunner
         {
             throw new InvalidOperationException(
                 $"[{benchmarkCase.Identity}] target must return one positive raw latency observation per operation.");
+        }
+    }
+
+    private static void ValidateConcurrentLoadEvidence(
+        WorkloadExecution execution,
+        BenchmarkCase benchmarkCase,
+        int configuredParallelism,
+        int operationsPerIteration)
+    {
+        if (benchmarkCase.Workload != BenchmarkWorkload.ConcurrentCreate)
+        {
+            if (execution.ConcurrentLoad is not null)
+            {
+                throw new InvalidOperationException(
+                    $"[{benchmarkCase.Identity}] only concurrent-create may return concurrent-load evidence.");
+            }
+            return;
+        }
+
+        if (execution.ConcurrentLoad is null ||
+            execution.Operations != execution.ConcurrentLoad.Attempts ||
+            execution.OperationLatencyNanoseconds.Count != execution.Operations ||
+            !execution.ConcurrentLoad.MeetsConfiguredContention(
+                configuredParallelism,
+                operationsPerIteration))
+        {
+            throw new InvalidOperationException(
+                $"[{benchmarkCase.Identity}] concurrent-create requires complete synchronized-contention " +
+                "evidence with every configured contender released together, every outcome accounted, " +
+                "and exactly one full wave per configured operation.");
         }
     }
 

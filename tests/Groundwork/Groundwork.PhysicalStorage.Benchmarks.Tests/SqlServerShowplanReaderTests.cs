@@ -22,7 +22,7 @@ public sealed class SqlServerShowplanReaderTests
 
         var plans = await SqlServerShowplanReader.ReadAsync(reader, CancellationToken.None);
 
-        Assert.Equal(NativeShowplan, Assert.Single(plans));
+        Assert.Contains("ShowPlanXML", Assert.Single(plans), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -74,7 +74,60 @@ public sealed class SqlServerShowplanReaderTests
 
         var plans = await SqlServerShowplanReader.ReadAsync(reader, CancellationToken.None);
 
-        Assert.Equal(NativeShowplan, Assert.Single(plans));
+        Assert.Contains("ShowPlanXML", Assert.Single(plans), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Retains_only_safe_structural_showplan_content()
+    {
+        const string secret = "Secret:synthetic-test-value";
+        const string plan = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"
+                         xmlns:leak="urn:namespace-payload"
+                         Version="1.564"
+                         Build="Secret:synthetic-test-value">
+              <BatchSequence><Batch><Statements>
+                <StmtSimple StatementText="SELECT 1 AS [Secret:synthetic-test-value]">
+                  <QueryPlan>
+                    <!-- comment-payload -->
+                    <?groundwork processing-payload?>
+                    <RelOp PhysicalOp="Secret:synthetic-test-value" LogicalOp="operator-payload" />
+                    <RelOp NodeId="0" PhysicalOp="Index Seek">
+                      <IndexScan>
+                        <DefinedValues><DefinedValue>
+                          <ColumnReference Column="[Secret:synthetic-test-value]" />
+                        </DefinedValue></DefinedValues>
+                        <Predicate>
+                          <ScalarOperator ScalarString="[Secret:synthetic-test-value]" />
+                        </Predicate>
+                        <Object Database="[unsafe]" Schema="[unsafe]" Table="[expected_table]" Index="[declared_index]" Alias="[unsafe]" />
+                      </IndexScan>
+                    </RelOp>
+                  </QueryPlan>
+                </StmtSimple>
+              </Statements></Batch></BatchSequence>
+            </ShowPlanXML>
+            """;
+        var result = Table("Microsoft SQL Server 2005 XML Showplan", typeof(string), plan);
+        await using var reader = new DataTableReader(result);
+
+        var retained = Assert.Single(await SqlServerShowplanReader.ReadAsync(reader, CancellationToken.None));
+
+        Assert.DoesNotContain(secret, retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("comment-payload", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("processing-payload", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("namespace-payload", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator-payload", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Build=", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("StatementText", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("ScalarString", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Column=", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Database=", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Schema=", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Alias=", retained, StringComparison.Ordinal);
+        Assert.Contains("Table=\"[expected_table]\"", retained, StringComparison.Ordinal);
+        Assert.Contains("Index=\"[declared_index]\"", retained, StringComparison.Ordinal);
+        SqlServerShowplanReader.EnsureScaleBearingIndex(retained, "declared_index", "expected_table");
     }
 
     [Fact]
@@ -83,12 +136,12 @@ public sealed class SqlServerShowplanReaderTests
         const string plan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
               <StatisticsInfo Statistics="[declared_index]" />
-              <RelOp PhysicalOp="Index Seek"><Object Index="[other_index]" /></RelOp>
+              <RelOp PhysicalOp="Index Seek"><Object Table="[expected_table]" Index="[other_index]" /></RelOp>
             </ShowPlanXML>
             """;
 
         var exception = Assert.Throws<InvalidOperationException>(
-            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index"));
+            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index", "expected_table"));
 
         Assert.Contains("declared_index", exception.Message, StringComparison.Ordinal);
     }
@@ -98,11 +151,11 @@ public sealed class SqlServerShowplanReaderTests
     {
         const string plan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
-              <RelOp PhysicalOp="Index Seek"><Object Index="[declared_index]" /></RelOp>
+              <RelOp PhysicalOp="Index Seek"><Object Table="[expected_table]" Index="[declared_index]" /></RelOp>
             </ShowPlanXML>
             """;
 
-        SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index");
+        SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index", "expected_table");
     }
 
     [Fact]
@@ -110,13 +163,13 @@ public sealed class SqlServerShowplanReaderTests
     {
         const string plan = """
             <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
-              <RelOp PhysicalOp="Index Seek"><Object Index="[declared_index]" /></RelOp>
+              <RelOp PhysicalOp="Index Seek"><Object Table="[expected_table]" Index="[declared_index]" /></RelOp>
               <RelOp PhysicalOp="Table Scan"><Object /></RelOp>
             </ShowPlanXML>
             """;
 
         var exception = Assert.Throws<InvalidOperationException>(
-            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index"));
+            () => SqlServerShowplanReader.EnsureScaleBearingIndex(plan, "declared_index", "expected_table"));
 
         Assert.Contains("Table Scan", exception.Message, StringComparison.Ordinal);
     }

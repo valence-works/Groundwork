@@ -89,17 +89,21 @@ public sealed class SqliteBenchmarkTarget(
         };
         await using var connection = new SqliteConnection(ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        var indexName = model.Route.Indexes.Single().Name.Identifier;
+        var fields = BenchmarkModelFactory.FieldBindingFor(model.Route);
         var evidence = new List<NativePlanEvidence>(requests.Count);
         foreach (var request in requests)
         {
+            var indexName = BenchmarkModelFactory.IndexFor(model.Route, request.Ordered).Name.Identifier;
             var query = Query(request.Skip, request.Take, request.Ordered);
+            var executedQuery = request.Operation == NativePlanOperation.Selection
+                ? query
+                : query.Select(BoundedQueryResultOperation.Count);
             var rendered = request.Operation == NativePlanOperation.Selection
                 ? RelationalPhysicalQueryRuntime.BuildQueryCommand(
-                    store, model.Manifest, model.Route, model.Target.Provider, "sqlite", query, canonicalJsonValueKinds)
+                    store, model.Manifest, model.Route, model.Target.Provider, "sqlite", executedQuery, canonicalJsonValueKinds)
                 : RelationalPhysicalQueryRuntime.BuildCountCommand(
                     store, model.Manifest, model.Route, model.Target.Provider, "sqlite",
-                    query.Select(BoundedQueryResultOperation.Count), canonicalJsonValueKinds);
+                    executedQuery, canonicalJsonValueKinds);
             await using var command = connection.CreateCommand();
             command.CommandText = $"EXPLAIN QUERY PLAN {rendered.CommandText}";
             foreach (var (name, value) in rendered.Parameters)
@@ -110,35 +114,49 @@ public sealed class SqliteBenchmarkTarget(
                 lines.Add(reader.GetString(3));
             var plan = string.Join(Environment.NewLine, lines);
             if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
-                (!plan.Contains(indexName, StringComparison.OrdinalIgnoreCase) ||
-                 !plan.Contains("SEARCH", StringComparison.OrdinalIgnoreCase) ||
-                 plan.Contains("SCAN l", StringComparison.OrdinalIgnoreCase) ||
-                 plan.Contains("SCAN p", StringComparison.OrdinalIgnoreCase)))
+                !UsesDeclaredIndexWithoutScanningRelations(plan, indexName))
             {
                 throw new InvalidOperationException(
                     $"SQLite native-plan gate rejected {request.Workload}/{request.Operation}. Expected index '{indexName}'.{Environment.NewLine}{plan}");
             }
+            var physicalObject = (model.Route.LinkedIndexStorage ?? model.Route.PrimaryStorage).Name.Identifier;
+            var queryReceipt = NativePlanQueryReceipt.FromRelational(
+                request,
+                assertionMode,
+                rendered.CommandText,
+                rendered.Parameters,
+                fields);
             evidence.Add(new NativePlanEvidence(
                 request,
-                Provider.ToString(),
-                StorageForm.ToString(),
-                BenchmarkModelFactory.QueryIdentity,
-                (model.Route.LinkedIndexStorage ?? model.Route.PrimaryStorage).Name.Identifier,
+                Provider,
+                StorageForm,
+                BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
+                physicalObject,
                 indexName,
                 plan,
-                NativePlanEvidenceAssertions.For(
-                    assertionMode,
-                    [
-                        "indexed SEARCH is present",
-                        $"index {indexName} is selected",
-                        "linked and primary full-table SCAN stages are absent",
-                        plan.Contains("USE TEMP B-TREE", StringComparison.OrdinalIgnoreCase)
-                            ? "ordering remains server-side with a temporary B-tree for the stable identity suffix"
-                            : "ordering is satisfied directly by the selected index"
-                    ])));
+                NativePlanEvidenceAssertions.ForSqlite(assertionMode, indexName, plan))
+            {
+                CommandBinding = new NativePlanCommandBinding(
+                    physicalObject,
+                    model.Route.LinkedIndexStorage is null ? "p" : "l",
+                    rendered.CommandText,
+                    queryReceipt.Shape,
+                    queryReceipt)
+                {
+                    Fields = fields
+                }
+            });
         }
         return evidence;
     }
+
+    internal static bool UsesDeclaredIndexWithoutScanningRelations(string plan, string indexName) =>
+        !string.IsNullOrWhiteSpace(plan) &&
+        !string.IsNullOrWhiteSpace(indexName) &&
+        plan.Contains(indexName, StringComparison.OrdinalIgnoreCase) &&
+        plan.Contains("SEARCH", StringComparison.OrdinalIgnoreCase) &&
+        !plan.Contains("SCAN l", StringComparison.OrdinalIgnoreCase) &&
+        !plan.Contains("SCAN p", StringComparison.OrdinalIgnoreCase);
 
     public override async Task PrepareIterationAsync(
         BenchmarkWorkload workload,
@@ -193,10 +211,13 @@ public sealed class SqliteBenchmarkTarget(
         var indexBytesObservable = 1L;
         try
         {
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name = @name;";
-            command.Parameters.AddWithValue("@name", model.Route.Indexes.Single().Name.Identifier);
-            indexBytes = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+            foreach (var index in model.Route.Indexes)
+            {
+                await using var command = connection.CreateCommand();
+                command.CommandText = "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name = @name;";
+                command.Parameters.AddWithValue("@name", index.Name.Identifier);
+                indexBytes += Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+            }
         }
         catch (SqliteException)
         {

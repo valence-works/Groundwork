@@ -96,21 +96,15 @@ public sealed class BenchmarkSubprocessCoordinator
         var nonce = Guid.NewGuid().ToString("N")[..8];
         var runGroupId = $"{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffZ}-{Short(machine.GitCommit)}-" +
                          $"{request.Configuration.Mode.ToString().ToLowerInvariant()}-{nonce}";
-        var root = Path.GetFullPath(request.OutputDirectory ?? Path.Combine(
+        var outputRoot = Path.GetFullPath(request.OutputDirectory ?? Path.Combine(
             request.RepositoryRoot,
             "artifacts",
             "physical-storage",
             "groups",
             "v1",
             runGroupId));
-        RequireEmpty(root);
-        var protocolRoot = Path.Combine(root, "protocol");
-        var requestsRoot = Path.Combine(protocolRoot, "requests");
-        var responsesRoot = Path.Combine(protocolRoot, "responses");
-        var runsRoot = Path.Combine(root, "runs");
-        Directory.CreateDirectory(requestsRoot);
-        Directory.CreateDirectory(responsesRoot);
-        Directory.CreateDirectory(runsRoot);
+        RequireEmpty(outputRoot);
+        var root = BenchmarkArtifactPaths.RequireRoot(outputRoot, create: true);
 
         var expectedGit = new BenchmarkGitState(machine.GitCommit, machine.GitDirty, machine.GitTreeDigest);
         var invocations = BenchmarkRunProtocol.CreateInvocations(request, runGroupId, expectedGit);
@@ -119,7 +113,8 @@ public sealed class BenchmarkSubprocessCoordinator
         {
             cancellationToken.ThrowIfCancellationRequested();
             var ordinal = original.Ordinal.ToString("D6");
-            var workerRun = Path.Combine(runsRoot, ordinal);
+            _ = BenchmarkArtifactPaths.ResolveForWrite(root, $"runs/{ordinal}/.worker-output", "Worker output directory");
+            var workerRun = Path.Combine(root, "runs", ordinal);
             var invocation = original with
             {
                 Request = original.Request with
@@ -128,8 +123,14 @@ public sealed class BenchmarkSubprocessCoordinator
                     IndependentRun = original.IndependentRun
                 }
             };
-            var requestPath = Path.Combine(requestsRoot, $"{ordinal}.json");
-            var responsePath = Path.Combine(responsesRoot, $"{ordinal}.json");
+            var requestPath = BenchmarkArtifactPaths.ResolveForWrite(
+                root,
+                $"protocol/requests/{ordinal}.json",
+                "Worker request");
+            var responsePath = BenchmarkArtifactPaths.ResolveForWrite(
+                root,
+                $"protocol/responses/{ordinal}.json",
+                "Worker response");
             await WriteImmutableAsync(requestPath, invocation, cancellationToken);
             var requestDigest = DigestFile(requestPath);
             progress($"[{original.Ordinal}/{invocations.Count}] worker {original.Request.DataShape!.Identity} " +
@@ -139,10 +140,14 @@ public sealed class BenchmarkSubprocessCoordinator
             var exitCode = await workerLauncher(requestPath, responsePath, cancellationToken);
             if (!File.Exists(responsePath))
                 throw new InvalidOperationException($"Benchmark worker {original.Ordinal} produced no response artifact.");
+            responsePath = BenchmarkArtifactPaths.ResolveExisting(root, $"protocol/responses/{ordinal}.json", "Worker response");
             var response = await ReadAsync<BenchmarkWorkerResponse>(responsePath, cancellationToken);
             ValidateResponse(invocation, response, requestDigest);
             EnsureWorkerSucceeded(original.Ordinal, exitCode, response);
-            var responseRunDirectory = Path.GetFullPath(response.RunDirectory!);
+            var responseRunDirectory = BenchmarkArtifactPaths.ResolveAbsoluteExisting(
+                root,
+                response.RunDirectory!,
+                "Worker response run directory");
             if (!responseRunDirectory.Equals(Path.GetFullPath(workerRun), StringComparison.Ordinal) ||
                 !Directory.Exists(responseRunDirectory))
             {
@@ -155,9 +160,11 @@ public sealed class BenchmarkSubprocessCoordinator
             {
                 if (response.ConsumerEvidence is null)
                     throw new InvalidOperationException($"Measured worker {original.Ordinal} returned no consumer evidence.");
-                var consumerEvidence = Path.GetFullPath(response.ConsumerEvidence);
-                if (!consumerEvidence.StartsWith(Path.GetFullPath(workerRun) + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
-                    !File.Exists(consumerEvidence))
+                var consumerEvidence = BenchmarkArtifactPaths.ResolveAbsoluteExisting(
+                    root,
+                    response.ConsumerEvidence,
+                    "Worker consumer evidence");
+                if (!consumerEvidence.StartsWith(Path.GetFullPath(workerRun) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
                     throw new InvalidOperationException($"Benchmark worker {original.Ordinal} returned an invalid evidence path.");
                 var digestedEvidence = ResolveWorkerArtifact(
                     workerRun,
@@ -220,7 +227,10 @@ public sealed class BenchmarkSubprocessCoordinator
                     ? RegressionPolicy.Scheduled
                     : RegressionPolicy.Smoke,
                 cancellationToken);
-            var regressionPath = Path.Combine(root, "reports", "regression.json");
+            var regressionPath = BenchmarkArtifactPaths.ResolveForWrite(
+                root,
+                "reports/regression.json",
+                "Run-group regression report");
             await WriteImmutableAsync(regressionPath, regression, cancellationToken);
             manifest = manifest with
             {
@@ -231,7 +241,7 @@ public sealed class BenchmarkSubprocessCoordinator
             };
         }
         await WriteImmutableAsync(
-            Path.Combine(root, "run-group.json"),
+            BenchmarkArtifactPaths.ResolveForWrite(root, "run-group.json", "Run-group manifest"),
             manifest,
             cancellationToken);
         await BenchmarkRunGroupVerifier.VerifyAsync(root, cancellationToken);
@@ -329,10 +339,11 @@ public sealed class BenchmarkSubprocessCoordinator
                     "Worker repository Git commit/tree state does not match the coordinator invocation.");
             }
             var result = await new BenchmarkRunner(Console.WriteLine).RunAsync(invocation.Request, cancellationToken);
-            var manifestPath = Path.Combine(result.RunDirectory, "manifest.json");
-            var elsaPath = Path.Combine(result.RunDirectory, "reports", "elsa-migration-evidence.json");
+            var workerLayout = new ArtifactLayout(result.RunDirectory);
+            var manifestPath = workerLayout.ExistingPath(workerLayout.Manifest, "Worker manifest");
+            var elsaPath = workerLayout.ExistingPath(workerLayout.ElsaMigrationEvidenceJson, "Worker Elsa migration evidence");
             var consumerPath = invocation.Role == BenchmarkExecutionRole.Measured
-                ? Path.Combine(result.RunDirectory, "reports", "consumer-evidence.json")
+                ? workerLayout.ExistingPath(workerLayout.ConsumerEvidenceJson, "Worker consumer evidence")
                 : null;
             await WriteImmutableAsync(
                 responsePath,
@@ -344,7 +355,7 @@ public sealed class BenchmarkSubprocessCoordinator
                     Succeeded: true,
                     result.RunDirectory,
                     invocation.Role == BenchmarkExecutionRole.Measured
-                        ? Path.Combine(result.RunDirectory, "reports", "consumer-evidence.json")
+                        ? workerLayout.ExistingPath(workerLayout.ConsumerEvidenceJson, "Worker consumer evidence")
                         : null,
                     FailureType: null)
                 {
@@ -459,6 +470,7 @@ public sealed class BenchmarkSubprocessCoordinator
 
     private static async Task<T> ReadCoreAsync<T>(string path, CancellationToken cancellationToken)
     {
+        path = BenchmarkArtifactPaths.RequireExistingFile(path, "Protocol artifact");
         await using var stream = File.OpenRead(path);
         return await JsonSerializer.DeserializeAsync<T>(stream, BenchmarkJson.Options, cancellationToken)
                ?? throw new InvalidOperationException($"Protocol artifact '{path}' is null.");
@@ -469,36 +481,32 @@ public sealed class BenchmarkSubprocessCoordinator
         T value,
         CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        path = BenchmarkArtifactPaths.PrepareStandaloneForWrite(path, "Protocol artifact");
         await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
         await JsonSerializer.SerializeAsync(stream, value, BenchmarkJson.Options, cancellationToken);
     }
 
     internal static string DigestFile(string path)
     {
+        path = BenchmarkArtifactPaths.RequireExistingFile(path, "Evidence artifact");
         using var stream = File.OpenRead(path);
         return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
 
     private static string Relative(string root, string path) =>
-        Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+        BenchmarkArtifactPaths.Relative(root, path, "Evidence artifact").Replace(Path.DirectorySeparatorChar, '/');
 
     private static string Short(string commit) => commit.Length >= 8 ? commit[..8] : commit;
 
     private static string ResolveWorkerArtifact(string workerRoot, string relative)
-    {
-        if (Path.IsPathRooted(relative))
-            throw new InvalidOperationException("Worker artifact path must be relative.");
-        var root = Path.GetFullPath(workerRoot);
-        var path = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
-        if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal) || !File.Exists(path))
-            throw new InvalidOperationException($"Worker artifact '{relative}' is missing or escapes its run root.");
-        return path;
-    }
+        => BenchmarkArtifactPaths.ResolveExisting(workerRoot, relative, "Worker artifact");
 
     private static void RequireEmpty(string root)
     {
-        if (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())
+        if (!Directory.Exists(root))
+            return;
+        var canonicalRoot = BenchmarkArtifactPaths.RequireRoot(root, create: false);
+        if (Directory.EnumerateFileSystemEntries(canonicalRoot).Any())
             throw new InvalidOperationException($"Benchmark output directory '{root}' is not empty.");
     }
 }

@@ -36,6 +36,30 @@ targets. Correctness-gate documents are removed and statistics are finalized aga
 Native-plan capture is read-only: it does not add or remove rows, change selectivity, or refresh
 statistics. A provider that chooses a scan at the mandatory 10% acceptance shape fails the gate;
 the retained 50% characterization is never changed or inflated just to force an index plan.
+Before persistence, plan validation parses the provider-native plan in both modes and binds its
+observed collection, relation, table, or SQLite alias to the exact parameterized command/object
+binding captured by the production query path. Relational SQL remains in memory only for that
+admission check; the sidecar retains its SHA-256 identity plus the typed query/parameter receipt,
+never raw command text, connection data, or literal query values. This binding strengthens
+sealed-directory internal consistency; like the artifact-integrity ledger, it is not an external
+authenticity or cryptographic-provenance root.
+Provider plan retention constructs fresh structural documents: SQLite canonicalizes access rows
+and redacts predicate details; SQL Server keeps only ShowPlan
+elements, known gate-bearing access operators, and bound table/index identities; PostgreSQL keeps only the plan
+tree plus allowlisted operator/relation/index/estimate members, and MongoDB keeps only the bound
+namespace plus winning stage/index topology. Statement text, expressions, predicates, commands,
+arbitrary aliases, namespace declarations, comments, and processing instructions are discarded.
+SQLite's fixed `p` and `l` aliases are retained only so the strict gate cannot hide a primary or
+linked full-table scan; every other alias is replaced by a stable redacted token.
+Declared-index gates reject any different bound index. Scan characterization instead retains a
+provider-selected alternative as `alternative-index-redacted`, preserving the access-path fact
+without disclosing its identity or making a declared-index claim.
+MongoDB command admission binds the renderer's complete canonical sort: optional semantic rank
+first, followed by the scope and identity-comparison tie breaks in their exact directions.
+The unordered equality workload and the ordered/paged workloads use separate declared query
+identities and physical indexes (`by-status` and `by-status-rank`). This prevents the query plan's
+default compound order from silently making `indexed-query` and `mixed-compound-ordering` the same
+physical operation, and lets the retained command receipt prove which shape actually executed.
 
 After materialization, SQLite, SQL Server, and PostgreSQL stores are opened through their public
 production `OpenPhysicalAsync` factories. Factory admission must succeed before correctness gates
@@ -80,7 +104,7 @@ still requires controlled execution of the complete reviewed matrix, exact-HEAD 
 all four providers, and the Elsa-owned EF Core oracle.
 
 The GitHub workflow is named `Physical Storage Benchmark Evidence (Scaffolding)`. Pull requests run
-a deliberately narrow SQLite/shared-form smoke over six representative workloads. Weekly/manual
+a deliberately narrow SQLite/shared-form smoke over seven representative workloads. Weekly/manual
 runs split the four-provider scheduled scaffold into deterministic provider/form/dataset shards on
 the controlled self-hosted runner pool. Every artifact remains non-promotable; the workflow does
 not perform candidate promotion or migration-decision gating.
@@ -168,7 +192,7 @@ database-reported version, isolation strategy, pooling behavior, and session lif
 | `mixed-compound-ordering` | Repeat equality queries with descending rank after ascending scope/status keys |
 | `insert`, `update`, `delete` | Repeat single-document mutations through the production store |
 | `unit-of-work` | Perform batched writes and one commit |
-| `concurrent-create` | Concurrent creates for one identity; exactly one must win |
+| `concurrent-create` | Repeated synchronized-contention creates for one identity; every contender reaches the same barrier before release, and each wave records one winner plus all remaining conflicts. Public call-window overlap is provider characterization only |
 | `optimistic-concurrency` | Stale writes that must return concurrency conflicts |
 | `pagination-and-count` | Page and count operations with agreement asserted |
 | `backfill-migration` | Time materialization/backfill, then validate projection/query correctness outside timing |
@@ -198,7 +222,7 @@ An operation is the smallest semantically complete unit that the workload promis
 - point-read batch: the complete reused-client or reset-client batch (including reset when selected);
 - indexed/mixed query, insert, update, delete, stale write, and storage-growth: one store call;
 - unit of work: one begin/save-batch/commit transaction;
-- concurrent create: one competing create attempt;
+- concurrent create: one competing create attempt. Every retained concurrent-create sample seals its requested parallelism, wave count, released-together wave count, attempts, completions, successful/conflict outcomes, and observed peak in-flight public production-store calls. Every contender must reach the same barrier before release, every wave must release all contenders together, and every outcome must be accounted. The sample operation count equals its attempts, the latency inventory equals that operation count, and the wave count equals the configured operations per iteration. The observed call-window peak is retained as provider characterization in `[1, N]`; it is not an eligibility gate and does not claim physical database overlap. Such an overlap claim requires provider-specific instrumentation at a lower execution boundary;
 - pagination and count: one page query or one count query;
 - backfill: one complete materialization/backfill application;
 - client restart validation: one client/factory/pool restart plus its durable-read validation batch.
@@ -233,6 +257,7 @@ runs/<ordinal>/metadata/configuration.json
 runs/<ordinal>/metadata/machine.json
 runs/<ordinal>/metadata/providers.json
 runs/<ordinal>/plans/<provider>/<form>/<workload>-<selection|count>.<native-extension>
+runs/<ordinal>/plans/<provider>/<form>/<workload>-<selection|count>.<native-extension>.assertions.json
 runs/<ordinal>/raw/measurements.jsonl
 runs/<ordinal>/reports/summary.json
 runs/<ordinal>/reports/summary.md
@@ -251,8 +276,17 @@ The v1 JSON Schemas live in [`schemas/v1`](schemas/v1). The evidence report deli
 
 No artifact in this slice is a migration decision or baseline-promotion authorization.
 
-Measured workers do not repeat warm-up iterations internally. The preceding warm-up worker executes
-the configured untimed warm-up iterations and emits no consumer evidence. Measured workers continue
+Every native-plan file has a required versioned `.assertions.json` sibling. The sidecar records the
+canonical typed request, plan identity, a redacted actual-command receipt, parsed filter/order/
+terminal/pagination shape, parameter roles, and the 1,000 or 5,000 basis-point policy. The verifier
+reparses that receipt and rejects a substituted selection/count, ordering, page, physical object,
+or provider-plan pairing even if the artifact-integrity tree has been resealed. It does not claim
+to turn the local integrity ledger into an external provenance signature.
+
+The preceding warm-up worker executes the configured untimed warm-up iterations as a preflight and
+emits no consumer evidence. Each independent measured worker also executes its own configured
+untimed warm-up iterations against the same target instance before timing begins, so process-local
+JIT and target state are warm without admitting warm-up samples. Measured workers continue
 writing whole raw samples until the iteration, operation-count, and steady-state execution-duration
 floors are all satisfied; setup, schema materialization, seeding, correctness, and validation time
 do not contribute to the duration floor.
@@ -274,8 +308,10 @@ domain code.
 The coordinator binds every worker request to the expected Git commit and worktree digest. The
 run-group manifest records SHA-256 digests for every request, response, worker manifest, Elsa
 evidence report, and measured consumer-evidence report. The verifier rejects path escapes, unknown
-JSON members, identity mismatches, Git drift, and digest mismatches before a group can be used as a
-baseline. Connection strings and provider secrets remain excluded.
+JSON members, non-canonical artifact slots, symbolic-link/reparse-point traversal, identity
+mismatches, Git drift, and digest mismatches before a group can be used as a baseline. Scheduled
+and regression consumers read the same canonical files that those digests bind. Connection strings
+and provider secrets remain excluded.
 
 ## Target-scoped database-work signals
 
@@ -295,6 +331,9 @@ gap. If a provider does not expose the relevant public telemetry during a worklo
 and every signal count are `null`, with an explicit `unavailable` reason and no synthetic zero.
 Raw measurement digests, artifact-integrity ledgers, consumer-evidence reconstruction, and
 scheduled-worker raw/summary equality bind those signals to the exact run group.
+Those hashes prove internal consistency and detect mutation relative to the retained ledger; they
+are not an authenticity root against an actor that can replace and re-seal the entire directory.
+Baseline promotion therefore still requires trusted external CI provenance or attestation.
 
 Machine metadata records CPU model, memory, storage/filesystem capacity, and power/governor state
 when the host exposes them, otherwise the literal `unavailable`. Provider metadata distinguishes
@@ -349,8 +388,8 @@ coverage. After remediation, the originating reviewers returned **PASS**:
   and their authoritative count must agree exactly with the persisted round-trip count; unavailable
   evidence cannot claim a count.
 - **Evidence integrity — addressed:** writer, reader, summarizer, report reconstruction, JSON
-  Schema validation, and fully resealed scheduled-group verification reject forged or internally
-  inconsistent signal counts.
+  Schema validation, and fully resealed scheduled-group verification reject internally
+  inconsistent signal counts. This is an internal-consistency claim, not external authenticity.
 - **Scope and test preservation — addressed:** SQL Server and PostgreSQL now have positive and
   negative selector coverage, all four provider runner paths are exercised without retaining
   selector values, no provider/workload/form declaration or worker protocol was removed, and live
@@ -384,9 +423,9 @@ non-decision smoke remained green.
 - Execute the ratified 10% indexed-query acceptance and 50% scan-characterization shapes across
   the 1K/100K/1M dataset matrix for the reviewed workload-bound payload profiles.
 - Capture exact-HEAD live evidence from SQLite, SQL Server, PostgreSQL, and MongoDB.
-- Exercise the target-scoped provider database-work signals under controlled live evidence for all
-  providers, then complete sustained concurrent-load evidence. The current observable client
-  signals do not by themselves close either acceptance item.
+- Exercise the target-scoped provider database-work signals and sealed concurrent-create evidence
+  under controlled live evidence for all providers. The current observable client signals do not
+  by themselves close the provider-work acceptance item.
 - Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
 - Capture actual crash/failure recovery evidence required by issue #50. Client pool reset/reopen
   validation is not crash or failure recovery evidence and does not close that acceptance work.

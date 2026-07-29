@@ -23,6 +23,9 @@ public sealed record BenchmarkSample(
     IReadOnlyDictionary<string, long> ProviderWork,
     IReadOnlyList<long> OperationLatencyNanoseconds)
 {
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public ConcurrentLoadEvidence? ConcurrentLoad { get; init; }
+
     public DatabaseSignalEvidence DatabaseSignal { get; init; } = new(
         DatabaseSignalAvailability.Unavailable,
         "unavailable",
@@ -67,6 +70,25 @@ public sealed record BenchmarkSample(
                 RoundTrips is null,
             _ => false
         };
+    }
+
+    public bool HasValidConcurrentLoadEvidence(
+        BenchmarkWorkload workload,
+        int? configuredParallelism = null,
+        int? expectedWaveCount = null)
+    {
+        if (workload != BenchmarkWorkload.ConcurrentCreate)
+            return ConcurrentLoad is null;
+
+        return ConcurrentLoad is not null &&
+               Operations == ConcurrentLoad.Attempts &&
+               OperationLatencyNanoseconds is not null &&
+               OperationLatencyNanoseconds.Count == Operations &&
+               (configuredParallelism.HasValue
+                   ? ConcurrentLoad.MeetsConfiguredContention(
+                       configuredParallelism.Value,
+                       expectedWaveCount)
+                   : ConcurrentLoad.IsInternallyConsistent());
     }
 }
 
