@@ -2,6 +2,7 @@ using Xunit;
 using Groundwork.Core.PhysicalStorage;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace Groundwork.PhysicalStorage.Benchmarks.Tests;
@@ -142,6 +143,21 @@ public sealed class BenchmarkWorkflowContractTests
             Assert.True(verificationResult.GetProperty("coverageVerified").GetBoolean());
             Assert.False(verificationResult.GetProperty("promotable").GetBoolean());
             Assert.False(verificationResult.GetProperty("deepGroupVerification").GetBoolean());
+            Assert.Equal("test-fixture-matrix-only", verificationResult.GetProperty("verificationMode").GetString());
+            Assert.Equal(runId, verificationResult.GetProperty("runId").GetString());
+            var matrix = verificationResult.GetProperty("matrix");
+            Assert.Equal(["sqlite", "sqlServer", "postgreSql", "mongoDb"],
+                matrix.GetProperty("providers").EnumerateArray().Select(value => value.GetString()));
+            Assert.Equal(["sharedDocuments"],
+                matrix.GetProperty("storageForms").EnumerateArray().Select(value => value.GetString()));
+            Assert.Equal([1000], matrix.GetProperty("datasetSizes").EnumerateArray().Select(value => value.GetInt32()));
+            Assert.Equal([1000], matrix.GetProperty("querySelectivityBasisPoints").EnumerateArray().Select(value => value.GetInt32()));
+            Assert.Equal(["clientResetPointReadBatch"],
+                matrix.GetProperty("workloads").EnumerateArray().Select(value => value.GetString()));
+            Assert.Equal(1, matrix.GetProperty("independentMeasuredRuns").GetInt32());
+            const string canonicalMatrix = "{\"datasetSizes\":[1000],\"independentMeasuredRuns\":1,\"providers\":[\"sqlite\",\"sqlServer\",\"postgreSql\",\"mongoDb\"],\"querySelectivityBasisPoints\":[1000],\"storageForms\":[\"sharedDocuments\"],\"workloads\":[\"clientResetPointReadBatch\"]}";
+            var matrixDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalMatrix))).ToLowerInvariant();
+            Assert.Equal(matrixDigest, verificationResult.GetProperty("matrixDigest").GetString());
             Assert.Equal(4, verificationResult.GetProperty("requiredShardCount").GetInt32());
             Assert.Equal(8, verificationResult.GetProperty("verifiedWorkerCount").GetInt32());
             Assert.Equal(4, verificationResult.GetProperty("verifiedMeasuredWorkerCount").GetInt32());

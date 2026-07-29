@@ -19,6 +19,7 @@ public sealed class BenchmarkSchemaTests
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/worker-response.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/run-group.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/run-group-regression.schema.json",
+        "benchmarks/Groundwork.PhysicalStorage.Benchmarks/schemas/v1/scheduled-coverage.schema.json",
         "benchmarks/Groundwork.PhysicalStorage.Benchmarks/baselines/v1/baseline-index.schema.json"
     };
 

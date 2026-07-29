@@ -21,6 +21,10 @@ automation:
 - `worker-response.schema.json` describes the Git-bound response and artifact digest set.
 - `run-group.schema.json` describes the coordinator manifest and integrity index.
 - `run-group-regression.schema.json` describes process-cluster comparison results.
+- `scheduled-coverage.schema.json` describes the aggregate verifier's non-promotable result,
+  including its exact run identity and canonical matrix claim/digest. It distinguishes a deep
+  scheduled-scaffold verification from an explicitly matrix-only test fixture; neither is a
+  baseline or a performance verdict.
 - `consumer-evidence.schema.json` describes redacted evidence joinable by workload, provider, form,
   version, fingerprint, complete payload profile/data shape, result digest, and (for concurrent
   create) a reconstructed concurrent-load evidence digest. It is always non-promotable until the
