@@ -614,6 +614,85 @@ public sealed class NativePlanEvidenceValidatorTests
     }
 
     [Fact]
+    public void MongoDB_accepts_the_driver_exists_guard_with_singleton_or_status_predicate()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        const NativePlanAssertionMode mode = NativePlanAssertionMode.ScanCharacterization;
+        var explain = BsonDocument.Parse(
+            """
+            { "command": {
+              "find": "expected_table",
+              "filter": {
+                "storage_scope": "tenant-a",
+                "document_kind": "benchmark-document",
+                "status": { "$exists": true },
+                "$or": [{ "status": "open" }]
+              },
+              "sort": { "storage_scope": 1, "id_comparison_key": 1 },
+              "limit": 20
+            } }
+            """);
+        var command = NativePlanMongoCommandReceipt.FromExplain(
+            explain,
+            PhysicalDocumentQueryCommandKind.Page,
+            NativePlanTestBindings.CanonicalFields);
+        var receipt = NativePlanQueryReceipt.FromMongoDb(
+            request,
+            mode,
+            command,
+            NativePlanTestBindings.CanonicalFields);
+        var binding = new NativePlanCommandBinding(
+            PhysicalObject,
+            null,
+            null,
+            receipt.Shape,
+            receipt)
+        {
+            Fields = NativePlanTestBindings.CanonicalFields,
+            MongoCommandReceipt = command
+        };
+
+        Assert.Contains("\"$exists\" : true", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("tenant-a", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("benchmark-document", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"open\"", command.RedactedCommand, StringComparison.Ordinal);
+        Assert.True(Matches(
+            BenchmarkProvider.MongoDb,
+            mode,
+            request,
+            binding,
+            NativePlan(BenchmarkProvider.MongoDb)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MongoDB_rejects_a_noncanonical_exists_guard(bool exists)
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        var extra = exists ? ", \"category\": \"<redacted>\"" : string.Empty;
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            $$"""
+            {
+              "find": "expected_table",
+              "filter": {
+                "storage_scope": "<redacted>",
+                "document_kind": "<redacted>",
+                "status": { "$exists": {{exists.ToString().ToLowerInvariant()}} },
+                "$or": [{ "status": "<redacted>" }]{{extra}}
+              },
+              "sort": { "storage_scope": 1, "id_comparison_key": 1 },
+              "limit": 20
+            }
+            """);
+    }
+
+    [Fact]
     public void MongoDB_rejects_an_extra_primary_sort_field()
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.MixedCompoundOrdering])

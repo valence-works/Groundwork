@@ -285,7 +285,6 @@ internal static partial class NativePlanCommandParsing
         var expected = new[] { fields.StorageScope, fields.DocumentKind, fields.Status };
         if (expected.Distinct(StringComparer.Ordinal).Count() != expected.Length ||
             expected.Contains("$or", StringComparer.Ordinal) ||
-            predicate.ElementCount != expected.Length ||
             !predicate.TryGetValue(fields.StorageScope, out var scope) ||
             !IsMongoEquality(scope) ||
             !predicate.TryGetValue(fields.DocumentKind, out var kind) ||
@@ -294,17 +293,36 @@ internal static partial class NativePlanCommandParsing
             return false;
         }
 
-        if (predicate.TryGetValue(fields.Status, out var directStatus))
-            return IsMongoEquality(directStatus);
+        if (!predicate.TryGetValue(fields.Status, out var directStatus))
+        {
+            return predicate.ElementCount == expected.Length &&
+                   predicate.TryGetValue("$or", out var singletonStatus) &&
+                   IsMongoSingletonStatusEquality(singletonStatus, fields.Status);
+        }
 
-        return predicate.TryGetValue("$or", out var logicalStatus) &&
-               logicalStatus.IsBsonArray &&
-               logicalStatus.AsBsonArray.Count == 1 &&
-               logicalStatus.AsBsonArray[0].IsBsonDocument &&
-               logicalStatus.AsBsonArray[0].AsBsonDocument.ElementCount == 1 &&
-               logicalStatus.AsBsonArray[0].AsBsonDocument.TryGetValue(fields.Status, out var nestedStatus) &&
-               IsMongoEquality(nestedStatus);
+        if (IsMongoEquality(directStatus))
+            return predicate.ElementCount == expected.Length && !predicate.Contains("$or");
+
+        return predicate.ElementCount == expected.Length + 1 &&
+               IsMongoExistenceGuard(directStatus) &&
+               predicate.TryGetValue("$or", out var logicalStatus) &&
+               IsMongoSingletonStatusEquality(logicalStatus, fields.Status);
     }
+
+    private static bool IsMongoExistenceGuard(BsonValue value) =>
+        value.IsBsonDocument &&
+        value.AsBsonDocument.ElementCount == 1 &&
+        value.AsBsonDocument.TryGetValue("$exists", out var exists) &&
+        exists.IsBoolean &&
+        exists.AsBoolean;
+
+    private static bool IsMongoSingletonStatusEquality(BsonValue value, string statusField) =>
+        value.IsBsonArray &&
+        value.AsBsonArray.Count == 1 &&
+        value.AsBsonArray[0].IsBsonDocument &&
+        value.AsBsonArray[0].AsBsonDocument.ElementCount == 1 &&
+        value.AsBsonArray[0].AsBsonDocument.TryGetValue(statusField, out var nestedStatus) &&
+        IsMongoEquality(nestedStatus);
 
     private static void VisitMongoPredicateDocuments(
         BsonDocument command,
@@ -527,7 +545,8 @@ internal static partial class NativePlanCommandParsing
          key is "$skip" or "$limit" &&
          value.IsNumeric) ||
         (location == MongoCommandLocation.Sort &&
-         value.IsNumeric);
+         value.IsNumeric) ||
+        (key == "$exists" && value.IsBoolean);
 
     private static MongoCommandLocation ChildLocation(
         MongoCommandLocation location,
