@@ -802,6 +802,34 @@ public sealed class SqliteDiagnosticRecordMaterializerTests
     }
 
     [Fact]
+    public async Task Deployment_applier_materializes_missing_streams_idempotently_and_rejects_definition_drift()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"groundwork-diagnostics-{Guid.NewGuid():N}.db");
+        var connectionString = ConnectionString(path);
+        var definition = SqliteDiagnosticRecordStoreFixture.Definition;
+        var deployment = Deployment(definition);
+        try
+        {
+            var applier = SqliteDiagnosticRecordStoreFactory.CreateDeploymentApplier(connectionString);
+
+            await applier.ApplyAsync(deployment);
+            await applier.ApplyAsync(deployment);
+
+            var inspection = await new SqliteDiagnosticRecordDeploymentInspector(connectionString)
+                .InspectAsync(deployment);
+            Assert.Equal(DiagnosticRecordDeploymentAdmissionStatus.Ready, inspection.Status);
+            var drift = await Assert.ThrowsAsync<DiagnosticRecordDeploymentAdmissionException>(() =>
+                applier.ApplyAsync(Deployment(
+                    definition with { SchemaVersion = definition.SchemaVersion + 1 })));
+            Assert.Equal(DiagnosticRecordDeploymentAdmissionErrorCodes.Drifted, drift.Code);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task Materializer_creates_durable_records_fields_stream_and_operation_ledgers()
     {
         var path = Path.Combine(Path.GetTempPath(), $"groundwork-diagnostics-{Guid.NewGuid():N}.db");

@@ -8,6 +8,28 @@ public static class MongoDbDiagnosticRecordStoreFactory
     public static void ValidateDefinition(DiagnosticRecordStreamDefinition definition) =>
         MongoDbDiagnosticRecordValidator.ValidateDefinitionAndThrow(definition);
 
+    /// <summary>
+    /// Creates an explicitly invoked deployment applier for diagnostic streams. It validates
+    /// transaction topology before materializing any stream; runtime session factories remain
+    /// read-only.
+    /// </summary>
+    public static IDiagnosticRecordDeploymentApplier CreateDeploymentApplier(
+        string connectionString,
+        string databaseName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
+        return new DelegatingDiagnosticRecordDeploymentApplier(
+            new MongoDbDiagnosticRecordDeploymentInspector(connectionString, databaseName),
+            async (definition, cancellationToken) =>
+            {
+                await using var handle = await CreateAsync(
+                    connectionString, databaseName, definition, cancellationToken: cancellationToken);
+            },
+            (deployment, cancellationToken) => ValidateAdmissionAsync(
+                connectionString, databaseName, deployment.Streams, cancellationToken));
+    }
+
     public static async Task ValidateAdmissionAsync(
         string connectionString,
         string databaseName,

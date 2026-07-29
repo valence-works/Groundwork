@@ -4,10 +4,13 @@ using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Queries;
 using Groundwork.Core.Scoping;
+using Groundwork.Core.Text;
 using Groundwork.Core.Transactions;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.Documents.UnitOfWork;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Xunit;
 
@@ -1341,13 +1344,206 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.Null(plan.ProjectReference(null));
         Assert.Throws<ArgumentException>(() => plan.ProjectReference(""));
         Assert.Throws<ArgumentException>(() => plan.ProjectReference(" "));
+        Assert.Null(plan.ProjectReferenceIdentity(null));
+        var identity = Assert.IsType<PortableStringIdentityProjection>(plan.ProjectReferenceIdentity("AUTH-1"));
         Assert.Equal(
             plan.TargetRoute.Envelope.Identity.Project("AUTH-1").ComparisonKey,
             plan.ProjectReference("AUTH-1"));
+        Assert.Equal(plan.TargetRoute.Envelope.Identity.Project("AUTH-1"), identity);
         Assert.Equal(PhysicalQueryFieldSource.CanonicalJsonPath, plan.SourceCanonicalJsonReference.Source);
         Assert.NotEqual(
             plan.SourceReferenceDeclarationIndex.Name,
             plan.TargetEqualityIndex.Name);
+    }
+
+    [Fact]
+    public void Relationship_plan_exposes_a_canonical_collision_safe_reference_and_fence_schema()
+    {
+        var plan = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(relatedTarget: false, includeMutation: false).RouteSet).Plans);
+
+        var schema = plan.MaterializationSchema;
+
+        Assert.Equal(plan.Identity, schema.RelationshipIdentity);
+        Assert.Equal(plan.Materialization.ReferenceStorageIdentity, schema.GenerationIdentity);
+        Assert.Equal(plan.Materialization.ReferenceStorageIdentity, schema.Reference.StorageIdentity);
+        Assert.Equal(plan.Materialization.FenceStorageIdentity, schema.Fence.StorageIdentity);
+        Assert.Equal(
+            [
+                PhysicalRelationshipSidecarField.MaterializationGeneration,
+                PhysicalRelationshipSidecarField.SourceScope,
+                PhysicalRelationshipSidecarField.SourceLookupKey,
+                PhysicalRelationshipSidecarField.SourceComparisonKey,
+                PhysicalRelationshipSidecarField.TargetScope,
+                PhysicalRelationshipSidecarField.TargetLookupKey,
+                PhysicalRelationshipSidecarField.TargetComparisonKey
+            ],
+            schema.Reference.Fields);
+        Assert.Equal(
+            [
+                PhysicalRelationshipSidecarField.MaterializationGeneration,
+                PhysicalRelationshipSidecarField.SourceScope,
+                PhysicalRelationshipSidecarField.SourceLookupKey,
+                PhysicalRelationshipSidecarField.SourceComparisonKey
+            ],
+            schema.Reference.UniqueSourceAccessPath.Fields);
+        Assert.True(schema.Reference.UniqueSourceAccessPath.IsUnique);
+        Assert.Equal(
+            [
+                PhysicalRelationshipSidecarField.MaterializationGeneration,
+                PhysicalRelationshipSidecarField.TargetScope,
+                PhysicalRelationshipSidecarField.TargetLookupKey,
+                PhysicalRelationshipSidecarField.TargetComparisonKey
+            ],
+            schema.Reference.TargetSeekAccessPath.Fields);
+        Assert.False(schema.Reference.TargetSeekAccessPath.IsUnique);
+        Assert.Equal(schema.Reference.TargetSeekAccessPath.Fields, schema.Fence.Fields);
+        Assert.Equal(schema.Fence.Fields, schema.Fence.UniqueTargetFenceAccessPath.Fields);
+        Assert.True(schema.Fence.UniqueTargetFenceAccessPath.IsUnique);
+        Assert.Contains("\"SourceLookupKey\",\"SourceComparisonKey\"", schema.CanonicalJson, StringComparison.Ordinal);
+        Assert.Contains("\"TargetLookupKey\",\"TargetComparisonKey\"", schema.CanonicalJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Relationship_sidecar_schema_is_deterministic_and_tracks_semantic_generation_only()
+    {
+        var baseline = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(relatedTarget: false, includeMutation: false).RouteSet).Plans)
+            .MaterializationSchema;
+        var same = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(relatedTarget: false, includeMutation: false).RouteSet).Plans)
+            .MaterializationSchema;
+        var renamed = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                includeMutation: false,
+                authorizationPhysicalName: "authorizations_v2",
+                tokenPhysicalName: "tokens_v2").RouteSet).Plans)
+            .MaterializationSchema;
+        var semanticDrift = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                includeMutation: false,
+                targetIdentityCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase,
+                referenceCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase).RouteSet).Plans)
+            .MaterializationSchema;
+
+        Assert.Equal(baseline.CanonicalJson, same.CanonicalJson);
+        Assert.Equal(baseline.Fingerprint, same.Fingerprint);
+        Assert.Equal(baseline, same);
+        Assert.Equal(baseline.CanonicalJson, renamed.CanonicalJson);
+        Assert.Equal(baseline.Fingerprint, renamed.Fingerprint);
+        Assert.Equal(baseline, renamed);
+        Assert.NotEqual(baseline.GenerationIdentity, semanticDrift.GenerationIdentity);
+        Assert.NotEqual(baseline.Fingerprint, semanticDrift.Fingerprint);
+    }
+
+    [Fact]
+    public void Relationship_sidecar_schema_canonical_payload_and_fingerprint_bind_every_generated_identity()
+    {
+        var schema = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(relatedTarget: false, includeMutation: false).RouteSet).Plans)
+            .MaterializationSchema;
+        var expectedPayload =
+            $"{{\"schemaVersion\":1,\"relationship\":\"{schema.RelationshipIdentity}\",\"generation\":\"{schema.GenerationIdentity}\"," +
+            $"\"reference\":{{\"storageIdentity\":\"{schema.Reference.StorageIdentity}\",\"generation\":\"{schema.Reference.GenerationIdentity}\"," +
+            "\"fields\":[\"MaterializationGeneration\",\"SourceScope\",\"SourceLookupKey\",\"SourceComparisonKey\",\"TargetScope\",\"TargetLookupKey\",\"TargetComparisonKey\"]," +
+            $"\"uniqueSourceAccessPath\":{{\"identity\":\"{schema.Reference.UniqueSourceAccessPath.Identity}\",\"unique\":true," +
+            "\"fields\":[\"MaterializationGeneration\",\"SourceScope\",\"SourceLookupKey\",\"SourceComparisonKey\"]}," +
+            $"\"targetSeekAccessPath\":{{\"identity\":\"{schema.Reference.TargetSeekAccessPath.Identity}\",\"unique\":false," +
+            "\"fields\":[\"MaterializationGeneration\",\"TargetScope\",\"TargetLookupKey\",\"TargetComparisonKey\"]}}," +
+            $"\"fence\":{{\"storageIdentity\":\"{schema.Fence.StorageIdentity}\",\"generation\":\"{schema.Fence.GenerationIdentity}\"," +
+            "\"fields\":[\"MaterializationGeneration\",\"TargetScope\",\"TargetLookupKey\",\"TargetComparisonKey\"]," +
+            $"\"uniqueTargetFenceAccessPath\":{{\"identity\":\"{schema.Fence.UniqueTargetFenceAccessPath.Identity}\",\"unique\":true," +
+            "\"fields\":[\"MaterializationGeneration\",\"TargetScope\",\"TargetLookupKey\",\"TargetComparisonKey\"]}}}";
+        var expectedFingerprint = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(expectedPayload))).ToLowerInvariant();
+        var expectedCanonicalJson =
+            $"{expectedPayload[..^1]},\"fingerprint\":\"{expectedFingerprint}\"}}";
+
+        Assert.Equal(expectedFingerprint, schema.Fingerprint);
+        Assert.Equal(expectedCanonicalJson, schema.CanonicalJson);
+
+        var alteredReference = new PhysicalRelationshipReferenceMaterializationSchema(
+            schema.Reference.StorageIdentity,
+            schema.Reference.GenerationIdentity,
+            schema.Reference.UniqueSourceAccessPath,
+            new PhysicalRelationshipSidecarAccessPath(
+                "relationship-reference-by-target:altered",
+                isUnique: false,
+                schema.Reference.TargetSeekAccessPath.Fields));
+        var altered = new PhysicalRelationshipMaterializationSchema(
+            schema.RelationshipIdentity,
+            schema.GenerationIdentity,
+            alteredReference,
+            schema.Fence);
+
+        Assert.Equal(schema.GenerationIdentity, altered.GenerationIdentity);
+        Assert.NotEqual(schema.Fingerprint, altered.Fingerprint);
+    }
+
+    [Fact]
+    public void Relationship_sidecar_schema_rejects_non_contract_access_paths_and_mixed_generations()
+    {
+        var schema = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(relatedTarget: false, includeMutation: false).RouteSet).Plans)
+            .MaterializationSchema;
+        var reference = schema.Reference;
+        var fence = schema.Fence;
+
+        var sourceWithWrongOrder = new PhysicalRelationshipSidecarAccessPath(
+            "invalid-source-order",
+            isUnique: true,
+            [
+                PhysicalRelationshipSidecarField.MaterializationGeneration,
+                PhysicalRelationshipSidecarField.SourceScope,
+                PhysicalRelationshipSidecarField.SourceComparisonKey,
+                PhysicalRelationshipSidecarField.SourceLookupKey
+            ]);
+        var targetWithWrongUniqueness = new PhysicalRelationshipSidecarAccessPath(
+            "invalid-target-uniqueness",
+            isUnique: true,
+            reference.TargetSeekAccessPath.Fields);
+        var targetWithDuplicateIdentity = new PhysicalRelationshipSidecarAccessPath(
+            reference.UniqueSourceAccessPath.Identity,
+            isUnique: false,
+            reference.TargetSeekAccessPath.Fields);
+        var referenceWithMismatchedStorageGeneration =
+            new PhysicalRelationshipReferenceMaterializationSchema(
+                "relationship-reference:old-generation",
+                schema.GenerationIdentity,
+                reference.UniqueSourceAccessPath,
+                reference.TargetSeekAccessPath);
+        var differentGenerationFence = new PhysicalRelationshipTargetFenceSchema(
+            fence.StorageIdentity,
+            "relationship-reference:other-generation",
+            fence.UniqueTargetFenceAccessPath);
+
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipReferenceMaterializationSchema(
+            reference.StorageIdentity,
+            reference.GenerationIdentity,
+            sourceWithWrongOrder,
+            reference.TargetSeekAccessPath));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipReferenceMaterializationSchema(
+            reference.StorageIdentity,
+            reference.GenerationIdentity,
+            reference.UniqueSourceAccessPath,
+            targetWithWrongUniqueness));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipReferenceMaterializationSchema(
+            reference.StorageIdentity,
+            reference.GenerationIdentity,
+            reference.UniqueSourceAccessPath,
+            targetWithDuplicateIdentity));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipMaterializationSchema(
+            schema.RelationshipIdentity,
+            schema.GenerationIdentity,
+            referenceWithMismatchedStorageGeneration,
+            fence));
+        Assert.Throws<ArgumentException>(() => new PhysicalRelationshipMaterializationSchema(
+            schema.RelationshipIdentity,
+            schema.GenerationIdentity,
+            reference,
+            differentGenerationFence));
     }
 
     [Fact]
@@ -1737,6 +1933,36 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.NotEqual(baseline.Relationship.Materialization, changedSourcePath.Relationship.Materialization);
         Assert.NotEqual(baseline.Relationship.Materialization, changedSourceIndex.Relationship.Materialization);
         Assert.NotEqual(baseline.Relationship.Materialization, changedTargetIndex.Relationship.Materialization);
+    }
+
+    [Fact]
+    public void Relationship_materialization_identity_binds_scope_and_both_identity_algorithms()
+    {
+        var fixture = CreateRelationshipFixture(relatedTarget: false);
+        var baseline = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(fixture.RouteSet).Plans);
+        var global = Assert.Single(PhysicalRelationshipPlanCompiler.Compile(
+            CreateRelationshipFixture(
+                relatedTarget: false,
+                authorizationTenancy: TenancyPolicy.Global,
+                tokenTenancy: TenancyPolicy.Global).RouteSet).Plans);
+        var expectedRoot = ExpectedRelationshipMaterializationRoot(fixture.Manifest, baseline);
+
+        Assert.NotEqual(baseline.Materialization, global.Materialization);
+        Assert.Equal(
+            $"relationship-reference:{expectedRoot}",
+            baseline.Materialization.ReferenceStorageIdentity);
+        Assert.Equal(
+            $"relationship-reference-by-source:{expectedRoot}",
+            baseline.Materialization.ReferenceBySourceIndexIdentity);
+        Assert.Equal(
+            $"relationship-reference-by-target:{expectedRoot}",
+            baseline.Materialization.ReferenceByTargetIndexIdentity);
+        Assert.Equal(
+            $"relationship-fence:{expectedRoot}",
+            baseline.Materialization.FenceStorageIdentity);
+        Assert.Equal(
+            $"relationship-fence-by-target:{expectedRoot}",
+            baseline.Materialization.FenceByTargetIndexIdentity);
     }
 
     [Fact]
@@ -4940,6 +5166,36 @@ public sealed class PhysicalQueryPlanCompilerTests
         var mutationRoute = routeSet.Routes.Single(route =>
             route.StorageUnit.Value == (relatedTarget ? "token" : "authorization"));
         return new RelationshipPlanningFixture(manifest, routeSet, mutationRoute, mutationStorage);
+    }
+
+    private static string ExpectedRelationshipMaterializationRoot(
+        StorageManifest manifest,
+        PhysicalRelationshipPlan plan)
+    {
+        static string Join(params string?[] values) =>
+            string.Concat(values.Select(value => value is null ? "-1:" : $"{value.Length}:{value}"));
+
+        var relationship = plan.Declaration;
+        var source = plan.SourceRoute;
+        var target = plan.TargetRoute;
+        var canonical = Join(
+            manifest.Identity.Value,
+            relationship.Identity,
+            relationship.SourceStorageUnit.Value,
+            relationship.SourceReferencePath,
+            relationship.SourceReferenceIndexIdentity,
+            relationship.TargetStorageUnit.Value,
+            relationship.TargetIdentityPath,
+            relationship.TargetEqualityIndexIdentity,
+            ((int)relationship.ReferenceCasePolicy).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ((int)source.ScopePolicy).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ((int)target.ScopePolicy).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ((int)source.Envelope.Identity.StringCasePolicy).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            source.Envelope.Identity.ComparisonAlgorithmId,
+            source.Envelope.Identity.LookupAlgorithmId,
+            target.Envelope.Identity.ComparisonAlgorithmId,
+            target.Envelope.Identity.LookupAlgorithmId);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
 
     private static ManifestExecutableRouteSet CompileRelationshipRouteSet(StorageManifest manifest)

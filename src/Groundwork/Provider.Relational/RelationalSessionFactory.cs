@@ -28,6 +28,17 @@ public sealed class RelationalSessionFactory
     /// <summary>Creates sessions without a process-wide serialization boundary.</summary>
     public static RelationalSessionFactory Concurrent(Func<DbConnection> createConnection) => new(createConnection, false);
 
+    /// <summary>
+    /// Creates concurrent sessions with a provider-owned transaction boundary.
+    /// </summary>
+    public static RelationalSessionFactory Concurrent(
+        Func<DbConnection> createConnection,
+        Func<DbConnection, CancellationToken, Task<DbTransaction>> beginTransaction)
+    {
+        ArgumentNullException.ThrowIfNull(beginTransaction);
+        return new(createConnection, false, beginTransaction);
+    }
+
     /// <summary>Creates sessions one at a time for providers that require serialized access.</summary>
     public static RelationalSessionFactory Serialized(Func<DbConnection> createConnection) => new(createConnection, true);
 

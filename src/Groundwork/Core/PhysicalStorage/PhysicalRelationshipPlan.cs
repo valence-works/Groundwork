@@ -4,6 +4,7 @@ using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Scoping;
+using Groundwork.Core.Text;
 using Groundwork.Core.Validation;
 
 namespace Groundwork.Core.PhysicalStorage;
@@ -76,6 +77,14 @@ public sealed record PhysicalRelationshipPlan(
 {
     public string Identity => Declaration.Identity;
 
+    /// <summary>
+    /// The generated provider-neutral relationship reference and target-key fence schema. This is
+    /// intentionally a pure contract; provider admission remains fail closed until a provider has
+    /// implemented and certified its runtime maintenance protocol.
+    /// </summary>
+    public PhysicalRelationshipMaterializationSchema MaterializationSchema =>
+        PhysicalRelationshipMaterializationSchema.Create(this);
+
     public string CanonicalIdentity => PhysicalCanonicalEncoding.Join(
         Declaration.Identity,
         SourceRoute.StorageUnit.Value,
@@ -106,11 +115,19 @@ public sealed record PhysicalRelationshipPlan(
     /// identity route. A missing value remains absent; malformed or empty identities fail closed.
     /// </summary>
     public string? ProjectReference(string? sourceReference)
+        => ProjectReferenceIdentity(sourceReference)?.ComparisonKey;
+
+    /// <summary>
+    /// Projects an optional serialized reference with the target identity route. Both lookup and
+    /// comparison keys are exposed for generated materialization and fence keys; callers must not
+    /// treat the lookup hash as a complete identity.
+    /// </summary>
+    public PortableStringIdentityProjection? ProjectReferenceIdentity(string? sourceReference)
     {
         if (sourceReference is null)
             return null;
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceReference);
-        return TargetRoute.Envelope.Identity.Project(sourceReference).ComparisonKey;
+        return TargetRoute.Envelope.Identity.Project(sourceReference);
     }
 }
 
