@@ -101,7 +101,42 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         NativePlanEvidenceSidecar.ValidateDocument(document.RootElement);
         Assert.Equal(NativePlanEvidence.SidecarSchemaVersion,
             document.RootElement.GetProperty("schemaVersion").GetString());
-        Assert.True(document.RootElement.GetProperty("commandBinding").TryGetProperty("parameterizedCommand", out _));
+        var binding = document.RootElement.GetProperty("commandBinding");
+        Assert.False(binding.TryGetProperty("parameterizedCommand", out _));
+        Assert.Matches("^sha256:[0-9a-f]{64}$", binding.GetProperty("parameterizedCommandDigest").GetString()!);
+        var retained = await NativePlanEvidenceSidecar.ReadAsync(sidecarPath, CancellationToken.None);
+        Assert.Null(retained.CommandBinding!.ParameterizedCommand);
+        Assert.NotNull(retained.CommandBinding.ParameterizedCommandDigest);
+    }
+
+    [Fact]
+    public async Task Writer_never_serializes_raw_relational_command_text()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.Sqlite,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = Evidence();
+        evidence = evidence with
+        {
+            CommandBinding = evidence.CommandBinding! with
+            {
+                ParameterizedCommand = evidence.CommandBinding!.ParameterizedCommand!
+                    .Replace("SELECT *", "SELECT *, 0 AS \"Secret:synthetic-test-value\"", StringComparison.Ordinal)
+            }
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None);
+
+        var sidecar = await File.ReadAllTextAsync(Path.Combine(root, $"{artifact}.assertions.json"));
+        Assert.DoesNotContain("synthetic-test-value", sidecar, StringComparison.Ordinal);
+        Assert.DoesNotContain("parameterizedCommand\"", sidecar, StringComparison.Ordinal);
+        Assert.Contains("\"parameterizedCommandDigest\"", sidecar, StringComparison.Ordinal);
     }
 
     [Theory]

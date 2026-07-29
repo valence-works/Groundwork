@@ -27,8 +27,9 @@ automation:
   external EF oracle is joined.
 - `native-plan-assertions.schema.json` describes the required `<native-plan>.assertions.json`
   sidecar. It binds a canonical benchmark request to a parsed provider-native plan and a redacted
-  receipt of the actual provider command: relational SQL keeps parameter names and structural
-  pagination only; MongoDB retains a redacted `find`/`aggregate`/`count` command with terminal,
+  receipt of the actual provider command: relational SQL is admitted in memory and represented by
+  a SHA-256 command identity plus typed parameter roles and structural pagination only; MongoDB
+  retains a redacted `find`/`aggregate`/`count` command with terminal,
   filter fields/operators, sort direction, skip, and limit. The sidecar is validated on write and
   read, rejects unknown members and schema versions, and records 1,000 versus 5,000 basis-point
   selectivity. It proves internal consistency of a sealed artifact tree, not external command

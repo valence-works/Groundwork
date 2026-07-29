@@ -14,7 +14,7 @@ internal static class NativePlanEvidenceSidecar
         "indexName", "nativePlan", "assertions", "commandBinding");
     private static readonly ISet<string> RequestMembers = Members("workload", "operation", "ordered", "skip", "take");
     private static readonly ISet<string> BindingMembers = Members(
-        "physicalObject", "alias", "parameterizedCommand", "requestShape", "queryReceipt", "fields", "mongoCommandReceipt");
+        "physicalObject", "alias", "parameterizedCommandDigest", "requestShape", "queryReceipt", "fields", "mongoCommandReceipt");
     private static readonly ISet<string> FieldBindingMembers = Members(
         "storageScope", "documentKind", "status", "rank");
     private static readonly ISet<string> ShapeMembers = Members(
@@ -64,16 +64,17 @@ internal static class NativePlanEvidenceSidecar
         RequireObject(root.GetProperty("commandBinding"), BindingMembers,
             ["physicalObject", "requestShape", "queryReceipt", "fields"], "Native-plan command binding");
         var binding = root.GetProperty("commandBinding");
-        var hasSql = binding.TryGetProperty("parameterizedCommand", out var sql) && sql.ValueKind == JsonValueKind.String;
+        var hasSql = binding.TryGetProperty("parameterizedCommandDigest", out var digest) &&
+                     digest.ValueKind == JsonValueKind.String;
         var hasMongo = binding.TryGetProperty("mongoCommandReceipt", out var mongo) && mongo.ValueKind == JsonValueKind.Object;
         if (hasSql == hasMongo)
             throw new InvalidOperationException("Native-plan command binding must contain exactly one provider command receipt.");
         RequireNonEmptyString(binding, "physicalObject", "Native-plan command binding");
         RequireNullableNonEmptyString(binding, "alias", "Native-plan command binding");
         if (hasSql)
-            RequireNonEmptyString(binding, "parameterizedCommand", "Native-plan command binding");
+            RequireCommandDigest(binding, "parameterizedCommandDigest", "Native-plan command binding");
         else
-            RequireNullOrMissing(binding, "parameterizedCommand", "Native-plan command binding");
+            RequireNullOrMissing(binding, "parameterizedCommandDigest", "Native-plan command binding");
 
         var fields = binding.GetProperty("fields");
         RequireObject(fields, FieldBindingMembers, FieldBindingMembers, "Native-plan field binding");
@@ -140,6 +141,19 @@ internal static class NativePlanEvidenceSidecar
             !selectivity.TryGetInt32(out var basisPoints) || basisPoints is not (1_000 or 5_000))
         {
             throw new InvalidOperationException($"{label} has an unsupported selectivity basis point value.");
+        }
+    }
+
+    private static void RequireCommandDigest(JsonElement element, string name, string label)
+    {
+        RequireNonEmptyString(element, name, label);
+        var value = element.GetProperty(name).GetString()!;
+        var digest = value.StartsWith("sha256:", StringComparison.Ordinal)
+            ? value["sha256:".Length..]
+            : string.Empty;
+        if (digest.Length != 64 || digest.Any(character => !"0123456789abcdef".Contains(character)))
+        {
+            throw new InvalidOperationException($"{label} member '{name}' must be a lowercase SHA-256 identity.");
         }
     }
 

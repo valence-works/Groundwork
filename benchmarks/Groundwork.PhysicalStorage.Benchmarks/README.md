@@ -36,11 +36,13 @@ targets. Correctness-gate documents are removed and statistics are finalized aga
 Native-plan capture is read-only: it does not add or remove rows, change selectivity, or refresh
 statistics. A provider that chooses a scan at the mandatory 10% acceptance shape fails the gate;
 the retained 50% characterization is never changed or inflated just to force an index plan.
-Persisted plan validation parses the provider-native plan in both modes and binds its observed
-collection, relation, table, or SQLite alias to the exact parameterized command/object binding
-captured by the production query path. Parameterized SQL is retained without connection data or
-literal query values. This binding strengthens sealed-directory internal consistency; like the
-artifact-integrity ledger, it is not an external authenticity or cryptographic-provenance root.
+Before persistence, plan validation parses the provider-native plan in both modes and binds its
+observed collection, relation, table, or SQLite alias to the exact parameterized command/object
+binding captured by the production query path. Relational SQL remains in memory only for that
+admission check; the sidecar retains its SHA-256 identity plus the typed query/parameter receipt,
+never raw command text, connection data, or literal query values. This binding strengthens
+sealed-directory internal consistency; like the artifact-integrity ledger, it is not an external
+authenticity or cryptographic-provenance root.
 The unordered equality workload and the ordered/paged workloads use separate declared query
 identities and physical indexes (`by-status` and `by-status-rank`). This prevents the query plan's
 default compound order from silently making `indexed-query` and `mixed-compound-ordering` the same

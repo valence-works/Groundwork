@@ -61,9 +61,10 @@ internal static partial class NativePlanEvidenceValidator
         string indexName,
         string nativePlan)
     {
-        if (!HasSafeParameterizedCommand(binding) ||
+        var hasRawCommand = HasSafeParameterizedCommand(binding);
+        if ((!hasRawCommand && !HasRetainedCommandDigest(binding)) ||
             string.IsNullOrWhiteSpace(binding.Alias) ||
-            !CommandBindsObject(binding, '"', '"'))
+            (hasRawCommand && !CommandBindsObject(binding, '"', '"')))
         {
             return false;
         }
@@ -103,6 +104,7 @@ internal static partial class NativePlanEvidenceValidator
     {
         if (binding.Alias is not null ||
             binding.ParameterizedCommand is not null ||
+            binding.ParameterizedCommandDigest is not null ||
             binding.MongoCommandReceipt is null ||
             !NativePlanCommandParsing.MongoCommandBindsObject(binding.MongoCommandReceipt, binding.PhysicalObject))
             return false;
@@ -143,9 +145,10 @@ internal static partial class NativePlanEvidenceValidator
         string indexName,
         string nativePlan)
     {
-        if (!HasSafeParameterizedCommand(binding) ||
+        var hasRawCommand = HasSafeParameterizedCommand(binding);
+        if ((!hasRawCommand && !HasRetainedCommandDigest(binding)) ||
             string.IsNullOrWhiteSpace(binding.Alias) ||
-            !CommandBindsObject(binding, '"', '"'))
+            (hasRawCommand && !CommandBindsObject(binding, '"', '"')))
         {
             return false;
         }
@@ -185,9 +188,10 @@ internal static partial class NativePlanEvidenceValidator
         string indexName,
         string nativePlan)
     {
-        if (!HasSafeParameterizedCommand(binding) ||
+        var hasRawCommand = HasSafeParameterizedCommand(binding);
+        if ((!hasRawCommand && !HasRetainedCommandDigest(binding)) ||
             string.IsNullOrWhiteSpace(binding.Alias) ||
-            !CommandBindsObject(binding, '[', ']'))
+            (hasRawCommand && !CommandBindsObject(binding, '[', ']')))
         {
             return false;
         }
@@ -213,6 +217,8 @@ internal static partial class NativePlanEvidenceValidator
     {
         if (string.IsNullOrWhiteSpace(binding.ParameterizedCommand))
             return false;
+        if (binding.ParameterizedCommandDigest is not null)
+            return false;
 
         var command = binding.ParameterizedCommand.Trim();
         if (command.EndsWith(';'))
@@ -223,6 +229,12 @@ internal static partial class NativePlanEvidenceValidator
                !ConnectionData().IsMatch(command) &&
                !SqlStringLiteral().IsMatch(command);
     }
+
+    private static bool HasRetainedCommandDigest(NativePlanCommandBinding binding) =>
+        binding.ParameterizedCommand is null &&
+        binding.MongoCommandReceipt is null &&
+        binding.ParameterizedCommandDigest is not null &&
+        CommandDigest().IsMatch(binding.ParameterizedCommandDigest);
 
     private static bool MatchesRequestShape(
         NativePlanRequestShape? shape,
@@ -269,7 +281,11 @@ internal static partial class NativePlanEvidenceValidator
             }
         }
 
-        if (binding.MongoCommandReceipt is not null || !HasSafeParameterizedCommand(binding))
+        if (binding.MongoCommandReceipt is not null)
+            return false;
+        if (HasRetainedCommandDigest(binding))
+            return true;
+        if (!HasSafeParameterizedCommand(binding))
             return false;
 
         return ShapesEqual(
@@ -465,5 +481,8 @@ internal static partial class NativePlanEvidenceValidator
 
     [GeneratedRegex(@"'(?:''|[^'])*'", RegexOptions.CultureInvariant)]
     private static partial Regex SqlStringLiteral();
+
+    [GeneratedRegex(@"^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)]
+    private static partial Regex CommandDigest();
 
 }

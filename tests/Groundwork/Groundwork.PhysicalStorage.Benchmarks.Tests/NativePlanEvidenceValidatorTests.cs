@@ -265,30 +265,15 @@ public sealed class NativePlanEvidenceValidatorTests
             explain,
             PhysicalDocumentQueryCommandKind.Page,
             NativePlanTestBindings.CanonicalFields);
-        var receipt = NativePlanQueryReceipt.FromMongoDb(
-            request,
-            mode,
-            command,
-            NativePlanTestBindings.CanonicalFields);
-        var binding = new NativePlanCommandBinding(
-            PhysicalObject,
-            null,
-            null,
-            receipt.Shape,
-            receipt)
-        {
-            Fields = NativePlanTestBindings.CanonicalFields,
-            MongoCommandReceipt = command
-        };
 
         Assert.DoesNotContain("999", command.RedactedCommand, StringComparison.Ordinal);
         Assert.DoesNotContain("777", command.RedactedCommand, StringComparison.Ordinal);
-        Assert.True(Matches(
-            BenchmarkProvider.MongoDb,
-            mode,
-            request,
-            binding,
-            NativePlan(BenchmarkProvider.MongoDb)));
+        Assert.Throws<InvalidOperationException>(() =>
+            NativePlanQueryReceipt.FromMongoDb(
+                request,
+                mode,
+                command,
+                NativePlanTestBindings.CanonicalFields));
     }
 
     [Fact]
@@ -542,6 +527,43 @@ public sealed class NativePlanEvidenceValidatorTests
             { "aggregate": "expected_table", "pipeline": [
               { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
               { "$group": { "_id": "$status" } },
+              { "$limit": 20 }
+            ] }
+            """);
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_undeclared_additional_predicate()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$match": { "category": "<redacted>" } },
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+              { "$limit": 20 }
+            ] }
+            """);
+    }
+
+    [Fact]
+    public void MongoDB_rejects_a_projection_that_rewrites_the_declared_order_field()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.MixedCompoundOrdering])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+              { "$project": { "rank": { "$literal": "<redacted>" } } },
+              { "$sort": { "rank": -1 } },
               { "$limit": 20 }
             ] }
             """);

@@ -95,7 +95,10 @@
       "properties": {
         "physicalObject": { "type": "string", "minLength": 1 },
         "alias": { "type": ["string", "null"], "minLength": 1 },
-        "parameterizedCommand": { "type": ["string", "null"], "minLength": 1 },
+        "parameterizedCommandDigest": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "requestShape": { "$ref": "#/$defs/shape" },
         "queryReceipt": { "$ref": "#/$defs/queryReceipt" },
         "fields": { "$ref": "#/$defs/fieldBinding" },
@@ -128,16 +131,19 @@
         {
           "oneOf": [
             {
-              "required": ["parameterizedCommand"],
+              "required": ["parameterizedCommandDigest"],
               "properties": {
-                "parameterizedCommand": { "type": "string", "minLength": 1 },
+                "parameterizedCommandDigest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
                 "mongoCommandReceipt": { "type": "null" }
               }
             },
             {
               "required": ["mongoCommandReceipt"],
               "properties": {
-                "parameterizedCommand": { "type": "null" },
+                "parameterizedCommandDigest": { "type": "null" },
                 "mongoCommandReceipt": { "$ref": "#/$defs/mongoReceipt" }
               }
             }

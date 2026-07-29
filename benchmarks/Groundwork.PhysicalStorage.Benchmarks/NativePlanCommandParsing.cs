@@ -229,13 +229,9 @@ internal static partial class NativePlanCommandParsing
         }
 
         var names = stages.Select(stage => stage.GetElement(0).Name).ToArray();
-        var index = 0;
-        while (index < names.Length && names[index] == "$match")
-            index++;
-        if (index == 0)
+        if (names[0] != "$match")
             return false;
-        while (index < names.Length && names[index] == "$project")
-            index++;
+        var index = 1;
         if (index < names.Length && names[index] == "$sort")
             index++;
         if (index < names.Length && names[index] == "$skip")
@@ -246,13 +242,12 @@ internal static partial class NativePlanCommandParsing
     private static bool AggregateCountStagesAreValid(BsonDocument command)
     {
         var stages = MongoPipelineStages(command).ToArray();
-        if (stages.Length < 2 || stages.Any(stage => stage.ElementCount != 1))
+        if (stages.Length != 2 || stages.Any(stage => stage.ElementCount != 1))
         {
             return false;
         }
 
-        return stages[..^1].All(stage => stage.Contains("$match")) &&
-               IsMongoCountStage(stages[^1]);
+        return stages[0].Contains("$match") && IsMongoCountStage(stages[1]);
     }
 
     private static bool IsMongoCountStage(BsonDocument stage) =>
@@ -267,9 +262,32 @@ internal static partial class NativePlanCommandParsing
         BsonDocument command,
         NativePlanFieldBinding fields)
     {
-        var found = new HashSet<string>(StringComparer.Ordinal);
-        VisitMongoPredicateDocuments(command, predicate => CollectMongoFilters(predicate, fields, found));
-        return NativePlanRequestShape.CanonicalFilters.Where(filter => found.Contains(filter.Field)).ToArray();
+        var predicates = command.Contains("aggregate")
+            ? MongoPipelineStages(command)
+                .Where(stage => stage.TryGetValue("$match", out var value) && value.IsBsonDocument)
+                .Select(stage => stage["$match"].AsBsonDocument)
+                .ToArray()
+            : new[] { "filter", "query" }
+                .Where(command.Contains)
+                .Select(name => command[name])
+                .Where(value => value.IsBsonDocument)
+                .Select(value => value.AsBsonDocument)
+                .ToArray();
+        return predicates.Length == 1 && IsCanonicalMongoPredicate(predicates[0], fields)
+            ? NativePlanRequestShape.CanonicalFilters
+            : [];
+    }
+
+    private static bool IsCanonicalMongoPredicate(
+        BsonDocument predicate,
+        NativePlanFieldBinding fields)
+    {
+        var expected = new[] { fields.StorageScope, fields.DocumentKind, fields.Status };
+        return expected.Distinct(StringComparer.Ordinal).Count() == expected.Length &&
+               predicate.ElementCount == expected.Length &&
+               expected.All(field =>
+                   predicate.TryGetValue(field, out var value) &&
+                   IsMongoEquality(value));
     }
 
     private static void VisitMongoPredicateDocuments(
@@ -302,27 +320,6 @@ internal static partial class NativePlanCommandParsing
 
             foreach (var nestedPipeline in facet.AsBsonDocument.Values.Where(value => value.IsBsonArray))
                 VisitMongoPipelinePredicates(nestedPipeline.AsBsonArray, visit);
-        }
-    }
-
-    private static void CollectMongoFilters(
-        BsonValue value,
-        NativePlanFieldBinding fields,
-        ISet<string> found)
-    {
-        if (value.IsBsonDocument)
-        {
-            foreach (var element in value.AsBsonDocument.Elements)
-            {
-                if (MongoLogicalField(element.Name, fields) is { } field && IsMongoEquality(element.Value))
-                    found.Add(field);
-                CollectMongoFilters(element.Value, fields, found);
-            }
-        }
-        else if (value.IsBsonArray)
-        {
-            foreach (var item in value.AsBsonArray)
-                CollectMongoFilters(item, fields, found);
         }
     }
 
@@ -424,17 +421,6 @@ internal static partial class NativePlanCommandParsing
     private static bool ContainsOpenValue(BsonValue value) =>
         value.IsString && string.Equals(value.AsString, "open", StringComparison.Ordinal) ||
         value.IsBsonDocument && value.AsBsonDocument.Elements.Any(element => ContainsOpenValue(element.Value));
-
-    private static string? MongoLogicalField(
-        string field,
-        NativePlanFieldBinding fields) =>
-        field switch
-        {
-            var value when value == fields.StorageScope => "storage-scope",
-            var value when value == fields.DocumentKind => "document-kind",
-            var value when value == fields.Status => "status",
-            _ => null
-        };
 
     private static bool HasMongoPhysicalObject(BsonDocument command) =>
         command.Names.Any(name => name is "find" or "aggregate" or "count");

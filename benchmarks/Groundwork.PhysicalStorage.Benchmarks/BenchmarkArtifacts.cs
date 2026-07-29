@@ -356,10 +356,10 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(benchmarkCase);
         ArgumentNullException.ThrowIfNull(evidence);
-        NativePlanEvidenceSidecar.ValidateForWrite(evidence);
         if (benchmarkCase.Workload != evidence.Request.Workload ||
             benchmarkCase.Provider != evidence.Provider ||
             benchmarkCase.StorageForm != evidence.StorageForm ||
+            !HasAdmissibleRawCommand(benchmarkCase.Provider, evidence.CommandBinding) ||
             !string.Equals(
                 evidence.QueryIdentity,
                 BenchmarkModelFactory.QueryIdentityFor(evidence.Request.Ordered),
@@ -377,6 +377,8 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
             throw new InvalidOperationException(
                 $"Native-plan evidence cannot be admitted for case '{benchmarkCase.Identity}'.");
         }
+        var retainedEvidence = RetainedPlanEvidence(evidence);
+        NativePlanEvidenceSidecar.ValidateForWrite(retainedEvidence);
         var extension = PlanExtension(benchmarkCase.Provider);
         var path = Layout.WritablePath(
             Layout.Plan(benchmarkCase, evidence.Request.Operation, extension),
@@ -384,9 +386,36 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
         await File.WriteAllTextAsync(path, evidence.NativePlan, cancellationToken);
         await WriteJsonAsync(
             Layout.WritablePath(path + ".assertions.json", "Native-plan assertion evidence"),
-            evidence,
+            retainedEvidence,
             cancellationToken);
         return Path.GetRelativePath(Layout.Root, path).Replace(Path.DirectorySeparatorChar, '/');
+    }
+
+    private static bool HasAdmissibleRawCommand(
+        BenchmarkProvider provider,
+        NativePlanCommandBinding? binding) =>
+        binding is not null &&
+        binding.ParameterizedCommandDigest is null &&
+        (provider == BenchmarkProvider.MongoDb
+            ? binding.ParameterizedCommand is null && binding.MongoCommandReceipt is not null
+            : !string.IsNullOrWhiteSpace(binding.ParameterizedCommand) && binding.MongoCommandReceipt is null);
+
+    private static NativePlanEvidence RetainedPlanEvidence(NativePlanEvidence evidence)
+    {
+        if (evidence.Provider == BenchmarkProvider.MongoDb)
+            return evidence;
+
+        var binding = evidence.CommandBinding!;
+        var digest = Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(binding.ParameterizedCommand!)));
+        return evidence with
+        {
+            CommandBinding = binding with
+            {
+                ParameterizedCommand = null,
+                ParameterizedCommandDigest = $"sha256:{digest}"
+            }
+        };
     }
 
     public async Task WriteReportAsync(BenchmarkRunReport report, CancellationToken cancellationToken)

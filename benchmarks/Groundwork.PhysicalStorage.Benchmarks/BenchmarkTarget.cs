@@ -1,6 +1,7 @@
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Documents.Store;
 using MongoDB.Bson;
+using System.Text.Json.Serialization;
 
 namespace Groundwork.PhysicalStorage.Benchmarks;
 
@@ -60,11 +61,13 @@ public sealed record NativePlanEvidence(
 public sealed record NativePlanCommandBinding(
     string PhysicalObject,
     string? Alias,
+    [property: JsonIgnore]
     string? ParameterizedCommand,
     NativePlanRequestShape? RequestShape = null,
     NativePlanQueryReceipt? QueryReceipt = null)
 {
     public NativePlanFieldBinding? Fields { get; init; }
+    public string? ParameterizedCommandDigest { get; init; }
 
     /// <summary>
     /// MongoDB exposes the executed command inside its explain response rather than as SQL.
