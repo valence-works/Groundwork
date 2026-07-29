@@ -6,7 +6,7 @@
 
 ## Summary
 
-Implement G7 by extending Groundwork's existing manifest/planner/provider stack with opt-in optimized physicalization for declared single-field equality indexes. Portable units keep the generic document/index tables and MongoDB content-path indexes. Optimized units additionally project eligible index values into provider-native physical structures, and provider stores route eligible equality queries through those structures without changing `IDocumentStore`.
+Implement G7 by extending Groundwork's existing manifest/planner/provider stack with opt-in optimized physicalization for declared single-field equality indexes. Portable units keep the generic document/index tables and MongoDB content-path indexes. Optimized units additionally project eligible index values into provider-native physical structures, and provider stores route eligible equality queries through those structures without changing `IDocumentStore`. The issue #50 evidence-completion amendment adds a bounded, real process-failure/recovery protocol and SQLite proof while preserving the harness's non-promotable state.
 
 ## Technical Context
 
@@ -16,17 +16,21 @@ Implement G7 by extending Groundwork's existing manifest/planner/provider stack 
 
 **Storage**: Groundwork portable document storage with opt-in optimized projections
 
-**Testing**: xUnit tests with SQLite in-memory provider and Testcontainers MongoDB
+**Testing**: xUnit tests with SQLite in-memory provider, durable-file cross-process SQLite recovery,
+and Testcontainers MongoDB
 
 **Target Platform**: Groundwork provider packages inside standalone Groundwork
 
 **Project Type**: Library/provider framework
 
-**Performance Goals**: Correctness of optimized physical query path; benchmark suite deferred to G8 runtime hardening
+**Performance Goals**: Correctness of optimized physical query path plus exact, bounded recovery
+evidence; controlled performance promotion remains gated by issue #50
 
 **Constraints**: Portable default remains unchanged; no caller API changes; host-specific concepts cannot leak into generic Groundwork packages; optimized projections must honor optimistic concurrency
 
-**Scale/Scope**: Physicalization plan metadata, relational optimized projections for SQLite validation, MongoDB optimized projections, provider tests, roadmap pointer updates
+**Scale/Scope**: Physicalization plan metadata, relational optimized projections for SQLite
+validation, MongoDB optimized projections, provider tests, and one non-promotable SQLite
+process-failure recovery slice
 
 ## Constitution Check
 
@@ -37,6 +41,7 @@ Implement G7 by extending Groundwork's existing manifest/planner/provider stack 
 | Framework §2.20 provider module decomposition | PASS | Provider-specific physicalization stays in provider packages. |
 | Runtime migration guardrail | PASS | Workflow runtime stores remain out of scope. |
 | Framework §2.23 tests | PASS | SQLite and MongoDB provider-backed tests prove optimized behavior. |
+| Issue #50 evidence integrity | PASS | Recovery runs in distinct processes, binds exact source and recovered state, and remains non-promotable. |
 
 No justified violations.
 
@@ -90,9 +95,22 @@ tests/Groundwork/Groundwork.Sqlite.Tests/
 
 tests/Groundwork/Groundwork.MongoDb.Tests/
 └── MongoDbOptimizedPhysicalizationTests.cs
+
+benchmarks/Groundwork.PhysicalStorage.Benchmarks/
+├── Recovery/
+│   ├── RecoveryProtocol.cs
+│   └── SqliteRecoveryWorker.cs
+└── schemas/
+    └── v1/
+        └── recovery-evidence.schema.json
+
+tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/
+└── SqliteProcessFailureRecoveryTests.cs
 ```
 
-**Structure Decision**: G7 extends existing Groundwork core/provider packages. It does not introduce new provider packages or host integration bridge code.
+**Structure Decision**: G7 extends existing Groundwork core/provider packages. The issue #50
+amendment stays inside the benchmark executable and tests; it does not introduce a provider package
+or host integration dependency.
 
 ## Complexity Tracking
 

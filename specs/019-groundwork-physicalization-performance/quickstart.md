@@ -32,6 +32,85 @@ dotnet test Groundwork.slnx --no-restore
 
 Expected result: all Groundwork and host integration validation tests pass.
 
+## Validate Bounded SQLite Process-Failure Recovery
+
+```bash
+dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --filter ProcessFailureRecovery
+```
+
+Expected result: both declared process-failure cases and the strict retained-evidence contract pass.
+See the [benchmark recovery-proof contract and nonclaims](../../benchmarks/Groundwork.PhysicalStorage.Benchmarks/README.md#bounded-sqlite-process-failure-proof)
+for the detailed barrier, replay, source-binding, timing, and external-digest semantics.
+
+### Bounded recovery checkpoint verification
+
+Container-free candidate verification on 2026-07-29:
+
+- 50/50 focused recovery and schema tests passed.
+- 360/360 benchmark-project tests passed with the live MongoDB and relational-server integration
+  classes excluded; no database-server container or benchmark measurement ran.
+- The benchmark executable and its test project built with compiler warnings treated as errors.
+  The existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` audit advisory was retained as a
+  warning rather than hidden.
+- A deliberately concurrent review build/test attempt produced a transient source-snapshot
+  mismatch while build outputs changed. This is the intended fail-closed result; the recorded gates
+  build first and then execute tests sequentially against the stable assembly closure.
+- Targeted `dotnet format --verify-no-changes` passed for every changed C# file, and
+  `git diff --check` passed. Whole-project format verification still reports pre-existing
+  whitespace findings in untouched benchmark files.
+- Root review caught and remediated an unbounded failure-cleanup wait, a recovery reopen path that
+  could create or mutate a missing/corrupt database, incomplete retained-source validation, a
+  process-global SQLite pool reset that broke a parallel existing test, an instrumentation barrier
+  mislabeled as requester acknowledgement, self-authenticating checksum language, and omission of
+  default-valued required JSON members. Final correctness re-review also found and remediated a
+  deadline-exhaustion path that killed a child without waiting through a separate bounded cleanup
+  grace to confirm its exit.
+
+### Issue #50 bounded recovery checkpoint review
+
+The initial exact range
+`5772f7ee037cc246815a45a9a529b5292ece753c..25a457301fee0cc8b1ca27bd9466e632eef82d5a`
+failed adversarial review. The remediated source range
+`5772f7ee037cc246815a45a9a529b5292ece753c..519b4382f2278e37fd4fc37ed7e38091bcf13970`
+then received three read-only **PASS** verdicts:
+
+- **Correctness/mechanism:** the worker now separates instrumentation from the external requester
+  response, withholds that response at both failure points, uses inspect-only recovery admission,
+  replays the original mutation in recovery, and confirms forced child exit. A final medium finding
+  added an independent five-second failure-cleanup grace plus an exhausted-deadline regression.
+- **Evidence integrity/security:** retained verification now requires a caller-provided SHA-256 of
+  the exact evidence-file bytes; enums and required members fail closed; Git identity plus the
+  deterministic PE-metadata `Groundwork.*` assembly closure are recomputed in every process; and
+  evidence contains no path, connection, credential, or self-authenticating signature claim.
+- **Scope/test preservation:** Spec 019 T018–T025 match the implementation and tests; the schema is
+  cataloged under `schemas/v1`; no existing test, provider path, benchmark gate, or baseline guard
+  was removed or weakened; and issue #50 remains open.
+
+Confirmed findings and dispositions:
+
+- The original committed barrier was a coordinator receipt, not proof of a missing requester
+  acknowledgement. Disposition: introduce a distinct unreleased response gate and immutable
+  acknowledgement path, and assert acknowledgement absence before and after kill.
+- Recovery called schema apply before rejecting drift. Disposition: reopen only through the
+  production factory's non-mutating runtime admission; missing, empty, and corrupt files remain
+  unmodified when rejected.
+- A public checksum could be recomputed after forged process receipts. Disposition: remove the
+  embedded seal and require the expected exact-file digest from separately retained workflow
+  metadata before parsing and semantic validation.
+- Numeric enums, default-valued omitted members, unavailable Git identity, and stale dependency
+  binaries were not all bound. Disposition: strict recovery-local JSON options, conditional schema
+  constraints, canonical Git validation, and a deterministic referenced-assembly closure digest.
+- The first timing label included operations it did not measure, and deadline exhaustion could skip
+  exit confirmation. Disposition: record only the seed-through-recovery execution interval,
+  disclose persistence/deletion exclusions, and use a separate bounded cleanup grace on failures.
+- A process-global SQLite pool reset interfered with an existing parallel test. Disposition:
+  recovery-only connections disable pooling and cleanup has no global side effect.
+
+Final frozen-source verification: 50/50 focused recovery/schema tests and 360/360 container-free
+benchmark tests passed; warnings-as-errors builds, targeted format, and `git diff --check` passed.
+No database-server container or benchmark measurement ran. Reviewers used GPT-5.6 Terra High
+because the requested Luna reviewer model was unavailable.
+
 ## Issue #50 Execution-Evidence Checkpoint Review
 
 PR #147 is a bounded checkpoint for synchronized-contention and provider-native plan evidence. It
