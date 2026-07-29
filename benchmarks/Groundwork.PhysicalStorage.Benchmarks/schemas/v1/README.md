@@ -30,7 +30,8 @@ automation:
   receipt of the actual provider command: relational SQL is admitted in memory and represented by
   a SHA-256 command identity plus typed parameter roles and structural pagination only; MongoDB
   retains a redacted `find`/`aggregate`/`count` command with terminal,
-  filter fields/operators, sort direction, skip, and limit. The sidecar is validated on write and
+  filter fields/operators, exact semantic-plus-scope-plus-identity sort binding, skip, and limit.
+  SQL Server plans retain only allowlisted structural ShowPlan elements and attributes. The sidecar is validated on write and
   read, rejects unknown members and schema versions, and records 1,000 versus 5,000 basis-point
   selectivity. It proves internal consistency of a sealed artifact tree, not external command
   provenance or authenticity.

@@ -77,7 +77,7 @@ internal static partial class NativePlanCommandParsing
         var command = ParseMongoCommand(receipt);
         var terminal = MongoTerminal(command, receipt.Kind);
         var filters = MongoFilters(command, fields);
-        var order = MongoOrder(command, fields);
+        var order = MongoOrder(command, request, fields);
         var pagination = MongoPagination(command, terminal);
         var expected = NativePlanRequestShape.For(request, assertionMode);
         return new NativePlanRequestShape(
@@ -341,25 +341,42 @@ internal static partial class NativePlanCommandParsing
 
     private static IReadOnlyList<NativePlanOrderShape> MongoOrder(
         BsonDocument command,
+        BenchmarkPlanRequest request,
         NativePlanFieldBinding fields)
     {
-        var descendingRank =
-            command.Contains("find") && ContainsDescendingRank(command, "sort", fields.Rank) ||
-            command.Contains("aggregate") &&
-            MongoPipelineStages(command).Any(stage => ContainsDescendingRank(stage, "$sort", fields.Rank));
-        return descendingRank ? [new NativePlanOrderShape("rank", PhysicalSortDirection.Descending)] : [];
+        if (request.Operation != NativePlanOperation.Selection)
+            return [];
+        var sorts = command.Contains("find") && command.TryGetValue("sort", out var findSort)
+            ? [findSort]
+            : command.Contains("aggregate")
+                ? MongoPipelineStages(command)
+                    .Where(stage => stage.TryGetValue("$sort", out _))
+                    .Select(stage => stage["$sort"])
+                    .ToArray()
+                : [];
+        var expected = request.Ordered
+            ? new[] { (fields.Rank, -1), (fields.StorageScope, 1), (fields.IdentityComparison, 1) }
+            : new[] { (fields.StorageScope, 1), (fields.IdentityComparison, 1) };
+        if (expected.Select(item => item.Item1).Distinct(StringComparer.Ordinal).Count() != expected.Length ||
+            sorts.Length != 1 ||
+            !sorts[0].IsBsonDocument ||
+            !MongoSortExactlyMatches(sorts[0].AsBsonDocument, expected))
+        {
+            return [];
+        }
+        return request.Ordered
+            ? [new NativePlanOrderShape("rank", PhysicalSortDirection.Descending)]
+            : [];
     }
 
-    private static bool ContainsDescendingRank(
-        BsonDocument document,
-        string sortMember,
-        string rankField) =>
-        document.TryGetValue(sortMember, out var sort) &&
-        sort.IsBsonDocument &&
-        sort.AsBsonDocument.ElementCount == 1 &&
-        sort.AsBsonDocument.TryGetValue(rankField, out var rank) &&
-        rank.IsNumeric &&
-        rank.ToInt32() == -1;
+    private static bool MongoSortExactlyMatches(
+        BsonDocument actual,
+        IReadOnlyList<(string Field, int Direction)> expected) =>
+        actual.ElementCount == expected.Count &&
+        actual.Elements.Zip(expected).All(pair =>
+            string.Equals(pair.First.Name, pair.Second.Field, StringComparison.Ordinal) &&
+            pair.First.Value.IsNumeric &&
+            pair.First.Value.ToInt32() == pair.Second.Direction);
 
     private static (int? Skip, int? Take) MongoPagination(
         BsonDocument command,

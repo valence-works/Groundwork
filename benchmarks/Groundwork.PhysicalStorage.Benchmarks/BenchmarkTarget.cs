@@ -80,7 +80,8 @@ public sealed record NativePlanFieldBinding(
     string StorageScope,
     string DocumentKind,
     string Status,
-    string Rank);
+    string Rank,
+    string IdentityComparison);
 
 public enum NativePlanTerminalOperation
 {

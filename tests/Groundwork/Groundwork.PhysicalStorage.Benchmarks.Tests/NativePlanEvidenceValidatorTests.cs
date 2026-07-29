@@ -584,6 +584,7 @@ public sealed class NativePlanEvidenceValidatorTests
                 "document_kind": "<redacted>",
                 "$or": [{ "status": "<redacted>" }]
               } },
+              { "$sort": { "storage_scope": 1, "id_comparison_key": 1 } },
               { "$skip": 0 },
               { "$limit": 20 }
             ] }
@@ -624,7 +625,7 @@ public sealed class NativePlanEvidenceValidatorTests
             """
             { "aggregate": "expected_table", "pipeline": [
               { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
-              { "$sort": { "category": 1, "rank": -1 } },
+              { "$sort": { "category": 1, "rank": -1, "storage_scope": 1, "id_comparison_key": 1 } },
               { "$limit": 20 }
             ] }
             """);
@@ -696,7 +697,8 @@ public sealed class NativePlanEvidenceValidatorTests
             "gw_storage_scope",
             "gw_document_kind",
             "gw_status",
-            "gw_rank");
+            "gw_rank",
+            "gw_id_comparison_key");
         var command = new NativePlanMongoCommandReceipt(
             PhysicalDocumentQueryCommandKind.Page,
             """
@@ -859,8 +861,10 @@ public sealed class NativePlanEvidenceValidatorTests
 
     private static string MongoCommand(BenchmarkPlanRequest request)
     {
-        var order = request.Operation == NativePlanOperation.Selection && request.Ordered
-            ? ", { \"$sort\": { \"rank\": -1 } }"
+        var order = request.Operation == NativePlanOperation.Selection
+            ? request.Ordered
+                ? ", { \"$sort\": { \"rank\": -1, \"storage_scope\": 1, \"id_comparison_key\": 1 } }"
+                : ", { \"$sort\": { \"storage_scope\": 1, \"id_comparison_key\": 1 } }"
             : string.Empty;
         var paging = request.Operation == NativePlanOperation.Selection
             ? $", {{ \"$skip\": {request.Skip ?? 0} }}, {{ \"$limit\": {request.Take} }}"

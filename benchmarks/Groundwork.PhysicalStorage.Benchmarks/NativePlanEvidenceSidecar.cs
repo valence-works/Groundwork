@@ -16,7 +16,7 @@ internal static class NativePlanEvidenceSidecar
     private static readonly ISet<string> BindingMembers = Members(
         "physicalObject", "alias", "parameterizedCommandDigest", "requestShape", "queryReceipt", "fields", "mongoCommandReceipt");
     private static readonly ISet<string> FieldBindingMembers = Members(
-        "storageScope", "documentKind", "status", "rank");
+        "storageScope", "documentKind", "status", "rank", "identityComparison");
     private static readonly ISet<string> ShapeMembers = Members(
         "workload", "operation", "terminal", "filters", "order", "skip", "take", "querySelectivityBasisPoints");
     private static readonly ISet<string> FilterMembers = Members("field", "operator", "parameter");

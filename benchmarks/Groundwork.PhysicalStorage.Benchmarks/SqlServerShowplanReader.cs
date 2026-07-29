@@ -129,21 +129,8 @@ internal static class SqlServerShowplanReader
                 return false;
             }
 
-            foreach (var attribute in document.Root.DescendantsAndSelf()
-                         .Attributes()
-                         .Where(attribute => !attribute.IsNamespaceDeclaration &&
-                                             !RetainedAttributes.Contains(attribute.Name.LocalName))
-                         .ToArray())
-            {
-                attribute.Remove();
-            }
-            foreach (var text in document.DescendantNodes().OfType<XText>()
-                         .Where(text => !string.IsNullOrWhiteSpace(text.Value))
-                         .ToArray())
-            {
-                text.Remove();
-            }
-            retained = document.ToString(SaveOptions.DisableFormatting);
+            retained = new XDocument(RetainElement(document.Root))
+                .ToString(SaveOptions.DisableFormatting);
             return true;
         }
         catch (XmlException)
@@ -151,6 +138,24 @@ internal static class SqlServerShowplanReader
             retained = string.Empty;
             return false;
         }
+    }
+
+    private static XElement RetainElement(XElement source)
+    {
+        var retained = new XElement(XName.Get(source.Name.LocalName, ShowplanNamespace));
+        foreach (var attribute in source.Attributes().Where(attribute =>
+                     !attribute.IsNamespaceDeclaration &&
+                     attribute.Name.NamespaceName.Length == 0 &&
+                     RetainedAttributes.Contains(attribute.Name.LocalName)))
+        {
+            retained.Add(new XAttribute(attribute.Name.LocalName, attribute.Value));
+        }
+        foreach (var child in source.Elements().Where(element =>
+                     element.Name.NamespaceName == ShowplanNamespace))
+        {
+            retained.Add(RetainElement(child));
+        }
+        return retained;
     }
 
     private static XDocument Parse(string value)

@@ -159,6 +159,9 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         foreach (var retained in new[] { plan, sidecar })
         {
             Assert.DoesNotContain("synthetic-test-value", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("comment-payload", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("processing-payload", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("namespace-payload", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("StatementText", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("ScalarString", retained, StringComparison.Ordinal);
             Assert.DoesNotContain("Column=", retained, StringComparison.Ordinal);
@@ -260,14 +263,20 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             ],
             NativePlanTestBindings.CanonicalFields);
         const string nativePlan = """
-            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564">
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"
+                         xmlns:leak="urn:namespace-payload"
+                         Version="1.564">
               <BatchSequence><Batch><Statements>
                 <StmtSimple StatementText="SELECT 1 AS [Secret:synthetic-test-value]">
-                  <QueryPlan><RelOp PhysicalOp="Index Seek"><IndexScan>
+                  <QueryPlan>
+                    <!-- comment-payload -->
+                    <?groundwork processing-payload?>
+                    <RelOp PhysicalOp="Index Seek"><IndexScan>
                     <DefinedValues><DefinedValue><ColumnReference Column="[Secret:synthetic-test-value]" /></DefinedValue></DefinedValues>
                     <Predicate><ScalarOperator ScalarString="[Secret:synthetic-test-value]" /></Predicate>
                     <Object Table="[fixture_table]" Index="[fixture_index]" Alias="[l]" />
-                  </IndexScan></RelOp></QueryPlan>
+                    </IndexScan></RelOp>
+                  </QueryPlan>
                 </StmtSimple>
               </Statements></Batch></BatchSequence>
             </ShowPlanXML>

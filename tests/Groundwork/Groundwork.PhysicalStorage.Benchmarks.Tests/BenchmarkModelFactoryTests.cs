@@ -34,6 +34,17 @@ public sealed class BenchmarkModelFactoryTests
         Assert.Equal(
             [BenchmarkModelFactory.IndexedQueryIdentity, BenchmarkModelFactory.QueryIdentity],
             model.Manifest.StorageUnits.Single().PhysicalStorage!.BoundedQueries.Select(query => query.Identity));
+        var fields = BenchmarkModelFactory.FieldBindingFor(model.Route);
+        Assert.Equal(
+            model.Route.LinkedRelationship?.StorageScope.Identifier ?? model.Route.ScopeKey.Column.Identifier,
+            fields.StorageScope);
+        Assert.Equal(
+            model.Route.LinkedRelationship?.DocumentKind.Identifier ?? model.Route.Discriminator.Column.Identifier,
+            fields.DocumentKind);
+        Assert.EndsWith(
+            expectsLinkedStorage ? "document_id_comparison_key" : "id_comparison_key",
+            fields.IdentityComparison,
+            StringComparison.Ordinal);
     }
 
     [Theory]

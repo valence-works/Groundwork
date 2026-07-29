@@ -108,12 +108,13 @@
     "fieldBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["storageScope", "documentKind", "status", "rank"],
+      "required": ["storageScope", "documentKind", "status", "rank", "identityComparison"],
       "properties": {
         "storageScope": { "type": "string", "minLength": 1 },
         "documentKind": { "type": "string", "minLength": 1 },
         "status": { "type": "string", "minLength": 1 },
-        "rank": { "type": "string", "minLength": 1 }
+        "rank": { "type": "string", "minLength": 1 },
+        "identityComparison": { "type": "string", "minLength": 1 }
       }
     },
     "mongoReceipt": {

@@ -39,11 +39,13 @@ public static class BenchmarkModelFactory
     public static NativePlanFieldBinding FieldBindingFor(ExecutableStorageRoute route)
     {
         ArgumentNullException.ThrowIfNull(route);
+        var queryRelationship = route.LinkedRelationship;
         return new NativePlanFieldBinding(
-            route.ScopeKey.Column.Identifier,
-            route.Discriminator.Column.Identifier,
+            queryRelationship?.StorageScope.Identifier ?? route.ScopeKey.Column.Identifier,
+            queryRelationship?.DocumentKind.Identifier ?? route.Discriminator.Column.Identifier,
             route.ProjectedColumns.Single(column => column.Definition.Path == "status").Column.Identifier,
-            route.ProjectedColumns.Single(column => column.Definition.Path == "rank").Column.Identifier);
+            route.ProjectedColumns.Single(column => column.Definition.Path == "rank").Column.Identifier,
+            queryRelationship?.Identity.ComparisonKey.Identifier ?? route.Envelope.Identity.ComparisonKey.Identifier);
     }
 
     public static StorageManifest CreateManifest(

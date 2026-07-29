@@ -9,7 +9,8 @@ internal static class NativePlanTestBindings
         "storage_scope",
         "document_kind",
         "status",
-        "rank");
+        "rank",
+        "id_comparison_key");
 }
 
 internal static class NativePlanFixtureArtifacts
@@ -141,8 +142,10 @@ internal static class NativePlanFixtureArtifacts
 
     private static string MongoCommand(BenchmarkPlanRequest request)
     {
-        var order = request.Operation == NativePlanOperation.Selection && request.Ordered
-            ? ", { \"$sort\": { \"rank\": -1 } }"
+        var order = request.Operation == NativePlanOperation.Selection
+            ? request.Ordered
+                ? ", { \"$sort\": { \"rank\": -1, \"storage_scope\": 1, \"id_comparison_key\": 1 } }"
+                : ", { \"$sort\": { \"storage_scope\": 1, \"id_comparison_key\": 1 } }"
             : string.Empty;
         var paging = request.Operation == NativePlanOperation.Selection
             ? $", {{ \"$skip\": {request.Skip ?? 0} }}, {{ \"$limit\": {request.Take} }}"
