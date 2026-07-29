@@ -337,6 +337,73 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Writer_rejects_a_PostgreSQL_index_inherited_from_an_unrelated_relation()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = PostgreSqlEvidenceWithSecret() with
+        {
+            NativePlan = """
+                [{ "Plan": {
+                  "Node Type": "Append",
+                  "Relation Name": "fixture_table",
+                  "Plans": [{
+                    "Node Type": "Index Scan",
+                    "Relation Name": "other_table",
+                    "Index Name": "fixture_index"
+                  }]
+                } }]
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
+    public async Task Writer_retains_a_PostgreSQL_bitmap_index_child_for_the_bound_relation()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = PostgreSqlEvidenceWithSecret() with
+        {
+            NativePlan = """
+                [{ "Plan": {
+                  "Node Type": "Bitmap Heap Scan",
+                  "Relation Name": "fixture_table",
+                  "Plans": [{
+                    "Node Type": "Bitmap Index Scan",
+                    "Index Name": "fixture_index"
+                  }]
+                } }]
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None);
+
+        var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
+        Assert.Contains("\"Node Type\":\"Bitmap Index Scan\"", plan, StringComparison.Ordinal);
+        Assert.Contains("\"Index Name\":\"fixture_index\"", plan, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(BenchmarkProvider.Sqlite)]
     [InlineData(BenchmarkProvider.SqlServer)]

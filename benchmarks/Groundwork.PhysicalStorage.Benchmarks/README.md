@@ -48,7 +48,9 @@ and redacts predicate details; SQL Server keeps only ShowPlan
 elements, known gate-bearing access operators, and bound table/index identities; PostgreSQL keeps only the plan
 tree plus allowlisted operator/relation/index/estimate members, and MongoDB keeps only the bound
 namespace plus winning stage/index topology. Statement text, expressions, predicates, commands,
-aliases, namespace declarations, comments, and processing instructions are discarded.
+arbitrary aliases, namespace declarations, comments, and processing instructions are discarded.
+SQLite's fixed `p` and `l` aliases are retained only so the strict gate cannot hide a primary or
+linked full-table scan; every other alias is replaced by a stable redacted token.
 Declared-index gates reject any different bound index. Scan characterization instead retains a
 provider-selected alternative as `alternative-index-redacted`, preserving the access-path fact
 without disclosing its identity or making a declared-index claim.

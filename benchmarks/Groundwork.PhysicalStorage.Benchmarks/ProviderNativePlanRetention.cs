@@ -202,7 +202,7 @@ internal static class ProviderNativePlanRetention
 
         var retained = new JsonObject { ["Node Type"] = nodeType.GetString() };
         var bindsRelation = IdentifierMatches(source, "Relation Name", physicalObject);
-        var boundScope = withinBoundRelation || bindsRelation;
+        var boundScope = PostgreSqlBoundScope(source, physicalObject, withinBoundRelation);
         if (bindsRelation)
             retained["Relation Name"] = physicalObject;
         if (source.TryGetProperty("Index Name", out var observedIndex))
@@ -339,8 +339,7 @@ internal static class ProviderNativePlanRetention
         string indexName,
         bool withinBoundRelation)
     {
-        var boundScope = withinBoundRelation ||
-                         IdentifierMatches(node, "Relation Name", physicalObject);
+        var boundScope = PostgreSqlBoundScope(node, physicalObject, withinBoundRelation);
         if (boundScope && IdentifierMatches(node, "Index Name", indexName))
             return true;
         return node.TryGetProperty("Plans", out var children) &&
@@ -352,6 +351,32 @@ internal static class ProviderNativePlanRetention
                        physicalObject,
                        indexName,
                        boundScope));
+    }
+
+    private static bool PostgreSqlBoundScope(
+        JsonElement node,
+        string physicalObject,
+        bool inheritedScope)
+    {
+        if (!node.TryGetProperty("Relation Name", out var relation))
+        {
+            return inheritedScope &&
+                   node.TryGetProperty("Node Type", out var nodeType) &&
+                   nodeType.ValueKind == JsonValueKind.String &&
+                   string.Equals(
+                       nodeType.GetString(),
+                       "Bitmap Index Scan",
+                       StringComparison.Ordinal);
+        }
+        if (relation.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException(
+                "PostgreSQL native-plan evidence contains a malformed relation identity.");
+        }
+        return string.Equals(
+            relation.GetString(),
+            physicalObject,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<JsonElement> PostgreSqlNodes(JsonElement node)
