@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Reflection;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Xunit;
@@ -47,7 +48,8 @@ public sealed class RelationshipMaterializationTransitionTests
         Assert.Same(candidate, first.CandidateGeneration);
         Assert.Equal(
             typeof(RelationshipMaterializationTransitionRequirement),
-            Assert.Single(typeof(RelationshipMaterializationDanglingReference).GetConstructors())
+            Assert.Single(typeof(RelationshipMaterializationDanglingReference).GetConstructors(
+                    BindingFlags.Instance | BindingFlags.NonPublic))
                 .GetParameters()[0]
                 .ParameterType);
         Assert.Equal(candidate.RelationshipIdentity, first.RelationshipRouteIdentity);
@@ -78,6 +80,11 @@ public sealed class RelationshipMaterializationTransitionTests
             "hmac-sha256-v1:369f8d0d430a4acc8779749445e5a928a4ea0f439f51223a0ed7456e235cf464",
             correlation.Value);
         Assert.Empty(typeof(RelationshipMaterializationKeyCorrelationIdentity).GetConstructors());
+        Assert.DoesNotContain(
+            typeof(RelationshipMaterializationKeyCorrelationIdentity)
+                .GetMethods(BindingFlags.Public | BindingFlags.Static),
+            method => method.Name == "Create");
+        Assert.Empty(typeof(RelationshipMaterializationDanglingReference).GetConstructors());
         Assert.Throws<ArgumentException>(() =>
             RelationshipMaterializationKeyCorrelationIdentity.Create(
                 new byte[31],

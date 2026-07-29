@@ -21,34 +21,44 @@ public sealed record PhysicalRelationshipMaterializationIdentity(
     string FenceStorageIdentity,
     string FenceByTargetIndexIdentity)
 {
+    private static readonly UTF8Encoding StrictUtf8 =
+        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     internal static PhysicalRelationshipMaterializationIdentity Create(
         StorageManifestIdentity manifest,
         ManifestRelationshipDeclaration relationship,
         ExecutableStorageRoute sourceRoute,
         ExecutableStorageRoute targetRoute)
     {
-        var root = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            PhysicalCanonicalEncoding.Join(
-                manifest.Value,
-                relationship.Identity,
-                relationship.SourceStorageUnit.Value,
-                relationship.SourceReferencePath,
-                relationship.SourceReferenceIndexIdentity,
-                relationship.TargetStorageUnit.Value,
-                relationship.TargetIdentityPath,
-                relationship.TargetEqualityIndexIdentity,
-                ((int)relationship.ReferenceCasePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                ((int)sourceRoute.ScopePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                ((int)targetRoute.ScopePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                ((int)sourceRoute.Envelope.Identity.StringCasePolicy).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture),
-                sourceRoute.Envelope.Identity.ComparisonAlgorithmId,
-                sourceRoute.Envelope.Identity.LookupAlgorithmId,
-                targetRoute.Envelope.Identity.ComparisonAlgorithmId,
-                targetRoute.Envelope.Identity.LookupAlgorithmId)))).ToLowerInvariant();
+        var canonicalFields = new[]
+        {
+            manifest.Value,
+            relationship.Identity,
+            relationship.SourceStorageUnit.Value,
+            relationship.SourceReferencePath,
+            relationship.SourceReferenceIndexIdentity,
+            relationship.TargetStorageUnit.Value,
+            relationship.TargetIdentityPath,
+            relationship.TargetEqualityIndexIdentity,
+            ((int)relationship.ReferenceCasePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            ((int)sourceRoute.ScopePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            ((int)targetRoute.ScopePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            ((int)sourceRoute.Envelope.Identity.StringCasePolicy).ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            sourceRoute.Envelope.Identity.ComparisonAlgorithmId,
+            sourceRoute.Envelope.Identity.LookupAlgorithmId,
+            targetRoute.Envelope.Identity.ComparisonAlgorithmId,
+            targetRoute.Envelope.Identity.LookupAlgorithmId
+        };
+        foreach (var field in canonicalFields)
+            PhysicalRelationshipMaterializationIdentityValidator.Validate(field, "canonicalField");
+
+        var canonicalIdentity = PhysicalCanonicalEncoding.Join(canonicalFields);
+        var root = Convert.ToHexString(
+            SHA256.HashData(StrictUtf8.GetBytes(canonicalIdentity))).ToLowerInvariant();
         return new(
             $"relationship-reference:{root}",
             $"relationship-reference-by-source:{root}",

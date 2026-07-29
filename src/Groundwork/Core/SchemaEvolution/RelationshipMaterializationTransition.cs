@@ -114,7 +114,7 @@ public sealed class RelationshipMaterializationKeyCorrelationIdentity :
     /// <see cref="Scheme"/>. The key, scope, and comparison key are used only while deriving the
     /// HMAC and are never retained or exposed by this type.
     /// </summary>
-    public static RelationshipMaterializationKeyCorrelationIdentity Create(
+    internal static RelationshipMaterializationKeyCorrelationIdentity Create(
         ReadOnlySpan<byte> providerOwnedKey,
         RelationshipMaterializationTransitionRequirement transitionRequirement,
         string targetScope,
@@ -211,7 +211,7 @@ public sealed class RelationshipMaterializationDanglingReference :
 {
     public const string DiagnosticCode = "GW-RELATIONSHIP-013";
 
-    public RelationshipMaterializationDanglingReference(
+    internal RelationshipMaterializationDanglingReference(
         RelationshipMaterializationTransitionRequirement transitionRequirement,
         RelationshipMaterializationKeyCorrelationIdentity targetKeyCorrelationIdentity)
     {
