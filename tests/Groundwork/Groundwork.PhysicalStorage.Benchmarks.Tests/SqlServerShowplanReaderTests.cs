@@ -22,7 +22,7 @@ public sealed class SqlServerShowplanReaderTests
 
         var plans = await SqlServerShowplanReader.ReadAsync(reader, CancellationToken.None);
 
-        Assert.Equal(NativeShowplan, Assert.Single(plans));
+        Assert.Contains("ShowPlanXML", Assert.Single(plans), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -74,7 +74,49 @@ public sealed class SqlServerShowplanReaderTests
 
         var plans = await SqlServerShowplanReader.ReadAsync(reader, CancellationToken.None);
 
-        Assert.Equal(NativeShowplan, Assert.Single(plans));
+        Assert.Contains("ShowPlanXML", Assert.Single(plans), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Retains_only_safe_structural_showplan_content()
+    {
+        const string secret = "Secret:synthetic-test-value";
+        const string plan = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564">
+              <BatchSequence><Batch><Statements>
+                <StmtSimple StatementText="SELECT 1 AS [Secret:synthetic-test-value]">
+                  <QueryPlan>
+                    <RelOp NodeId="0" PhysicalOp="Index Seek">
+                      <IndexScan>
+                        <DefinedValues><DefinedValue>
+                          <ColumnReference Column="[Secret:synthetic-test-value]" />
+                        </DefinedValue></DefinedValues>
+                        <Predicate>
+                          <ScalarOperator ScalarString="[Secret:synthetic-test-value]" />
+                        </Predicate>
+                        <Object Database="[unsafe]" Schema="[unsafe]" Table="[expected_table]" Index="[declared_index]" Alias="[unsafe]" />
+                      </IndexScan>
+                    </RelOp>
+                  </QueryPlan>
+                </StmtSimple>
+              </Statements></Batch></BatchSequence>
+            </ShowPlanXML>
+            """;
+        var result = Table("Microsoft SQL Server 2005 XML Showplan", typeof(string), plan);
+        await using var reader = new DataTableReader(result);
+
+        var retained = Assert.Single(await SqlServerShowplanReader.ReadAsync(reader, CancellationToken.None));
+
+        Assert.DoesNotContain(secret, retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("StatementText", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("ScalarString", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Column=", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Database=", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Schema=", retained, StringComparison.Ordinal);
+        Assert.DoesNotContain("Alias=", retained, StringComparison.Ordinal);
+        Assert.Contains("Table=\"[expected_table]\"", retained, StringComparison.Ordinal);
+        Assert.Contains("Index=\"[declared_index]\"", retained, StringComparison.Ordinal);
+        SqlServerShowplanReader.EnsureScaleBearingIndex(retained, "declared_index", "expected_table");
     }
 
     [Fact]

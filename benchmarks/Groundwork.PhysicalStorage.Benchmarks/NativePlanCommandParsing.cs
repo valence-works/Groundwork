@@ -283,11 +283,27 @@ internal static partial class NativePlanCommandParsing
         NativePlanFieldBinding fields)
     {
         var expected = new[] { fields.StorageScope, fields.DocumentKind, fields.Status };
-        return expected.Distinct(StringComparer.Ordinal).Count() == expected.Length &&
-               predicate.ElementCount == expected.Length &&
-               expected.All(field =>
-                   predicate.TryGetValue(field, out var value) &&
-                   IsMongoEquality(value));
+        if (expected.Distinct(StringComparer.Ordinal).Count() != expected.Length ||
+            expected.Contains("$or", StringComparer.Ordinal) ||
+            predicate.ElementCount != expected.Length ||
+            !predicate.TryGetValue(fields.StorageScope, out var scope) ||
+            !IsMongoEquality(scope) ||
+            !predicate.TryGetValue(fields.DocumentKind, out var kind) ||
+            !IsMongoEquality(kind))
+        {
+            return false;
+        }
+
+        if (predicate.TryGetValue(fields.Status, out var directStatus))
+            return IsMongoEquality(directStatus);
+
+        return predicate.TryGetValue("$or", out var logicalStatus) &&
+               logicalStatus.IsBsonArray &&
+               logicalStatus.AsBsonArray.Count == 1 &&
+               logicalStatus.AsBsonArray[0].IsBsonDocument &&
+               logicalStatus.AsBsonArray[0].AsBsonDocument.ElementCount == 1 &&
+               logicalStatus.AsBsonArray[0].AsBsonDocument.TryGetValue(fields.Status, out var nestedStatus) &&
+               IsMongoEquality(nestedStatus);
     }
 
     private static void VisitMongoPredicateDocuments(
@@ -340,6 +356,7 @@ internal static partial class NativePlanCommandParsing
         string rankField) =>
         document.TryGetValue(sortMember, out var sort) &&
         sort.IsBsonDocument &&
+        sort.AsBsonDocument.ElementCount == 1 &&
         sort.AsBsonDocument.TryGetValue(rankField, out var rank) &&
         rank.IsNumeric &&
         rank.ToInt32() == -1;

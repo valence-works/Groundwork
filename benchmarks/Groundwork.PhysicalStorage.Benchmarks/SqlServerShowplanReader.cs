@@ -9,6 +9,13 @@ internal static class SqlServerShowplanReader
 {
     private const string ShowplanColumnMarker = "XML Showplan";
     private const string ShowplanNamespace = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
+    private static readonly ISet<string> RetainedAttributes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "Version", "Build", "NodeId", "PhysicalOp", "LogicalOp", "EstimateRows", "EstimateIO",
+        "EstimateCPU", "AvgRowSize", "EstimatedTotalSubtreeCost", "Parallel", "EstimateRebinds",
+        "EstimateRewinds", "EstimatedExecutionMode", "Table", "Index", "IndexKind", "Storage",
+        "Ordered", "ScanDirection"
+    };
 
     public static async Task<IReadOnlyList<string>> ReadAsync(
         DbDataReader reader,
@@ -34,8 +41,8 @@ internal static class SqlServerShowplanReader
                     string stringValue when isShowplanColumn => stringValue,
                     _ => null
                 };
-                if (text is not null && IsShowplanXml(text))
-                    plans.Add(text);
+                if (text is not null && TryRetainSafeStructure(text, out var retained))
+                    plans.Add(retained);
             }
         } while (await reader.NextResultAsync(cancellationToken));
         return plans;
@@ -75,6 +82,13 @@ internal static class SqlServerShowplanReader
         }
     }
 
+    internal static string RetainSafeStructure(string value)
+    {
+        if (!TryRetainSafeStructure(value, out var retained))
+            throw new InvalidOperationException("SQL Server native-plan evidence is not ShowPlan XML.");
+        return retained;
+    }
+
     private static string DescribeAccessPaths(XDocument document)
     {
         var physicalOperators = document
@@ -104,15 +118,37 @@ internal static class SqlServerShowplanReader
         return string.Equals(last.Trim('[', ']', '"'), expected, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsShowplanXml(string value)
+    private static bool TryRetainSafeStructure(string value, out string retained)
     {
         try
         {
             var document = Parse(value);
-            return document.Root?.Name == XName.Get("ShowPlanXML", ShowplanNamespace);
+            if (document.Root?.Name != XName.Get("ShowPlanXML", ShowplanNamespace))
+            {
+                retained = string.Empty;
+                return false;
+            }
+
+            foreach (var attribute in document.Root.DescendantsAndSelf()
+                         .Attributes()
+                         .Where(attribute => !attribute.IsNamespaceDeclaration &&
+                                             !RetainedAttributes.Contains(attribute.Name.LocalName))
+                         .ToArray())
+            {
+                attribute.Remove();
+            }
+            foreach (var text in document.DescendantNodes().OfType<XText>()
+                         .Where(text => !string.IsNullOrWhiteSpace(text.Value))
+                         .ToArray())
+            {
+                text.Remove();
+            }
+            retained = document.ToString(SaveOptions.DisableFormatting);
+            return true;
         }
         catch (XmlException)
         {
+            retained = string.Empty;
             return false;
         }
     }

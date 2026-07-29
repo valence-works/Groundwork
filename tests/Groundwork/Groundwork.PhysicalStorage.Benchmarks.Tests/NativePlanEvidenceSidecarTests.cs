@@ -139,6 +139,35 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         Assert.Contains("\"parameterizedCommandDigest\"", sidecar, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Writer_projects_SQL_Server_showplan_to_secret_safe_structure()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.SqlServer,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            SqlServerEvidenceWithSecret(),
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None);
+
+        var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
+        var sidecar = await File.ReadAllTextAsync(Path.Combine(root, $"{artifact}.assertions.json"));
+        foreach (var retained in new[] { plan, sidecar })
+        {
+            Assert.DoesNotContain("synthetic-test-value", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("StatementText", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("ScalarString", retained, StringComparison.Ordinal);
+            Assert.DoesNotContain("Column=", retained, StringComparison.Ordinal);
+        }
+        Assert.Contains("Table=\"[fixture_table]\"", plan, StringComparison.Ordinal);
+        Assert.Contains("Index=\"[fixture_index]\"", plan, StringComparison.Ordinal);
+        Assert.Contains("\"parameterizedCommandDigest\"", sidecar, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("; Server=example; Password=synthetic-test-value")]
     [InlineData(" /* Pwd=synthetic-test-value */")]
@@ -205,6 +234,53 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
                 NativePlanAssertionMode.RequireDeclaredIndex,
                 "fixture_index",
                 "SEARCH l USING INDEX fixture_index (status=?)"))
+        {
+            CommandBinding = new NativePlanCommandBinding("fixture_table", "l", command, receipt.Shape, receipt)
+            {
+                Fields = NativePlanTestBindings.CanonicalFields
+            }
+        };
+    }
+
+    private static NativePlanEvidence SqlServerEvidenceWithSecret()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        const string command = "SELECT * FROM [fixture_table] AS l WHERE l.[storage_scope] = @scope AND l.[document_kind] = @kind AND l.[status] = @q0 OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY";
+        var receipt = NativePlanQueryReceipt.FromRelational(
+            request,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            command,
+            [
+                ("scope", (object?)"tenant-a"),
+                ("kind", "benchmark-document"),
+                ("q0", "open"),
+                ("skip", 0),
+                ("take", 20)
+            ],
+            NativePlanTestBindings.CanonicalFields);
+        const string nativePlan = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564">
+              <BatchSequence><Batch><Statements>
+                <StmtSimple StatementText="SELECT 1 AS [Secret:synthetic-test-value]">
+                  <QueryPlan><RelOp PhysicalOp="Index Seek"><IndexScan>
+                    <DefinedValues><DefinedValue><ColumnReference Column="[Secret:synthetic-test-value]" /></DefinedValue></DefinedValues>
+                    <Predicate><ScalarOperator ScalarString="[Secret:synthetic-test-value]" /></Predicate>
+                    <Object Table="[fixture_table]" Index="[fixture_index]" Alias="[l]" />
+                  </IndexScan></RelOp></QueryPlan>
+                </StmtSimple>
+              </Statements></Batch></BatchSequence>
+            </ShowPlanXML>
+            """;
+        return new NativePlanEvidence(
+            request,
+            BenchmarkProvider.SqlServer,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkModelFactory.QueryIdentityFor(request.Ordered),
+            "fixture_table",
+            "fixture_index",
+            nativePlan,
+            NativePlanEvidenceAssertions.ForSqlServer(NativePlanAssertionMode.RequireDeclaredIndex))
         {
             CommandBinding = new NativePlanCommandBinding("fixture_table", "l", command, receipt.Shape, receipt)
             {

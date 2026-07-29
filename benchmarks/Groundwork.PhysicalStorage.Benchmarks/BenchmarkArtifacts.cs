@@ -356,34 +356,37 @@ public sealed class BenchmarkArtifactWriter : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(benchmarkCase);
         ArgumentNullException.ThrowIfNull(evidence);
-        if (benchmarkCase.Workload != evidence.Request.Workload ||
-            benchmarkCase.Provider != evidence.Provider ||
-            benchmarkCase.StorageForm != evidence.StorageForm ||
-            !HasAdmissibleRawCommand(benchmarkCase.Provider, evidence.CommandBinding) ||
+        var admittedEvidence = evidence.Provider == BenchmarkProvider.SqlServer
+            ? evidence with { NativePlan = SqlServerShowplanReader.RetainSafeStructure(evidence.NativePlan) }
+            : evidence;
+        if (benchmarkCase.Workload != admittedEvidence.Request.Workload ||
+            benchmarkCase.Provider != admittedEvidence.Provider ||
+            benchmarkCase.StorageForm != admittedEvidence.StorageForm ||
+            !HasAdmissibleRawCommand(benchmarkCase.Provider, admittedEvidence.CommandBinding) ||
             !string.Equals(
-                evidence.QueryIdentity,
-                BenchmarkModelFactory.QueryIdentityFor(evidence.Request.Ordered),
+                admittedEvidence.QueryIdentity,
+                BenchmarkModelFactory.QueryIdentityFor(admittedEvidence.Request.Ordered),
                 StringComparison.Ordinal) ||
             !NativePlanEvidenceAssertions.Matches(
                 assertionMode,
-                evidence.Request,
+                admittedEvidence.Request,
                 benchmarkCase.Provider,
-                evidence.IndexName,
-                evidence.PhysicalObject,
-                evidence.CommandBinding,
-                evidence.NativePlan,
-                evidence.Assertions))
+                admittedEvidence.IndexName,
+                admittedEvidence.PhysicalObject,
+                admittedEvidence.CommandBinding,
+                admittedEvidence.NativePlan,
+                admittedEvidence.Assertions))
         {
             throw new InvalidOperationException(
                 $"Native-plan evidence cannot be admitted for case '{benchmarkCase.Identity}'.");
         }
-        var retainedEvidence = RetainedPlanEvidence(evidence);
+        var retainedEvidence = RetainedPlanEvidence(admittedEvidence);
         NativePlanEvidenceSidecar.ValidateForWrite(retainedEvidence);
         var extension = PlanExtension(benchmarkCase.Provider);
         var path = Layout.WritablePath(
-            Layout.Plan(benchmarkCase, evidence.Request.Operation, extension),
+            Layout.Plan(benchmarkCase, admittedEvidence.Request.Operation, extension),
             "Native-plan evidence");
-        await File.WriteAllTextAsync(path, evidence.NativePlan, cancellationToken);
+        await File.WriteAllTextAsync(path, admittedEvidence.NativePlan, cancellationToken);
         await WriteJsonAsync(
             Layout.WritablePath(path + ".assertions.json", "Native-plan assertion evidence"),
             retainedEvidence,

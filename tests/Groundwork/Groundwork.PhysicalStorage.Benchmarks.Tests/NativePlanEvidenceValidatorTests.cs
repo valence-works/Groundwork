@@ -570,6 +570,67 @@ public sealed class NativePlanEvidenceValidatorTests
     }
 
     [Fact]
+    public void MongoDB_accepts_the_driver_singleton_or_status_predicate()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.IndexedQuery])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+        const NativePlanAssertionMode mode = NativePlanAssertionMode.ScanCharacterization;
+        var command = new NativePlanMongoCommandReceipt(
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$match": {
+                "storage_scope": "<redacted>",
+                "document_kind": "<redacted>",
+                "$or": [{ "status": "<redacted>" }]
+              } },
+              { "$skip": 0 },
+              { "$limit": 20 }
+            ] }
+            """);
+        var receipt = NativePlanQueryReceipt.FromMongoDb(
+            request,
+            mode,
+            command,
+            NativePlanTestBindings.CanonicalFields);
+        var binding = new NativePlanCommandBinding(
+            PhysicalObject,
+            null,
+            null,
+            receipt.Shape,
+            receipt)
+        {
+            Fields = NativePlanTestBindings.CanonicalFields,
+            MongoCommandReceipt = command
+        };
+
+        Assert.True(Matches(
+            BenchmarkProvider.MongoDb,
+            mode,
+            request,
+            binding,
+            NativePlan(BenchmarkProvider.MongoDb)));
+    }
+
+    [Fact]
+    public void MongoDB_rejects_an_extra_primary_sort_field()
+    {
+        var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.MixedCompoundOrdering])
+            .Single(candidate => candidate.Operation == NativePlanOperation.Selection);
+
+        AssertMongoCommandRejected(
+            request,
+            PhysicalDocumentQueryCommandKind.Page,
+            """
+            { "aggregate": "expected_table", "pipeline": [
+              { "$match": { "storage_scope": "<redacted>", "document_kind": "<redacted>", "status": "<redacted>" } },
+              { "$sort": { "category": 1, "rank": -1 } },
+              { "$limit": 20 }
+            ] }
+            """);
+    }
+
+    [Fact]
     public void MongoDB_rejects_an_aggregate_page_that_contains_a_count_terminal()
     {
         var request = BenchmarkPlanRequests.ForWorkloads([BenchmarkWorkload.PaginationAndCount])
