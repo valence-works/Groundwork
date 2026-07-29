@@ -119,7 +119,11 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         var evidence = Evidence();
         evidence = evidence with
         {
-            NativePlan = "SEARCH l USING INDEX fixture_index (status=Secret:synthetic-test-value)",
+            NativePlan = """
+                SEARCH l USING INDEX fixture_index (status=Secret:synthetic-test-value)
+                SCAN synthetic_secret_alias
+                BLOOM FILTER ON synthetic_secret_alias (status=Secret:synthetic-test-value)
+                """,
             CommandBinding = evidence.CommandBinding! with
             {
                 ParameterizedCommand = evidence.CommandBinding!.ParameterizedCommand!
@@ -138,6 +142,8 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
         Assert.DoesNotContain("synthetic-test-value", sidecar, StringComparison.Ordinal);
         Assert.DoesNotContain("synthetic-test-value", plan, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic_secret_alias", plan, StringComparison.Ordinal);
+        Assert.Contains("unrelated_alias_redacted", plan, StringComparison.Ordinal);
         Assert.Contains("predicate-redacted", plan, StringComparison.Ordinal);
         Assert.DoesNotContain("parameterizedCommand\"", sidecar, StringComparison.Ordinal);
         Assert.Contains("\"parameterizedCommandDigest\"", sidecar, StringComparison.Ordinal);

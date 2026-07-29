@@ -8,6 +8,7 @@ namespace Groundwork.PhysicalStorage.Benchmarks;
 internal static class ProviderNativePlanRetention
 {
     internal const string AlternativeIndexRedacted = "alternative-index-redacted";
+    private const string UnrelatedAliasRedacted = "unrelated_alias_redacted";
 
     private static readonly ISet<string> PostgreSqlNodeTypes = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -90,31 +91,38 @@ internal static class ProviderNativePlanRetention
         if (search.Success)
         {
             var alias = search.Groups["alias"].Value;
+            var retainedAlias = RetainSqliteAlias(alias, boundAlias);
             if (search.Groups["primary"].Success)
-                return $"SEARCH {alias} USING INTEGER PRIMARY KEY (predicate-redacted)";
-            return $"SEARCH {alias} USING INDEX {RetainSqliteIndex(search, alias, boundAlias, indexName, assertionMode)} (predicate-redacted)";
+                return $"SEARCH {retainedAlias} USING INTEGER PRIMARY KEY (predicate-redacted)";
+            return $"SEARCH {retainedAlias} USING INDEX {RetainSqliteIndex(search, alias, boundAlias, indexName, assertionMode)} (predicate-redacted)";
         }
 
         var scan = SqliteScan.Match(line);
         if (scan.Success)
         {
             var alias = scan.Groups["alias"].Value;
+            var retainedAlias = RetainSqliteAlias(alias, boundAlias);
             return scan.Groups["index"].Success
-                ? $"SCAN {alias} USING INDEX {RetainSqliteIndex(scan, alias, boundAlias, indexName, assertionMode)}"
-                : $"SCAN {alias}";
+                ? $"SCAN {retainedAlias} USING INDEX {RetainSqliteIndex(scan, alias, boundAlias, indexName, assertionMode)}"
+                : $"SCAN {retainedAlias}";
         }
 
         var coRoutine = SqliteCoRoutine.Match(line);
         if (coRoutine.Success)
-            return $"CO-ROUTINE {coRoutine.Groups["alias"].Value}";
+            return $"CO-ROUTINE {RetainSqliteAlias(coRoutine.Groups["alias"].Value, boundAlias)}";
         var temporary = SqliteTemporary.Match(line);
         if (temporary.Success)
             return $"USE TEMP B-TREE FOR {temporary.Groups["purpose"].Value.ToUpperInvariant()}";
         var bloom = SqliteBloom.Match(line);
         if (bloom.Success)
-            return $"BLOOM FILTER ON {bloom.Groups["alias"].Value} (predicate-redacted)";
+            return $"BLOOM FILTER ON {RetainSqliteAlias(bloom.Groups["alias"].Value, boundAlias)} (predicate-redacted)";
         throw new InvalidOperationException("SQLite native-plan evidence contains an unsupported detail row.");
     }
+
+    private static string RetainSqliteAlias(string observedAlias, string boundAlias) =>
+        string.Equals(observedAlias, boundAlias, StringComparison.Ordinal)
+            ? boundAlias
+            : UnrelatedAliasRedacted;
 
     private static string RetainSqliteIndex(
         Match match,
