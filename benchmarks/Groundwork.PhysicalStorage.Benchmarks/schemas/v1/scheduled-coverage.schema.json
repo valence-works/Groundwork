@@ -10,7 +10,6 @@
     "coverageVerified",
     "deepGroupVerification",
     "promotable",
-    "runId",
     "matrix",
     "matrixDigest",
     "requiredShardCount",
@@ -26,7 +25,6 @@
     "coverageVerified": { "const": true },
     "deepGroupVerification": { "type": "boolean" },
     "promotable": { "const": false },
-    "runId": { "type": "string", "minLength": 1 },
     "matrix": { "$ref": "#/$defs/matrix" },
     "matrixDigest": { "$ref": "#/$defs/digest" },
     "requiredShardCount": { "type": "integer", "minimum": 0 },
@@ -39,7 +37,39 @@
   "allOf": [
     {
       "if": { "properties": { "verificationMode": { "const": "scheduled-scaffold" } } },
-      "then": { "properties": { "deepGroupVerification": { "const": true } } },
+      "then": {
+        "properties": {
+          "deepGroupVerification": { "const": true },
+          "gitCommit": { "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+          "matrix": {
+            "properties": {
+              "providers": { "const": ["sqlite", "sqlServer", "postgreSql", "mongoDb"] },
+              "storageForms": { "const": ["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"] },
+              "datasetSizes": { "const": [1000, 100000, 1000000] },
+              "querySelectivityBasisPoints": { "const": [1000, 5000] },
+              "workloads": {
+                "const": [
+                  "clientResetPointReadBatch",
+                  "reusedClientPointReadBatch",
+                  "indexedQuery",
+                  "mixedCompoundOrdering",
+                  "insert",
+                  "update",
+                  "delete",
+                  "unitOfWork",
+                  "concurrentCreate",
+                  "optimisticConcurrency",
+                  "paginationAndCount",
+                  "backfillMigration",
+                  "clientRestartValidation",
+                  "storageGrowth"
+                ]
+              },
+              "independentMeasuredRuns": { "const": 3 }
+            }
+          }
+        }
+      },
       "else": { "properties": { "deepGroupVerification": { "const": false } } }
     }
   ],

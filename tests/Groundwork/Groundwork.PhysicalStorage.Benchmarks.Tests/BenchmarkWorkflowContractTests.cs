@@ -144,7 +144,7 @@ public sealed class BenchmarkWorkflowContractTests
             Assert.False(verificationResult.GetProperty("promotable").GetBoolean());
             Assert.False(verificationResult.GetProperty("deepGroupVerification").GetBoolean());
             Assert.Equal("test-fixture-matrix-only", verificationResult.GetProperty("verificationMode").GetString());
-            Assert.Equal(runId, verificationResult.GetProperty("runId").GetString());
+            Assert.False(verificationResult.TryGetProperty("runId", out _));
             var matrix = verificationResult.GetProperty("matrix");
             Assert.Equal(["sqlite", "sqlServer", "postgreSql", "mongoDb"],
                 matrix.GetProperty("providers").EnumerateArray().Select(value => value.GetString()));
@@ -155,9 +155,7 @@ public sealed class BenchmarkWorkflowContractTests
             Assert.Equal(["clientResetPointReadBatch"],
                 matrix.GetProperty("workloads").EnumerateArray().Select(value => value.GetString()));
             Assert.Equal(1, matrix.GetProperty("independentMeasuredRuns").GetInt32());
-            const string canonicalMatrix = "{\"datasetSizes\":[1000],\"independentMeasuredRuns\":1,\"providers\":[\"sqlite\",\"sqlServer\",\"postgreSql\",\"mongoDb\"],\"querySelectivityBasisPoints\":[1000],\"storageForms\":[\"sharedDocuments\"],\"workloads\":[\"clientResetPointReadBatch\"]}";
-            var matrixDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalMatrix))).ToLowerInvariant();
-            Assert.Equal(matrixDigest, verificationResult.GetProperty("matrixDigest").GetString());
+            Assert.Equal(FixtureMatrixDigest, verificationResult.GetProperty("matrixDigest").GetString());
             Assert.Equal(4, verificationResult.GetProperty("requiredShardCount").GetInt32());
             Assert.Equal(8, verificationResult.GetProperty("verifiedWorkerCount").GetInt32());
             Assert.Equal(4, verificationResult.GetProperty("verifiedMeasuredWorkerCount").GetInt32());
@@ -166,6 +164,58 @@ public sealed class BenchmarkWorkflowContractTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Fact]
+    public void Narrowed_test_mode_cannot_claim_scheduled_scaffold_evidence()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"physical-storage-aggregate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var process = CreateVerifierProcess(root, "fixture-run");
+            process.ArgumentList.Add("--test-mode");
+            process.ArgumentList.Add("--group-verifier");
+            process.ArgumentList.Add(typeof(BenchmarkWorkflowContractTests).Assembly.Location);
+
+            using var verifier = Process.Start(process);
+            Assert.NotNull(verifier);
+            var output = verifier.StandardOutput.ReadToEnd() + verifier.StandardError.ReadToEnd();
+            verifier.WaitForExit();
+
+            Assert.NotEqual(0, verifier.ExitCode);
+            Assert.Contains("--test-mode requires --skip-deep-verification", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Coverage_validator_rejects_a_matrix_outside_the_strict_schema()
+    {
+        var artifact = ValidFixtureCoverageArtifact();
+        artifact["matrix"] = new Dictionary<string, object>();
+        artifact["matrixDigest"] = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes("{}"))).ToLowerInvariant();
+
+        var result = RunCoverageArtifactValidator(artifact);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("matrix does not match the strict v1 property set", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Coverage_validator_rejects_boolean_count_fields()
+    {
+        var artifact = ValidFixtureCoverageArtifact();
+        artifact["requiredShardCount"] = true;
+
+        var result = RunCoverageArtifactValidator(artifact);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("invalid count fields", result.Output, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -310,6 +360,58 @@ public sealed class BenchmarkWorkflowContractTests
         var output = verifier.StandardOutput.ReadToEnd() + verifier.StandardError.ReadToEnd();
         verifier.WaitForExit();
         return new VerifierCommandResult(verifier.ExitCode, output);
+    }
+
+    private static VerifierCommandResult RunCoverageArtifactValidator(IReadOnlyDictionary<string, object> artifact)
+    {
+        var process = new ProcessStartInfo("python3")
+        {
+            WorkingDirectory = RepositoryRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        process.ArgumentList.Add("-c");
+        process.ArgumentList.Add(
+            "import json,runpy,sys; module=runpy.run_path(sys.argv[1]); " +
+            "module['validate_coverage_artifact'](json.loads(sys.argv[2]))");
+        process.ArgumentList.Add(Path.Combine(RepositoryRoot, "tools/verify_physical_storage_scheduled_coverage.py"));
+        process.ArgumentList.Add(JsonSerializer.Serialize(artifact, BenchmarkJson.CompactOptions));
+
+        using var validator = Process.Start(process);
+        Assert.NotNull(validator);
+        var output = validator.StandardOutput.ReadToEnd() + validator.StandardError.ReadToEnd();
+        validator.WaitForExit();
+        return new VerifierCommandResult(validator.ExitCode, output);
+    }
+
+    private static Dictionary<string, object> ValidFixtureCoverageArtifact()
+    {
+        var matrix = new Dictionary<string, object>
+        {
+            ["providers"] = new[] { "sqlite", "sqlServer", "postgreSql", "mongoDb" },
+            ["storageForms"] = new[] { "sharedDocuments" },
+            ["datasetSizes"] = new[] { 1000 },
+            ["querySelectivityBasisPoints"] = new[] { 1000 },
+            ["workloads"] = new[] { "clientResetPointReadBatch" },
+            ["independentMeasuredRuns"] = 1
+        };
+        return new Dictionary<string, object>
+        {
+            ["contract"] = "groundwork.physical-storage.scheduled-coverage/v1",
+            ["verificationMode"] = "test-fixture-matrix-only",
+            ["coverageVerified"] = true,
+            ["deepGroupVerification"] = false,
+            ["promotable"] = false,
+            ["matrix"] = matrix,
+            ["matrixDigest"] = FixtureMatrixDigest,
+            ["requiredShardCount"] = 4,
+            ["verifiedWorkerCount"] = 8,
+            ["verifiedMeasuredWorkerCount"] = 4,
+            ["resultEqualityGroupCount"] = 1,
+            ["gitCommit"] = "fixture-commit",
+            ["gitTreeDigest"] = new string('b', 64)
+        };
     }
 
     private static ProcessStartInfo CreateVerifierProcess(string root, string runId)
@@ -459,6 +561,10 @@ public sealed class BenchmarkWorkflowContractTests
 
     private static void WriteJson(string path, object value) =>
         File.WriteAllText(path, JsonSerializer.Serialize(value, BenchmarkJson.CompactOptions));
+
+    private const string CanonicalFixtureMatrix = "{\"datasetSizes\":[1000],\"independentMeasuredRuns\":1,\"providers\":[\"sqlite\",\"sqlServer\",\"postgreSql\",\"mongoDb\"],\"querySelectivityBasisPoints\":[1000],\"storageForms\":[\"sharedDocuments\"],\"workloads\":[\"clientResetPointReadBatch\"]}";
+    private static string FixtureMatrixDigest => Convert.ToHexString(
+        SHA256.HashData(Encoding.UTF8.GetBytes(CanonicalFixtureMatrix))).ToLowerInvariant();
 
     private sealed record VerifierCommandResult(int ExitCode, string Output);
 
