@@ -12,10 +12,22 @@ internal static class ProviderNativePlanRetention
 
     private static readonly ISet<string> PostgreSqlNodeTypes = new HashSet<string>(StringComparer.Ordinal)
     {
-        "Aggregate", "Append", "Bitmap Heap Scan", "Bitmap Index Scan", "Gather", "Gather Merge",
-        "Hash", "Hash Join", "Incremental Sort", "Index Only Scan", "Index Scan", "Limit",
-        "Materialize", "Memoize", "Merge Join", "Nested Loop", "Result", "Seq Scan", "Sort",
-        "Subquery Scan", "Unique"
+        "Aggregate", "Append", "BitmapAnd", "Bitmap Heap Scan", "Bitmap Index Scan", "BitmapOr",
+        "Gather", "Gather Merge", "Hash", "Hash Join", "Incremental Sort", "Index Only Scan",
+        "Index Scan", "Limit", "Materialize", "Memoize", "Merge Join", "Nested Loop", "Result",
+        "Seq Scan", "Sort", "Subquery Scan", "Unique"
+    };
+    private static readonly ISet<string> PostgreSqlBitmapScopeNodeTypes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "BitmapAnd", "Bitmap Index Scan", "BitmapOr"
+    };
+    private static readonly ISet<string> PostgreSqlIndexNodeTypes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "Bitmap Index Scan", "Index Only Scan", "Index Scan"
+    };
+    private static readonly ISet<string> PostgreSqlRelationNodeTypes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "Bitmap Heap Scan", "Index Only Scan", "Index Scan", "Seq Scan"
     };
     private static readonly ISet<string> PostgreSqlSafeScalarMembers = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -207,6 +219,11 @@ internal static class ProviderNativePlanRetention
             retained["Relation Name"] = physicalObject;
         if (source.TryGetProperty("Index Name", out var observedIndex))
         {
+            if (!PostgreSqlIndexNodeTypes.Contains(nodeType.GetString()!))
+            {
+                throw new InvalidOperationException(
+                    "PostgreSQL native-plan evidence places an index identity on a non-index node.");
+            }
             if (observedIndex.ValueKind != JsonValueKind.String)
             {
                 throw new InvalidOperationException(
@@ -340,7 +357,11 @@ internal static class ProviderNativePlanRetention
         bool withinBoundRelation)
     {
         var boundScope = PostgreSqlBoundScope(node, physicalObject, withinBoundRelation);
-        if (boundScope && IdentifierMatches(node, "Index Name", indexName))
+        if (boundScope &&
+            node.TryGetProperty("Node Type", out var nodeType) &&
+            nodeType.ValueKind == JsonValueKind.String &&
+            PostgreSqlIndexNodeTypes.Contains(nodeType.GetString()!) &&
+            IdentifierMatches(node, "Index Name", indexName))
             return true;
         return node.TryGetProperty("Plans", out var children) &&
                children.ValueKind == JsonValueKind.Array &&
@@ -363,15 +384,19 @@ internal static class ProviderNativePlanRetention
             return inheritedScope &&
                    node.TryGetProperty("Node Type", out var nodeType) &&
                    nodeType.ValueKind == JsonValueKind.String &&
-                   string.Equals(
-                       nodeType.GetString(),
-                       "Bitmap Index Scan",
-                       StringComparison.Ordinal);
+                   PostgreSqlBitmapScopeNodeTypes.Contains(nodeType.GetString()!);
         }
         if (relation.ValueKind != JsonValueKind.String)
         {
             throw new InvalidOperationException(
                 "PostgreSQL native-plan evidence contains a malformed relation identity.");
+        }
+        if (!node.TryGetProperty("Node Type", out var relationNodeType) ||
+            relationNodeType.ValueKind != JsonValueKind.String ||
+            !PostgreSqlRelationNodeTypes.Contains(relationNodeType.GetString()!))
+        {
+            throw new InvalidOperationException(
+                "PostgreSQL native-plan evidence places a relation identity on a non-relation node.");
         }
         return string.Equals(
             relation.GetString(),

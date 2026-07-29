@@ -348,13 +348,43 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         {
             NativePlan = """
                 [{ "Plan": {
-                  "Node Type": "Append",
+                  "Node Type": "Bitmap Heap Scan",
                   "Relation Name": "fixture_table",
                   "Plans": [{
                     "Node Type": "Index Scan",
                     "Relation Name": "other_table",
                     "Index Name": "fixture_index"
                   }]
+                } }]
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
+    public async Task Writer_rejects_a_PostgreSQL_index_identity_on_a_non_index_node()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = PostgreSqlEvidenceWithSecret() with
+        {
+            NativePlan = """
+                [{ "Plan": {
+                  "Node Type": "Seq Scan",
+                  "Relation Name": "fixture_table",
+                  "Index Name": "fixture_index"
                 } }]
                 """
         };
@@ -402,6 +432,58 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
         Assert.Contains("\"Node Type\":\"Bitmap Index Scan\"", plan, StringComparison.Ordinal);
         Assert.Contains("\"Index Name\":\"fixture_index\"", plan, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Writer_retains_PostgreSQL_bitmap_indexes_through_and_or_combiners()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = PostgreSqlEvidenceWithSecret() with
+        {
+            NativePlan = """
+                [{ "Plan": {
+                  "Node Type": "Bitmap Heap Scan",
+                  "Relation Name": "fixture_table",
+                  "Plans": [{
+                    "Node Type": "BitmapOr",
+                    "Plans": [
+                      {
+                        "Node Type": "Bitmap Index Scan",
+                        "Index Name": "fixture_index"
+                      },
+                      {
+                        "Node Type": "BitmapAnd",
+                        "Plans": [
+                          {
+                            "Node Type": "Bitmap Index Scan",
+                            "Index Name": "fixture_index"
+                          },
+                          {
+                            "Node Type": "Bitmap Index Scan",
+                            "Index Name": "fixture_index"
+                          }
+                        ]
+                      }
+                    ]
+                  }]
+                } }]
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        var artifact = await writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None);
+
+        var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
+        Assert.Contains("\"Node Type\":\"BitmapOr\"", plan, StringComparison.Ordinal);
+        Assert.Contains("\"Node Type\":\"BitmapAnd\"", plan, StringComparison.Ordinal);
+        Assert.Equal(3, plan.Split("\"Index Name\":\"fixture_index\"").Length - 1);
     }
 
     [Theory]
