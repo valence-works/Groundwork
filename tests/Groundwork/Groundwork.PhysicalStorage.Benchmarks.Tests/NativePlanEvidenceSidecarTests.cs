@@ -119,6 +119,7 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         var evidence = Evidence();
         evidence = evidence with
         {
+            NativePlan = "SEARCH l USING INDEX fixture_index (status=Secret:synthetic-test-value)",
             CommandBinding = evidence.CommandBinding! with
             {
                 ParameterizedCommand = evidence.CommandBinding!.ParameterizedCommand!
@@ -134,7 +135,10 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             CancellationToken.None);
 
         var sidecar = await File.ReadAllTextAsync(Path.Combine(root, $"{artifact}.assertions.json"));
+        var plan = await File.ReadAllTextAsync(Path.Combine(root, artifact));
         Assert.DoesNotContain("synthetic-test-value", sidecar, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic-test-value", plan, StringComparison.Ordinal);
+        Assert.Contains("predicate-redacted", plan, StringComparison.Ordinal);
         Assert.DoesNotContain("parameterizedCommand\"", sidecar, StringComparison.Ordinal);
         Assert.Contains("\"parameterizedCommandDigest\"", sidecar, StringComparison.Ordinal);
     }
@@ -224,11 +228,18 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             BenchmarkProvider.PostgreSql => PostgreSqlEvidenceWithSecret() with
             {
                 NativePlan = """
-                    [{ "Plan": {
-                      "Node Type": "Secret:synthetic-test-value",
-                      "Relation Name": "fixture_table",
-                      "Index Name": "fixture_index"
-                    } }]
+                    [{ "Plan": { "Node Type": "Append", "Plans": [
+                      {
+                        "Node Type": "Index Scan",
+                        "Relation Name": "fixture_table",
+                        "Index Name": "fixture_index"
+                      },
+                      {
+                        "Node Type": "Index Scan",
+                        "Relation Name": "fixture_table",
+                        "Index Name": "Secret:synthetic-test-value"
+                      }
+                    ] } }]
                     """
             },
             BenchmarkProvider.MongoDb => MongoDbEvidenceWithSecret() with
@@ -237,8 +248,11 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
                     { "queryPlanner": {
                       "namespace": "fixture.fixture_table",
                       "winningPlan": {
-                        "stage": "IXSCAN",
-                        "indexName": "Secret:synthetic-test-value"
+                        "stage": "OR",
+                        "inputStages": [
+                          { "stage": "IXSCAN", "indexName": "fixture_index" },
+                          { "stage": "IXSCAN", "indexName": "Secret:synthetic-test-value" }
+                        ]
                       }
                     } }
                     """
@@ -256,6 +270,65 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
         var plans = Path.Combine(root, "plans");
         Assert.False(Directory.Exists(plans) &&
                      Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
+    public async Task Writer_rejects_SQL_Server_mixed_expected_and_wrong_indexes()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.SqlServer,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = SqlServerEvidenceWithSecret() with
+        {
+            NativePlan = """
+                <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+                  <RelOp PhysicalOp="Index Seek">
+                    <Object Table="[fixture_table]" Index="[fixture_index]" />
+                  </RelOp>
+                  <RelOp PhysicalOp="Index Seek">
+                    <Object Table="[fixture_table]" Index="[Secret:synthetic-test-value]" />
+                  </RelOp>
+                </ShowPlanXML>
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
+
+        var plans = Path.Combine(root, "plans");
+        Assert.False(Directory.Exists(plans) &&
+                     Directory.EnumerateFiles(plans, "*", SearchOption.AllDirectories).Any());
+    }
+
+    [Fact]
+    public async Task Writer_rejects_an_unrecognized_PostgreSQL_node_type()
+    {
+        var benchmarkCase = new BenchmarkCase(
+            BenchmarkProvider.PostgreSql,
+            Groundwork.Core.PhysicalStorage.PhysicalStorageForm.PhysicalEntityTable,
+            BenchmarkWorkload.IndexedQuery);
+        var evidence = PostgreSqlEvidenceWithSecret() with
+        {
+            NativePlan = """
+                [{ "Plan": {
+                  "Node Type": "Secret:synthetic-test-value",
+                  "Relation Name": "fixture_table",
+                  "Index Name": "fixture_index"
+                } }]
+                """
+        };
+        await using var writer = new BenchmarkArtifactWriter(new ArtifactLayout(root));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WritePlanAsync(
+            benchmarkCase,
+            evidence,
+            NativePlanAssertionMode.RequireDeclaredIndex,
+            CancellationToken.None));
     }
 
     [Fact]
@@ -439,37 +512,47 @@ public sealed class NativePlanEvidenceSidecarTests : IDisposable
             ? """
               [{
                 "Plan": {
-                  "Node Type": "Hash Join",
-                  "Output": ["Secret:synthetic-test-value"],
-                  "Filter": "status = 'synthetic-test-value'",
-                  "Plans": [
-                    {
-                      "Node Type": "Seq Scan",
-                      "Relation Name": "Secret:synthetic-test-value"
-                    },
-                    {
-                      "Node Type": "Index Scan",
-                      "Relation Name": "fixture_table",
-                      "Index Name": "fixture_index",
-                      "Index Cond": "status = 'synthetic-test-value'"
-                    }
-                  ]
+                "Node Type": "Incremental Sort",
+                "Output": ["Secret:synthetic-test-value"],
+                "Filter": "status = 'synthetic-test-value'",
+                "Plans": [
+                  {
+                    "Node Type": "Hash Join",
+                    "Plans": [
+                      {
+                        "Node Type": "Seq Scan",
+                        "Relation Name": "Secret:synthetic-test-value"
+                      },
+                      {
+                        "Node Type": "Index Scan",
+                        "Relation Name": "fixture_table",
+                        "Index Name": "fixture_index",
+                        "Index Cond": "status = 'synthetic-test-value'"
+                      }
+                    ]
+                  }
+                ]
                 }
               }]
               """
             : """
               [{
                 "Plan": {
-                  "Node Type": "Hash Join",
+                  "Node Type": "Incremental Sort",
                   "Plans": [
                     {
-                      "Node Type": "Seq Scan",
-                      "Relation Name": "Secret:synthetic-test-value"
-                    },
-                    {
-                      "Node Type": "Seq Scan",
-                      "Relation Name": "fixture_table",
-                      "Filter": "status = 'synthetic-test-value'"
+                      "Node Type": "Hash Join",
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Relation Name": "Secret:synthetic-test-value"
+                        },
+                        {
+                          "Node Type": "Seq Scan",
+                          "Relation Name": "fixture_table",
+                          "Filter": "status = 'synthetic-test-value'"
+                        }
+                      ]
                     }
                   ]
                 }

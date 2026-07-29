@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using MongoDB.Bson;
 
 namespace Groundwork.PhysicalStorage.Benchmarks;
@@ -9,23 +10,41 @@ internal static class ProviderNativePlanRetention
     private static readonly ISet<string> PostgreSqlNodeTypes = new HashSet<string>(StringComparer.Ordinal)
     {
         "Aggregate", "Append", "Bitmap Heap Scan", "Bitmap Index Scan", "Gather", "Gather Merge",
-        "Hash", "Hash Join", "Index Only Scan", "Index Scan", "Limit", "Materialize", "Memoize",
-        "Merge Join", "Nested Loop", "Result", "Seq Scan", "Sort", "Subquery Scan", "Unique"
+        "Hash", "Hash Join", "Incremental Sort", "Index Only Scan", "Index Scan", "Limit",
+        "Materialize", "Memoize", "Merge Join", "Nested Loop", "Result", "Seq Scan", "Sort",
+        "Subquery Scan", "Unique"
     };
     private static readonly ISet<string> PostgreSqlSafeScalarMembers = new HashSet<string>(StringComparer.Ordinal)
     {
         "Startup Cost", "Total Cost", "Plan Rows", "Plan Width", "Parallel Aware",
         "Async Capable"
     };
+    private static readonly Regex SqliteSearch = new(
+        @"^SEARCH (?<alias>[A-Za-z_][A-Za-z0-9_]*) USING (?:(?:COVERING )?INDEX (?<index>[^\s(]+)|(?<primary>INTEGER PRIMARY KEY)) \(.+\)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex SqliteScan = new(
+        @"^SCAN (?<alias>[A-Za-z_][A-Za-z0-9_]*)(?: USING (?:COVERING )?INDEX (?<index>[^\s]+))?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex SqliteCoRoutine = new(
+        @"^CO-ROUTINE (?<alias>[A-Za-z_][A-Za-z0-9_]*)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex SqliteTemporary = new(
+        @"^USE TEMP B-TREE FOR (?<purpose>(?:LAST TERM OF )?ORDER BY|GROUP BY|DISTINCT)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex SqliteBloom = new(
+        @"^BLOOM FILTER ON (?<alias>[A-Za-z_][A-Za-z0-9_]*) \(.+\)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     public static string Retain(
         BenchmarkProvider provider,
         string nativePlan,
         string physicalObject,
         string indexName,
+        string? alias,
         NativePlanAssertionMode assertionMode) =>
         provider switch
         {
+            BenchmarkProvider.Sqlite => RetainSqlite(nativePlan, indexName, alias),
             BenchmarkProvider.SqlServer => SqlServerShowplanReader.RetainSafeStructure(
                 nativePlan,
                 physicalObject,
@@ -40,8 +59,71 @@ internal static class ProviderNativePlanRetention
                 physicalObject,
                 indexName,
                 assertionMode),
-            _ => nativePlan
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
         };
+
+    private static string RetainSqlite(
+        string nativePlan,
+        string indexName,
+        string? boundAlias)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(boundAlias);
+        var retained = nativePlan.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => RetainSqliteLine(line.Trim(), indexName, boundAlias))
+            .ToArray();
+        if (retained.Length == 0)
+            throw new InvalidOperationException("SQLite native-plan evidence is empty.");
+        return string.Join(Environment.NewLine, retained);
+    }
+
+    private static string RetainSqliteLine(
+        string line,
+        string indexName,
+        string boundAlias)
+    {
+        var search = SqliteSearch.Match(line);
+        if (search.Success)
+        {
+            var alias = search.Groups["alias"].Value;
+            if (search.Groups["primary"].Success)
+                return $"SEARCH {alias} USING INTEGER PRIMARY KEY (predicate-redacted)";
+            return $"SEARCH {alias} USING INDEX {RetainSqliteIndex(search, alias, boundAlias, indexName)} (predicate-redacted)";
+        }
+
+        var scan = SqliteScan.Match(line);
+        if (scan.Success)
+        {
+            var alias = scan.Groups["alias"].Value;
+            return scan.Groups["index"].Success
+                ? $"SCAN {alias} USING INDEX {RetainSqliteIndex(scan, alias, boundAlias, indexName)}"
+                : $"SCAN {alias}";
+        }
+
+        var coRoutine = SqliteCoRoutine.Match(line);
+        if (coRoutine.Success)
+            return $"CO-ROUTINE {coRoutine.Groups["alias"].Value}";
+        var temporary = SqliteTemporary.Match(line);
+        if (temporary.Success)
+            return $"USE TEMP B-TREE FOR {temporary.Groups["purpose"].Value.ToUpperInvariant()}";
+        var bloom = SqliteBloom.Match(line);
+        if (bloom.Success)
+            return $"BLOOM FILTER ON {bloom.Groups["alias"].Value} (predicate-redacted)";
+        throw new InvalidOperationException("SQLite native-plan evidence contains an unsupported detail row.");
+    }
+
+    private static string RetainSqliteIndex(
+        Match match,
+        string observedAlias,
+        string boundAlias,
+        string indexName)
+    {
+        var observedIndex = match.Groups["index"].Value;
+        if (!string.Equals(observedAlias, boundAlias, StringComparison.Ordinal))
+            return "unrelated-index-redacted";
+        if (!string.Equals(observedIndex, indexName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("SQLite native-plan evidence selected an unexpected bound index.");
+        return indexName;
+    }
 
     private static string RetainPostgreSql(
         string nativePlan,
@@ -61,7 +143,11 @@ internal static class ProviderNativePlanRetention
         var nodes = PostgreSqlNodes(plan).ToArray();
         if (!nodes.Any(node => IdentifierMatches(node, "Relation Name", physicalObject)) ||
             assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
-            !nodes.Any(node => IdentifierMatches(node, "Index Name", indexName)))
+            !ContainsBoundPostgreSqlIndex(
+                plan,
+                physicalObject,
+                indexName,
+                withinBoundRelation: false))
         {
             throw new InvalidOperationException(
                 "PostgreSQL native-plan evidence does not bind the required relation and index.");
@@ -69,7 +155,11 @@ internal static class ProviderNativePlanRetention
 
         return new JsonArray(new JsonObject
         {
-            ["Plan"] = RetainPostgreSqlNode(plan, physicalObject, indexName)
+            ["Plan"] = RetainPostgreSqlNode(
+                plan,
+                physicalObject,
+                indexName,
+                withinBoundRelation: false)
         })
             .ToJsonString(BenchmarkJson.CompactOptions);
     }
@@ -77,7 +167,8 @@ internal static class ProviderNativePlanRetention
     private static JsonObject RetainPostgreSqlNode(
         JsonElement source,
         string physicalObject,
-        string indexName)
+        string indexName,
+        bool withinBoundRelation)
     {
         if (!source.TryGetProperty("Node Type", out var nodeType) ||
             nodeType.ValueKind != JsonValueKind.String ||
@@ -87,8 +178,25 @@ internal static class ProviderNativePlanRetention
         }
 
         var retained = new JsonObject { ["Node Type"] = nodeType.GetString() };
-        RetainMatchingIdentifier(source, retained, "Relation Name", physicalObject);
-        RetainMatchingIdentifier(source, retained, "Index Name", indexName);
+        var bindsRelation = IdentifierMatches(source, "Relation Name", physicalObject);
+        var boundScope = withinBoundRelation || bindsRelation;
+        if (bindsRelation)
+            retained["Relation Name"] = physicalObject;
+        if (source.TryGetProperty("Index Name", out var observedIndex))
+        {
+            var matchesIndex = observedIndex.ValueKind == JsonValueKind.String &&
+                               string.Equals(
+                                   observedIndex.GetString(),
+                                   indexName,
+                                   StringComparison.OrdinalIgnoreCase);
+            if (boundScope && !matchesIndex)
+            {
+                throw new InvalidOperationException(
+                    "PostgreSQL native-plan evidence selected an unexpected index on the bound relation.");
+            }
+            if (boundScope && matchesIndex)
+                retained["Index Name"] = indexName;
+        }
         foreach (var member in PostgreSqlSafeScalarMembers)
         {
             if (source.TryGetProperty(member, out var value) &&
@@ -105,23 +213,15 @@ internal static class ProviderNativePlanRetention
                 throw new InvalidOperationException("PostgreSQL native-plan children are not canonical plan objects.");
             }
             retained["Plans"] = new JsonArray(children.EnumerateArray()
-                .Select(child => RetainPostgreSqlNode(child, physicalObject, indexName))
+                .Select(child => RetainPostgreSqlNode(
+                    child,
+                    physicalObject,
+                    indexName,
+                    boundScope))
                 .Cast<JsonNode?>()
                 .ToArray());
         }
         return retained;
-    }
-
-    private static void RetainMatchingIdentifier(
-        JsonElement source,
-        JsonObject retained,
-        string member,
-        string expected)
-    {
-        if (source.TryGetProperty(member, out var value) &&
-            value.ValueKind == JsonValueKind.String &&
-            string.Equals(value.GetString(), expected, StringComparison.OrdinalIgnoreCase))
-            retained[member] = expected;
     }
 
     private static string RetainMongoDb(
@@ -153,10 +253,14 @@ internal static class ProviderNativePlanRetention
             .Select(document =>
             {
                 var retained = new BsonDocument("stage", document["stage"].AsString);
-                if (document.TryGetValue("indexName", out var observedIndex) &&
-                    observedIndex.IsString &&
-                    string.Equals(observedIndex.AsString, indexName, StringComparison.Ordinal))
+                if (document.TryGetValue("indexName", out var observedIndex))
                 {
+                    if (!observedIndex.IsString ||
+                        !string.Equals(observedIndex.AsString, indexName, StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            "MongoDB native-plan evidence selected an unexpected index.");
+                    }
                     hasExpectedIndex = true;
                     retained["indexName"] = indexName;
                 }
@@ -184,6 +288,27 @@ internal static class ProviderNativePlanRetention
         source.TryGetProperty(member, out var value) &&
         value.ValueKind == JsonValueKind.String &&
         string.Equals(value.GetString(), expected, StringComparison.OrdinalIgnoreCase);
+
+    private static bool ContainsBoundPostgreSqlIndex(
+        JsonElement node,
+        string physicalObject,
+        string indexName,
+        bool withinBoundRelation)
+    {
+        var boundScope = withinBoundRelation ||
+                         IdentifierMatches(node, "Relation Name", physicalObject);
+        if (boundScope && IdentifierMatches(node, "Index Name", indexName))
+            return true;
+        return node.TryGetProperty("Plans", out var children) &&
+               children.ValueKind == JsonValueKind.Array &&
+               children.EnumerateArray().Any(child =>
+                   child.ValueKind == JsonValueKind.Object &&
+                   ContainsBoundPostgreSqlIndex(
+                       child,
+                       physicalObject,
+                       indexName,
+                       boundScope));
+    }
 
     private static IEnumerable<JsonElement> PostgreSqlNodes(JsonElement node)
     {

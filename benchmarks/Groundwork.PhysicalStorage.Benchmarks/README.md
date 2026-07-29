@@ -43,7 +43,8 @@ admission check; the sidecar retains its SHA-256 identity plus the typed query/p
 never raw command text, connection data, or literal query values. This binding strengthens
 sealed-directory internal consistency; like the artifact-integrity ledger, it is not an external
 authenticity or cryptographic-provenance root.
-Provider plan retention constructs fresh structural documents: SQL Server keeps only ShowPlan
+Provider plan retention constructs fresh structural documents: SQLite canonicalizes access rows
+and redacts predicate details; SQL Server keeps only ShowPlan
 elements, known gate-bearing access operators, and bound table/index identities; PostgreSQL keeps only the plan
 tree plus allowlisted operator/relation/index/estimate members, and MongoDB keeps only the bound
 namespace plus winning stage/index topology. Statement text, expressions, predicates, commands,

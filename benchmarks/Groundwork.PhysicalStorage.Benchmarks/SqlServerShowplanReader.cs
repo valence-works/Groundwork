@@ -150,11 +150,23 @@ internal static class SqlServerShowplanReader
         string? indexName)
     {
         var retained = new XElement(XName.Get(source.Name.LocalName, ShowplanNamespace));
+        var bindsObject = physicalObject is not null &&
+                          source.Name.LocalName == "Object" &&
+                          source.Attribute("Table") is { } table &&
+                          IsIdentifier(table.Value, physicalObject);
+        if (bindsObject &&
+            source.Attribute("Index") is { } observedIndex &&
+            indexName is not null &&
+            !IsIndex(observedIndex.Value, indexName))
+        {
+            throw new InvalidOperationException(
+                "SQL Server native-plan evidence selected an unexpected index on the bound table.");
+        }
         foreach (var attribute in source.Attributes().Where(attribute =>
                      !attribute.IsNamespaceDeclaration &&
                      attribute.Name.NamespaceName.Length == 0))
         {
-            var value = RetainedAttributeValue(attribute, physicalObject, indexName);
+            var value = RetainedAttributeValue(attribute, physicalObject, indexName, bindsObject);
             if (value is not null)
                 retained.Add(new XAttribute(attribute.Name.LocalName, value));
         }
@@ -169,14 +181,15 @@ internal static class SqlServerShowplanReader
     private static string? RetainedAttributeValue(
         XAttribute attribute,
         string? physicalObject,
-        string? indexName) =>
+        string? indexName,
+        bool bindsObject) =>
         attribute.Name.LocalName switch
         {
             "PhysicalOp" when RetainedPhysicalOperators.Contains(attribute.Value) => attribute.Value,
             "Table" when physicalObject is null => attribute.Value,
-            "Table" when IsIdentifier(attribute.Value, physicalObject) => $"[{physicalObject}]",
+            "Table" when bindsObject => $"[{physicalObject}]",
             "Index" when indexName is null => attribute.Value,
-            "Index" when IsIndex(attribute.Value, indexName) => $"[{indexName}]",
+            "Index" when bindsObject && IsIndex(attribute.Value, indexName) => $"[{indexName}]",
             _ => null
         };
 
