@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-29
 
-**Status**: In Progress
+**Status**: Blocked on inaugural-transition ratification
 
 **Input**: Groundwork #141 and its ratified 2026-07-25 relationship-transition decisions.
 
@@ -148,6 +148,17 @@ proof lands and verify it still rejects relationship declarations with `GW-RELAT
   from this test-only proof.
 - Ordinary reference write/delete/unit-of-work fence maintenance and guarded prune execution follow
   in later Model B slices.
+
+## Decision Needed
+
+- **[NEEDS CLARIFICATION: How does the provider-neutral transition contract represent the first
+  relationship generation when durable active-generation state is absent? Recommended decision:
+  add an explicit expected-absent active state whose compare-and-swap succeeds only while no active
+  record exists; same-candidate replay converges and competing candidates cannot both win.]**
+
+The current `RelationshipMaterializationTransitionRequirement` requires non-null active and
+candidate generations with the same relationship identity and different generation identities.
+Fabricating a synthetic active generation would invent cross-provider semantics and is prohibited.
 
 ## Out of Scope
 

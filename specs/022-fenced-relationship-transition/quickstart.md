@@ -6,6 +6,9 @@ This work unit proves internal SQLite candidate backfill, validation, atomic cut
 recovery for Groundwork #141. Public relationship admission remains closed until all four providers
 complete the full fencing and guarded-mutation gate.
 
+Implementation is paused until the program owner ratifies how an inaugural transition represents
+expected-absent active-generation state. A synthetic prior generation is not admissible.
+
 ## Focused Verification
 
 ```bash

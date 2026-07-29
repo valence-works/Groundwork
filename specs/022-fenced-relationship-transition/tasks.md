@@ -7,6 +7,7 @@
 
 ## Phase 2: Durable Transition State
 
+- [ ] T002A Ratify and encode the provider-neutral expected-absent inaugural-transition representation — Blocked: Core currently requires a non-null active generation.
 - [ ] T003 Define provider-owned active/candidate transition state and legal phase transitions
 - [ ] T004 Materialize versioned SQLite transition, reference-sidecar, and target-fence storage
 - [ ] T005 Add internal test-only admission that cannot enable public relationship capability
