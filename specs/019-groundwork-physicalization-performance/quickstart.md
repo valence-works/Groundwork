@@ -350,3 +350,76 @@ This updated review record and T030 evidence link are the only changes after the
 candidate `8be79be8a183380518ed1ec79b9cae12c24ad261`.
 Before merge, the same three axes re-verify the resulting record-only head so the durable account
 and PR candidate cannot diverge.
+
+## Issue #50 immutable-baseline governance checkpoint
+
+This container-free checkpoint implements the ratified baseline control plane only. The committed
+`baselines/v1/baseline-index.json` is a strict, versioned registry and is currently truthful and
+empty (`no-active-generations`). Validation receives an independently trusted set of reviewed
+Groundwork `main` merge commits; a generation binds one trusted authority to its exact source
+commit/tree plus the immutable run-group and retained artifact SHA-256 content digests. Hex shape
+alone is not authority. The registry is the only promotable selector. Caller-supplied direct
+artifact paths remain diagnostic-only and cannot make a scheduled comparison promotable.
+
+The registry model retains immutable append-only generations, explicit supersession, and separate
+activation records. Previous-to-candidate validation rejects deleted, mutated, or reordered
+history; forward/cyclic supersession; removal of an active exact tuple; and replacement without
+explicit supersession. A tuple has at most one activation. Activation and selection reject untrusted
+authority, content drift, malformed paths/digests, duplicate active tuples, incomplete closed-
+matrix evidence, dirty or incompatible source, unavailable provider or machine identity, missing
+raw/summary/correctness/result/plan/synchronized-contention/recovery digests, or missing three-
+review/hosted-check prerequisites. Correctness, result, native-plan, and contention digest maps
+each bind a canonical retained map artifact; selection verifies its SHA-256 and exact parsed
+contents, and every mapped digest must identify separately retained artifact content.
+
+Final container-free verification:
+
+- `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --no-restore --filter 'FullyQualifiedName~BaselineRegistryTests|FullyQualifiedName~BenchmarkSchemaTests'`
+  passed 47/47. This includes artifact-byte drift, a byte-verified canonical map that disagrees
+  with its registry claim, missing artifact binding, independent trust, exact-HEAD authority,
+  append-only transition, staged-deactivation rejection, supersession, activation, and
+  truthful-empty-registry cases.
+- `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName!~MongoDbBenchmarkSignalEvidenceTests&FullyQualifiedName!~RelationalServerBenchmarkTargetTests&FullyQualifiedName!~SqliteProcessFailureRecoveryTests&FullyQualifiedName!~BenchmarkSubprocessCoordinatorTests'`
+  passed 357/357. The two provider-backed classes and two process-lifecycle/deadline classes are
+  excluded explicitly; no database-server container or provider suite ran.
+- A broader attempt excluding the provider-backed classes but retaining the SQLite
+  process-failure inventory encountered repeated pre-existing `TaskCanceledException` deadlines
+  while the machine was contended. A second attempt excluding that class exposed a timing failure
+  in `BenchmarkSubprocessCoordinatorTests.Cancellation_terminates_and_awaits_the_worker_process_tree`.
+  Both attempts were stopped after preserving their failure output. Neither failure exercised the
+  baseline-registry mechanism, and neither is represented as passing evidence.
+- `dotnet build benchmarks/Groundwork.PhysicalStorage.Benchmarks/Groundwork.PhysicalStorage.Benchmarks.csproj --no-restore`
+  passed with zero errors. The two visible warnings are the existing
+  `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisory.
+- `dotnet format ... --no-restore --verify-no-changes --include ...` passed separately for the
+  changed benchmark source and benchmark test source. `jq empty` passed for the registry and
+  schema, and `git diff --check` passed.
+
+This checkpoint does **not** execute a provider matrix, populate or activate any generation,
+select a physical form, compare EF, produce a performance verdict, or close issue #50.
+
+### Immutable-baseline governance independent review
+
+Three read-only reviewers adversarially inspected
+`fe1a32fe9afced565c231106be921a602fca95c2..3dc752d3ad72f32a64a39c0dc066e931b7c64e65`
+on correctness/mechanism, evidence integrity, and scope/test preservation. They were instructed to
+assume the checkpoint had green-washed its control-plane evidence. Final dispositions:
+
+- Correctness/mechanism initially **BLOCKED** a two-transition bypass: remove an existing activation
+  in one valid registry transition, then activate a non-superseding generation in the next. V1 now
+  makes exact-tuple activations non-removable and requires replacement in one transition through
+  explicit supersession; the originating reviewer passed the new staged-deactivation regression and
+  rechecked authority, exact-head/tree, closed-matrix, artifact/map, path, tuple, and append-only
+  invariants.
+- Evidence integrity initially **BLOCKED** stale remaining-work text that still said to define the
+  already implemented control plane, then required the published v1 README to state the new
+  non-removable activation rule unambiguously. Both records now distinguish implemented governance
+  from open operational trust, matrix, population, activation, and exercise work. The originating
+  reviewer re-verified the truthful empty registry, 47 / 357 gates, and T036-T038 nonclaims.
+- Scope/test preservation **PASSED** after a review-brief error was corrected: the exact diff has
+  eleven authorized governance paths, not ten, and `BenchmarkSchemaTests.cs` is the required strict
+  schema/empty-registry contract test for T032/T033. No production provider, runtime capability,
+  workload, command-line, process protocol, package, or existing test was removed or weakened.
+
+Every confirmed blocker was returned to and passed by its originating reviewer. The checkpoint
+remains container-free and non-decisional.

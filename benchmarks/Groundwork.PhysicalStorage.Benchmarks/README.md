@@ -142,7 +142,10 @@ otherwise. Providing payload values does not make a run promotable.
 
 Both profiles always emit `baselineEligibility.eligible: false`. Diagnostics explain that issue #50
 still requires controlled execution of the complete reviewed matrix, exact-HEAD live evidence from
-all four providers, and the Elsa-owned EF Core oracle.
+all four providers, and the Elsa-owned EF Core oracle. A caller-provided `--baseline` path is
+diagnostic-only; it is not a scheduled-promotion selector. A promotable Groundwork baseline can
+only be selected through the committed versioned registry after a reviewed `main` merge binds the
+run-group and every retained artifact to immutable SHA-256 content digests.
 
 The GitHub workflow is named `Physical Storage Benchmark Evidence (Scaffolding)`. Pull requests run
 a deliberately narrow SQLite/shared-form smoke over seven representative workloads. Weekly/manual
@@ -475,7 +478,8 @@ non-decision smoke remained green.
 - Exercise the target-scoped provider database-work signals and sealed concurrent-create evidence
   under controlled live evidence for all providers. The current observable client signals do not
   by themselves close the provider-work acceptance item.
-- Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
+- Operationalize the reviewed-main approval trust input, execute the controlled matrix, populate
+  and activate eligible append-only registry generations, and exercise committed selection.
 - Extend the bounded SQLite process-failure slice to the remaining providers and any additional
   ratified crash/failure modes required for issue #50. The current slice is real process
   termination evidence, but it is deliberately non-promotable and does not close that acceptance

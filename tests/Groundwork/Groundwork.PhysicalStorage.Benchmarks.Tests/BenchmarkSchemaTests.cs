@@ -69,15 +69,16 @@ public sealed class BenchmarkSchemaTests
     }
 
     [Fact]
-    public void Versioned_baseline_index_references_its_schema_and_starts_empty()
+    public void Versioned_baseline_registry_references_its_schema_and_starts_empty()
     {
         using var document = Read("benchmarks/Groundwork.PhysicalStorage.Benchmarks/baselines/v1/baseline-index.json");
         var root = document.RootElement;
 
         Assert.Equal("baseline-index.schema.json", root.GetProperty("$schema").GetString());
-        Assert.Equal(BenchmarkProfiles.SchemaVersion, root.GetProperty("schemaVersion").GetString());
-        Assert.Equal("scaffolding-no-approved-baselines", root.GetProperty("status").GetString());
-        Assert.Empty(root.GetProperty("baselines").EnumerateArray());
+        Assert.Equal(BaselineRegistry.ContractVersion, root.GetProperty("schemaVersion").GetString());
+        Assert.Equal("no-active-generations", root.GetProperty("status").GetString());
+        Assert.Empty(root.GetProperty("generations").EnumerateArray());
+        Assert.Empty(root.GetProperty("activations").EnumerateArray());
     }
 
     [Fact]

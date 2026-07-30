@@ -1,6 +1,7 @@
 {
   "$schema": "baseline-index.schema.json",
-  "schemaVersion": "groundwork.physical-storage.benchmark/v1",
-  "status": "scaffolding-no-approved-baselines",
-  "baselines": []
+  "schemaVersion": "groundwork.physical-storage.baseline-registry/v1",
+  "status": "no-active-generations",
+  "generations": [],
+  "activations": []
 }
