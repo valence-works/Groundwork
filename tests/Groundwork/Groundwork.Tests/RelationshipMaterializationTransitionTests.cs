@@ -12,21 +12,38 @@ public sealed class RelationshipMaterializationTransitionTests
         Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
 
     [Fact]
-    public void Transition_requirement_binds_exact_before_and_after_generations_without_activating_them()
+    public void Transition_requirement_binds_a_closed_expected_active_state_and_candidate_without_activating_them()
     {
         var active = Generation("generation-active");
         var candidate = Generation("generation-candidate");
 
-        var requirement = new RelationshipMaterializationTransitionRequirement(active, candidate);
+        var requirement = new RelationshipMaterializationTransitionRequirement(
+            RelationshipMaterializationExpectedActive.Exact(active),
+            candidate);
 
-        Assert.Same(active, requirement.ActiveGeneration);
+        Assert.Same(active, requirement.ExpectedActive.ExactGeneration);
+        Assert.False(requirement.ExpectedActive.IsAbsent);
         Assert.Same(candidate, requirement.CandidateGeneration);
         Assert.Throws<ArgumentException>(() => new RelationshipMaterializationTransitionRequirement(
-            active,
+            RelationshipMaterializationExpectedActive.Exact(active),
             Generation("generation-active", targetAccessPathIdentity: "different-shape")));
         Assert.Throws<ArgumentException>(() => new RelationshipMaterializationTransitionRequirement(
-            active,
+            RelationshipMaterializationExpectedActive.Exact(active),
             Generation("generation-candidate", relationshipIdentity: "different-route")));
+    }
+
+    [Fact]
+    public void Inaugural_transition_requires_an_explicit_expected_absent_state()
+    {
+        var candidate = Generation("generation-candidate");
+
+        var transition = new RelationshipMaterializationTransitionRequirement(
+            RelationshipMaterializationExpectedActive.Absent,
+            candidate);
+
+        Assert.True(transition.ExpectedActive.IsAbsent);
+        Assert.Null(transition.ExpectedActive.ExactGeneration);
+        Assert.Same(candidate, transition.CandidateGeneration);
     }
 
     [Fact]
@@ -34,7 +51,8 @@ public sealed class RelationshipMaterializationTransitionTests
     {
         var active = Generation("generation-active");
         var candidate = Generation("generation-candidate");
-        var transition = new RelationshipMaterializationTransitionRequirement(active, candidate);
+        var transition = new RelationshipMaterializationTransitionRequirement(
+            RelationshipMaterializationExpectedActive.Exact(active), candidate);
         var targetKey = KeyCorrelationIdentity(transition, 'a');
 
         var first = new RelationshipMaterializationDanglingReference(transition, targetKey);
@@ -67,7 +85,7 @@ public sealed class RelationshipMaterializationTransitionTests
     public void Key_correlation_identity_uses_the_normative_bound_hmac_derivation()
     {
         var transition = new RelationshipMaterializationTransitionRequirement(
-            Generation("generation-active"),
+            RelationshipMaterializationExpectedActive.Exact(Generation("generation-active")),
             Generation("generation-candidate"));
 
         var correlation = RelationshipMaterializationKeyCorrelationIdentity.Create(
@@ -105,7 +123,7 @@ public sealed class RelationshipMaterializationTransitionTests
                 string.Empty));
 
         var otherCandidateTransition = new RelationshipMaterializationTransitionRequirement(
-            Generation("generation-active"),
+            RelationshipMaterializationExpectedActive.Exact(Generation("generation-active")),
             Generation("generation-other-candidate"));
         var relabelled = RelationshipMaterializationKeyCorrelationIdentity.Create(
             ProviderOwnedCorrelationKey,
@@ -125,17 +143,46 @@ public sealed class RelationshipMaterializationTransitionTests
     }
 
     [Fact]
+    public void Persisted_dangling_envelope_restores_only_the_closed_code_and_canonical_opaque_correlation()
+    {
+        var transition = new RelationshipMaterializationTransitionRequirement(
+            RelationshipMaterializationExpectedActive.Absent,
+            Generation("generation-candidate"));
+        var correlation = KeyCorrelationIdentity(transition, 'a');
+
+        var restored = RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            RelationshipMaterializationDanglingReference.DiagnosticCode,
+            correlation.Value);
+
+        Assert.Equal(correlation, restored.TargetKeyCorrelationIdentity);
+        Assert.Contains(RelationshipMaterializationDanglingReference.DiagnosticCode, restored.Message, StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            "GW-RELATIONSHIP-999",
+            correlation.Value));
+        Assert.Throws<ArgumentException>(() => RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            RelationshipMaterializationDanglingReference.DiagnosticCode,
+            correlation.Value.ToUpperInvariant()));
+        Assert.Throws<ArgumentException>(() => RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            RelationshipMaterializationDanglingReference.DiagnosticCode,
+            "hmac-sha256-v1:not-a-digest"));
+    }
+
+    [Fact]
     public void Canonical_diagnostic_framing_preserves_route_delimiters_without_aliasing()
     {
         const string delimiterBearingRoute = "token\u001e\"authorization\nroute";
         var delimitedTransition = new RelationshipMaterializationTransitionRequirement(
-            Generation("generation-active", relationshipIdentity: delimiterBearingRoute),
+            RelationshipMaterializationExpectedActive.Exact(Generation("generation-active", relationshipIdentity: delimiterBearingRoute)),
             Generation("generation-candidate", relationshipIdentity: delimiterBearingRoute));
         var delimited = new RelationshipMaterializationDanglingReference(
             delimitedTransition,
             KeyCorrelationIdentity(delimitedTransition, 'b'));
         var ordinaryTransition = new RelationshipMaterializationTransitionRequirement(
-            Generation("generation-active", relationshipIdentity: "token"),
+            RelationshipMaterializationExpectedActive.Exact(Generation("generation-active", relationshipIdentity: "token")),
             Generation("generation-candidate", relationshipIdentity: "token"));
         var ordinary = new RelationshipMaterializationDanglingReference(
             ordinaryTransition,

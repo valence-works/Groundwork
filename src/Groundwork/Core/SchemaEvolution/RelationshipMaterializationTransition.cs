@@ -49,15 +49,43 @@ public sealed class RelationshipMaterializationGeneration : IEquatable<Relations
 /// authority. The executor that eventually consumes it must own durable revision checks and atomic
 /// compare-and-swap activation.
 /// </summary>
+public sealed class RelationshipMaterializationExpectedActive
+{
+    private RelationshipMaterializationExpectedActive(
+        RelationshipMaterializationGeneration? exactGeneration)
+    {
+        ExactGeneration = exactGeneration;
+    }
+
+    /// <summary>
+    /// Requires the provider to activate the candidate only if the relationship has no active
+    /// generation. This is the inaugural transition state; it is not a synthetic generation.
+    /// </summary>
+    public static RelationshipMaterializationExpectedActive Absent { get; } = new(null);
+
+    /// <summary>
+    /// Requires the provider to activate the candidate only if this exact generation remains
+    /// authoritative.
+    /// </summary>
+    public static RelationshipMaterializationExpectedActive Exact(
+        RelationshipMaterializationGeneration generation) =>
+        new(generation ?? throw new ArgumentNullException(nameof(generation)));
+
+    public bool IsAbsent => ExactGeneration is null;
+
+    public RelationshipMaterializationGeneration? ExactGeneration { get; }
+}
+
 public sealed class RelationshipMaterializationTransitionRequirement
 {
     public RelationshipMaterializationTransitionRequirement(
-        RelationshipMaterializationGeneration activeGeneration,
+        RelationshipMaterializationExpectedActive expectedActive,
         RelationshipMaterializationGeneration candidateGeneration)
     {
-        ActiveGeneration = activeGeneration ?? throw new ArgumentNullException(nameof(activeGeneration));
+        ExpectedActive = expectedActive ?? throw new ArgumentNullException(nameof(expectedActive));
         CandidateGeneration = candidateGeneration ?? throw new ArgumentNullException(nameof(candidateGeneration));
-        if (!string.Equals(
+        if (ExpectedActive.ExactGeneration is { } activeGeneration &&
+            !string.Equals(
                 activeGeneration.RelationshipIdentity,
                 candidateGeneration.RelationshipIdentity,
                 StringComparison.Ordinal))
@@ -66,8 +94,8 @@ public sealed class RelationshipMaterializationTransitionRequirement
                 "Relationship materialization transitions require the same relationship route.",
                 nameof(candidateGeneration));
         }
-        if (string.Equals(
-                activeGeneration.GenerationIdentity,
+        if (ExpectedActive.ExactGeneration is { } exactGeneration && string.Equals(
+                exactGeneration.GenerationIdentity,
                 candidateGeneration.GenerationIdentity,
                 StringComparison.Ordinal))
         {
@@ -77,7 +105,11 @@ public sealed class RelationshipMaterializationTransitionRequirement
         }
     }
 
-    public RelationshipMaterializationGeneration ActiveGeneration { get; }
+    /// <summary>
+    /// Closed expected-active union. Providers use <see cref="RelationshipMaterializationExpectedActive.Absent"/>
+    /// for the inaugural CAS, or <see cref="RelationshipMaterializationExpectedActive.Exact"/> for a rotation.
+    /// </summary>
+    public RelationshipMaterializationExpectedActive ExpectedActive { get; }
 
     public RelationshipMaterializationGeneration CandidateGeneration { get; }
 }
@@ -161,6 +193,51 @@ public sealed class RelationshipMaterializationKeyCorrelationIdentity :
         }
     }
 
+    /// <summary>
+    /// Restores a persisted opaque correlation only after validating its closed wire shape. This is
+    /// intentionally internal: providers may replay the one durable failure envelope, but callers
+    /// cannot manufacture a diagnostic identity from storage text.
+    /// </summary>
+    internal static RelationshipMaterializationKeyCorrelationIdentity Restore(
+        RelationshipMaterializationTransitionRequirement transitionRequirement,
+        string value)
+    {
+        ArgumentNullException.ThrowIfNull(transitionRequirement);
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+
+        if (!value.StartsWith(Scheme, StringComparison.Ordinal) ||
+            value.Length != Scheme.Length + 64)
+        {
+            throw new ArgumentException("The persisted relationship correlation has an invalid closed wire shape.", nameof(value));
+        }
+
+        var encodedDigest = value[Scheme.Length..];
+        if (!string.Equals(encodedDigest, encodedDigest.ToLowerInvariant(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The persisted relationship correlation must use canonical lowercase hexadecimal.", nameof(value));
+        }
+
+        try
+        {
+            var digest = Convert.FromHexString(encodedDigest);
+            try
+            {
+                if (digest.Length != 32)
+                    throw new ArgumentException("The persisted relationship correlation has an invalid digest length.", nameof(value));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(digest);
+            }
+        }
+        catch (FormatException exception)
+        {
+            throw new ArgumentException("The persisted relationship correlation is not hexadecimal.", nameof(value), exception);
+        }
+
+        return new(value, transitionRequirement.CandidateGeneration);
+    }
+
     public string Value { get; }
 
     internal RelationshipMaterializationGeneration CandidateGeneration { get; }
@@ -210,6 +287,27 @@ public sealed class RelationshipMaterializationDanglingReference :
     IEquatable<RelationshipMaterializationDanglingReference>
 {
     public const string DiagnosticCode = "GW-RELATIONSHIP-013";
+
+    /// <summary>
+    /// Restores the only persisted relationship-transition failure envelope. It does not inspect
+    /// current source or target data, so a terminal failure cannot be relabelled by a changed
+    /// replay request.
+    /// </summary>
+    internal static RelationshipMaterializationDanglingReference Restore(
+        RelationshipMaterializationTransitionRequirement transitionRequirement,
+        string failureCode,
+        string failureCorrelation)
+    {
+        ArgumentNullException.ThrowIfNull(transitionRequirement);
+        if (!string.Equals(failureCode, DiagnosticCode, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The persisted relationship failure code is not an admitted envelope.", nameof(failureCode));
+        }
+
+        return new(
+            transitionRequirement,
+            RelationshipMaterializationKeyCorrelationIdentity.Restore(transitionRequirement, failureCorrelation));
+    }
 
     internal RelationshipMaterializationDanglingReference(
         RelationshipMaterializationTransitionRequirement transitionRequirement,
