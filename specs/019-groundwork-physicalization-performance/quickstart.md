@@ -397,3 +397,29 @@ Final container-free verification:
 
 This checkpoint does **not** execute a provider matrix, populate or activate any generation,
 select a physical form, compare EF, produce a performance verdict, or close issue #50.
+
+### Immutable-baseline governance independent review
+
+Three read-only reviewers adversarially inspected
+`fe1a32fe9afced565c231106be921a602fca95c2..3dc752d3ad72f32a64a39c0dc066e931b7c64e65`
+on correctness/mechanism, evidence integrity, and scope/test preservation. They were instructed to
+assume the checkpoint had green-washed its control-plane evidence. Final dispositions:
+
+- Correctness/mechanism initially **BLOCKED** a two-transition bypass: remove an existing activation
+  in one valid registry transition, then activate a non-superseding generation in the next. V1 now
+  makes exact-tuple activations non-removable and requires replacement in one transition through
+  explicit supersession; the originating reviewer passed the new staged-deactivation regression and
+  rechecked authority, exact-head/tree, closed-matrix, artifact/map, path, tuple, and append-only
+  invariants.
+- Evidence integrity initially **BLOCKED** stale remaining-work text that still said to define the
+  already implemented control plane, then required the published v1 README to state the new
+  non-removable activation rule unambiguously. Both records now distinguish implemented governance
+  from open operational trust, matrix, population, activation, and exercise work. The originating
+  reviewer re-verified the truthful empty registry, 47 / 357 gates, and T036-T038 nonclaims.
+- Scope/test preservation **PASSED** after a review-brief error was corrected: the exact diff has
+  eleven authorized governance paths, not ten, and `BenchmarkSchemaTests.cs` is the required strict
+  schema/empty-registry contract test for T032/T033. No production provider, runtime capability,
+  workload, command-line, process protocol, package, or existing test was removed or weakened.
+
+Every confirmed blocker was returned to and passed by its originating reviewer. The checkpoint
+remains container-free and non-decisional.
