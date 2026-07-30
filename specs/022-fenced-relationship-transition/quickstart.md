@@ -38,14 +38,14 @@ complete Groundwork #141 / Elsa #643.
 
 ## Evidence
 
-2026-07-31 candidate evidence. The prior 12 / 51 / 1 rerun tested source head
-`3c12f20944eb02d4c4f795dd2f6449b5bbfd1ba2`; the exact second-remediation worktree rerun below
-extends that source with the review fixes recorded in this section.
+2026-07-31 candidate evidence. The prior 22 / 51 / 1 rerun tested source head
+`546bfbf5b708639e8bae226ec45a916d62913c1b`; the exact third-remediation worktree rerun below
+extends that source with the schema-evolution review fixes recorded in this section.
 
 ```bash
 dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj \
   --filter RelationshipTransition --no-restore
-# Passed: 22, Failed: 0
+# Passed: 24, Failed: 0
 
 dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj \
   --filter Relationship --no-restore
@@ -65,7 +65,11 @@ or activate. Active reopen additionally requires the exact Active state, complet
 digest, and candidate-scoped reference/fence tuples to agree with the supplied snapshot. A terminal
 failure restores only its persisted `GW-RELATIONSHIP-013` code and opaque correlation after a
 domain-separated authenticated envelope binds the candidate, input digest, code, and correlation;
-it does not inspect current source or target data. The test-only inspection exposes exact candidate
-and source/target identity tuples but omits serialized references, failure material, and key data.
-This slice does not claim ordinary fence maintenance, guarded prunes, a non-SQLite provider,
-production HMAC custody, or public relationship capability.
+it does not inspect current source or target data. Infrastructure initialization serializes schema
+creation and validation, upgrades only the exact pre-`failure_mac` state-v1 layout, and rejects
+unexpected columns, primary-key shapes, or target-index definitions before reading transition
+evidence. Active materialization checks require both exact tuple cardinality and set equality; the
+suite proves a duplicate-capable malformed sidecar cannot reopen an active candidate. The test-only
+inspection exposes exact candidate and source/target identity tuples but omits serialized
+references, failure material, and key data. This slice does not claim ordinary fence maintenance,
+guarded prunes, a non-SQLite provider, production HMAC custody, or public relationship capability.

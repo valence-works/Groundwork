@@ -385,6 +385,81 @@ public sealed class SqliteRelationshipTransitionTests
     }
 
     [Fact]
+    public async Task Pre_failure_mac_v1_state_schema_is_upgraded_before_reopen()
+    {
+        await using var database = TemporaryDatabase.Create();
+        await ExecuteSqlAsync(
+            database.ConnectionString,
+            """
+            CREATE TABLE groundwork_relationship_transition_state_v1 (
+                relationship_identity TEXT NOT NULL,
+                candidate_generation TEXT NOT NULL,
+                candidate_fingerprint TEXT NOT NULL,
+                expected_kind INTEGER NOT NULL,
+                expected_generation TEXT NULL,
+                expected_fingerprint TEXT NULL,
+                candidate_input_digest TEXT NOT NULL,
+                phase INTEGER NOT NULL,
+                processed_source_count INTEGER NOT NULL,
+                failure_code TEXT NULL,
+                failure_correlation TEXT NULL,
+                PRIMARY KEY (relationship_identity, candidate_generation, candidate_fingerprint)
+            );
+            """);
+        var plan = CreatePlan("legacy-state-schema");
+        var source = Source("token-a", "authorization-a");
+        var target = Target(plan.ProjectReferenceIdentity("authorization-a")!.Value);
+
+        var result = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync([source], [target]);
+
+        Assert.Equal(SqliteRelationshipTransitionStatus.Activated, result.Status);
+        Assert.Equal(
+            1,
+            await ReadInt64Async(
+                database.ConnectionString,
+                "SELECT COUNT(*) FROM pragma_table_info('groundwork_relationship_transition_state_v1') WHERE name = 'failure_mac';"));
+    }
+
+    [Fact]
+    public async Task Active_candidate_reopen_rejects_a_duplicate_capable_sidecar_schema()
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan("malformed-sidecar-schema");
+        var source = Source("token-a", "authorization-a");
+        var target = Target(plan.ProjectReferenceIdentity("authorization-a")!.Value);
+        var executor = CreateExecutor(database.ConnectionString, plan);
+        Assert.Equal(
+            SqliteRelationshipTransitionStatus.Activated,
+            (await executor.ExecuteAsync([source], [target])).Status);
+        await ExecuteSqlAsync(
+            database.ConnectionString,
+            """
+            ALTER TABLE groundwork_relationship_reference_sidecar_v1
+                RENAME TO groundwork_relationship_reference_sidecar_legacy;
+            CREATE TABLE groundwork_relationship_reference_sidecar_v1 (
+                relationship_identity TEXT NOT NULL,
+                candidate_generation TEXT NOT NULL,
+                candidate_fingerprint TEXT NOT NULL,
+                source_scope TEXT NOT NULL,
+                source_lookup_key TEXT NOT NULL,
+                source_comparison_key TEXT NOT NULL,
+                target_scope TEXT NOT NULL,
+                target_lookup_key TEXT NOT NULL,
+                target_comparison_key TEXT NOT NULL
+            );
+            INSERT INTO groundwork_relationship_reference_sidecar_v1
+            SELECT * FROM groundwork_relationship_reference_sidecar_legacy;
+            INSERT INTO groundwork_relationship_reference_sidecar_v1
+            SELECT * FROM groundwork_relationship_reference_sidecar_legacy;
+            """);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CreateExecutor(database.ConnectionString, plan).ExecuteAsync([source], [target]));
+
+        Assert.Contains("groundwork_relationship_reference_sidecar_v1", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Public_factory_still_rejects_relationship_manifest_before_it_opens_the_connection()
     {
         var manifest = CreateManifest("public-gate");
@@ -466,6 +541,15 @@ public sealed class SqliteRelationshipTransitionTests
         await using var command = connection.CreateCommand();
         command.CommandText = commandText;
         return Assert.IsType<string>(await command.ExecuteScalarAsync());
+    }
+
+    private static async Task<long> ReadInt64Async(string connectionString, string commandText)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        return Assert.IsType<long>(await command.ExecuteScalarAsync());
     }
 
     private static PhysicalRelationshipPlan CreatePlan(string suffix)

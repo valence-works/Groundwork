@@ -18,6 +18,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
     private const string ActiveTable = "groundwork_relationship_active_v1";
     private const string ReferenceTable = "groundwork_relationship_reference_sidecar_v1";
     private const string FenceTable = "groundwork_relationship_target_fence_v1";
+    private const string ReferenceTargetIndex = "ix_groundwork_relationship_reference_sidecar_v1_target";
     private const string CandidateInputDigestScheme = "hmac-sha256-v1:";
     private const string CandidateInputDigestDomain =
         "groundwork.relationship-materialization.sqlite-transition-input.hmac-sha256.v1";
@@ -25,6 +26,48 @@ internal sealed class SqliteRelationshipTransitionExecutor
     private const string FailureEnvelopeMacDomain =
         "groundwork.relationship-materialization.sqlite-transition-failure-envelope.hmac-sha256.v1";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly SchemaColumn[] StateColumns =
+    [
+        new("relationship_identity", "TEXT", true, 1),
+        new("candidate_generation", "TEXT", true, 2),
+        new("candidate_fingerprint", "TEXT", true, 3),
+        new("expected_kind", "INTEGER", true, 0),
+        new("expected_generation", "TEXT", false, 0),
+        new("expected_fingerprint", "TEXT", false, 0),
+        new("candidate_input_digest", "TEXT", true, 0),
+        new("phase", "INTEGER", true, 0),
+        new("processed_source_count", "INTEGER", true, 0),
+        new("failure_code", "TEXT", false, 0),
+        new("failure_correlation", "TEXT", false, 0),
+        new("failure_mac", "TEXT", false, 0)
+    ];
+    private static readonly SchemaColumn[] ActiveColumns =
+    [
+        new("relationship_identity", "TEXT", true, 1),
+        new("generation_identity", "TEXT", true, 0),
+        new("materialization_fingerprint", "TEXT", true, 0)
+    ];
+    private static readonly SchemaColumn[] ReferenceColumns =
+    [
+        new("relationship_identity", "TEXT", true, 1),
+        new("candidate_generation", "TEXT", true, 2),
+        new("candidate_fingerprint", "TEXT", true, 3),
+        new("source_scope", "TEXT", true, 4),
+        new("source_lookup_key", "TEXT", true, 5),
+        new("source_comparison_key", "TEXT", true, 6),
+        new("target_scope", "TEXT", true, 0),
+        new("target_lookup_key", "TEXT", true, 0),
+        new("target_comparison_key", "TEXT", true, 0)
+    ];
+    private static readonly SchemaColumn[] FenceColumns =
+    [
+        new("relationship_identity", "TEXT", true, 1),
+        new("candidate_generation", "TEXT", true, 2),
+        new("candidate_fingerprint", "TEXT", true, 3),
+        new("target_scope", "TEXT", true, 4),
+        new("target_lookup_key", "TEXT", true, 5),
+        new("target_comparison_key", "TEXT", true, 6)
+    ];
 
     private readonly string connectionString;
     private readonly PhysicalRelationshipPlan plan;
@@ -500,7 +543,10 @@ internal sealed class SqliteRelationshipTransitionExecutor
 
         var actualReferences = await ReadCandidateReferencesAsync(connection, transaction, cancellationToken);
         var actualFences = await ReadCandidateFencesAsync(connection, transaction, cancellationToken);
-        return expectedReferences.SetEquals(actualReferences) && expectedFences.SetEquals(actualFences);
+        return expectedReferences.Count == actualReferences.Count &&
+               expectedReferences.SetEquals(actualReferences) &&
+               expectedFences.Count == actualFences.Count &&
+               expectedFences.SetEquals(actualFences);
     }
 
     private SqliteRelationshipTransitionReferenceSnapshot CreateReferenceSnapshot(
@@ -599,7 +645,9 @@ internal sealed class SqliteRelationshipTransitionExecutor
 
     private static async Task EnsureInfrastructureAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
+        await using var transaction = connection.BeginTransaction(deferred: false);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = $"""
             CREATE TABLE IF NOT EXISTS {StateTable} (
                 relationship_identity TEXT NOT NULL,
@@ -635,10 +683,6 @@ internal sealed class SqliteRelationshipTransitionExecutor
                     relationship_identity, candidate_generation, candidate_fingerprint,
                     source_scope, source_lookup_key, source_comparison_key)
             );
-            CREATE INDEX IF NOT EXISTS ix_groundwork_relationship_reference_sidecar_v1_target
-                ON {ReferenceTable} (
-                    relationship_identity, candidate_generation, candidate_fingerprint,
-                    target_scope, target_lookup_key, target_comparison_key);
             CREATE TABLE IF NOT EXISTS {FenceTable} (
                 relationship_identity TEXT NOT NULL,
                 candidate_generation TEXT NOT NULL,
@@ -652,6 +696,125 @@ internal sealed class SqliteRelationshipTransitionExecutor
             );
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+
+        await UpgradeLegacyStateSchemaAsync(connection, transaction, cancellationToken);
+        await ValidateTableSchemaAsync(connection, transaction, StateTable, StateColumns, cancellationToken);
+        await ValidateTableSchemaAsync(connection, transaction, ActiveTable, ActiveColumns, cancellationToken);
+        await ValidateTableSchemaAsync(connection, transaction, ReferenceTable, ReferenceColumns, cancellationToken);
+        await ValidateTableSchemaAsync(connection, transaction, FenceTable, FenceColumns, cancellationToken);
+
+        command.CommandText = $"""
+            CREATE INDEX IF NOT EXISTS {ReferenceTargetIndex}
+                ON {ReferenceTable} (
+                    relationship_identity, candidate_generation, candidate_fingerprint,
+                    target_scope, target_lookup_key, target_comparison_key);
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+        await ValidateIndexSchemaAsync(
+            connection,
+            transaction,
+            ReferenceTable,
+            ReferenceTargetIndex,
+            ["relationship_identity", "candidate_generation", "candidate_fingerprint", "target_scope", "target_lookup_key", "target_comparison_key"],
+            cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static async Task UpgradeLegacyStateSchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        var actual = await ReadTableSchemaAsync(connection, transaction, StateTable, cancellationToken);
+        var legacy = StateColumns.Where(column => column.Name != "failure_mac").ToArray();
+        if (!actual.SequenceEqual(legacy))
+            return;
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"ALTER TABLE {StateTable} ADD COLUMN failure_mac TEXT NULL;";
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task ValidateTableSchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        IReadOnlyList<SchemaColumn> expected,
+        CancellationToken cancellationToken)
+    {
+        var actual = await ReadTableSchemaAsync(connection, transaction, table, cancellationToken);
+        if (!actual.SequenceEqual(expected))
+        {
+            throw new InvalidOperationException(
+                $"Durable relationship transition table '{table}' does not match its required versioned schema.");
+        }
+    }
+
+    private static async Task<IReadOnlyList<SchemaColumn>> ReadTableSchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        CancellationToken cancellationToken)
+    {
+        var columns = new List<SchemaColumn>();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA table_info('{table}');";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            columns.Add(new(
+                reader.GetString(1),
+                reader.GetString(2).ToUpperInvariant(),
+                reader.GetInt32(3) == 1,
+                reader.GetInt32(5)));
+        }
+
+        return columns;
+    }
+
+    private static async Task ValidateIndexSchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        string index,
+        IReadOnlyList<string> expectedColumns,
+        CancellationToken cancellationToken)
+    {
+        var found = false;
+        await using (var listCommand = connection.CreateCommand())
+        {
+            listCommand.Transaction = transaction;
+            listCommand.CommandText = $"PRAGMA index_list('{table}');";
+            await using var reader = await listCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!string.Equals(reader.GetString(1), index, StringComparison.Ordinal))
+                    continue;
+
+                found = reader.GetInt32(2) == 0 &&
+                        string.Equals(reader.GetString(3), "c", StringComparison.Ordinal) &&
+                        reader.GetInt32(4) == 0;
+                break;
+            }
+        }
+
+        var actualColumns = new List<string>();
+        await using (var infoCommand = connection.CreateCommand())
+        {
+            infoCommand.Transaction = transaction;
+            infoCommand.CommandText = $"PRAGMA index_info('{index}');";
+            await using var reader = await infoCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                actualColumns.Add(reader.GetString(2));
+        }
+
+        if (!found || !actualColumns.SequenceEqual(expectedColumns))
+        {
+            throw new InvalidOperationException(
+                $"Durable relationship transition index '{index}' does not match its required versioned schema.");
+        }
     }
 
     private async Task InsertStateAsync(
@@ -1062,6 +1225,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
     }
 
     private sealed record ActiveGeneration(string GenerationIdentity, string MaterializationFingerprint);
+    private sealed record SchemaColumn(string Name, string Type, bool NotNull, int PrimaryKeyOrder);
     private sealed record TargetKey(string Scope, string LookupKey, string ComparisonKey);
 
     private static class SourceKey
