@@ -53,7 +53,8 @@ public sealed class MongoWinningPlanInspectorTests
     [InlineData("{ 'queryPlanner': { 'winningPlan': { 'stage': 'COLLSCAN' } } }")]
     [InlineData("{ 'queryPlanner': { 'winningPlan': { 'stage': 'IXSCAN', 'indexName': 'wrong_index' } } }")]
     [InlineData("{ 'queryPlanner': { 'winningPlan': { 'stage': 'FETCH' }, 'rejectedPlans': [ { 'stage': 'IXSCAN', 'indexName': 'expected_index' } ] } }")]
-    public void Winning_plan_rejects_collection_scans_wrong_indexes_and_rejected_only_matches(string json)
+    [InlineData("{ 'queryPlanner': { 'winningPlan': { 'stage': 'SORT', 'inputStage': { 'stage': 'IXSCAN', 'indexName': 'expected_index' } } } }")]
+    public void Winning_plan_rejects_collection_scans_blocking_sorts_wrong_indexes_and_rejected_only_matches(string json)
     {
         var exception = Assert.Throws<InvalidOperationException>(() =>
             MongoWinningPlanInspector.EnsureIndexScan(BsonDocument.Parse(json.Replace('\'', '"')), "expected_index"));

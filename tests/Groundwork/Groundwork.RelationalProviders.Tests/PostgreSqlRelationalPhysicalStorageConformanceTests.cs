@@ -1475,7 +1475,8 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             "configurationDocument",
             "list-by-category",
             [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "tools"))],
-            resultOperation: BoundedQueryResultOperation.Count);
+            [new DocumentQueryOrder("category")],
+            take: 1);
         await SeedPlanNoiseAsync(route);
         await AnalyzeRouteAsync(route);
         var runtime = PostgreSqlPhysicalQueryRuntime.Create(store, manifest, route, provider);
@@ -1973,7 +1974,16 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var connection = new NpgsqlConnection(container.GetConnectionString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"ALTER TABLE {Q(table)} DROP COLUMN {Q(comparison)};";
+        var dependentIndexes = route.Indexes
+            .Where(index =>
+                index.Target == (linked
+                    ? ExecutableStorageObjectRole.LinkedIndexStorage
+                    : ExecutableStorageObjectRole.PrimaryStorage) &&
+                index.Columns.Any(column => column.Column.Identifier == comparison))
+            .Select(index => $"DROP INDEX {Q(index.Name.Identifier)}; ");
+        command.CommandText =
+            string.Concat(dependentIndexes) +
+            $"ALTER TABLE {Q(table)} DROP COLUMN {Q(comparison)};";
         await command.ExecuteNonQueryAsync();
     }
 

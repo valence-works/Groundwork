@@ -22,15 +22,26 @@ public sealed class BenchmarkModelFactoryTests
 
         Assert.Equal(form, model.Route.Form);
         Assert.Equal(expectsLinkedStorage, model.Route.LinkedIndexStorage is not null);
+        Assert.Equal(
+            45,
+            model.Route.ProjectedColumns.Single(column => column.Definition.Path == "status").Definition.Length);
         Assert.Collection(
             BenchmarkModelFactory.IndexFor(model.Route, ordered: false).Columns,
             scope => Assert.Equal("storage_scope", scope.Column.LogicalName),
-            status => Assert.Equal(PhysicalSortDirection.Ascending, status.Direction));
+            status => Assert.Equal(PhysicalSortDirection.Ascending, status.Direction),
+            identity => Assert.EndsWith(
+                expectsLinkedStorage ? "document_id_comparison_key" : "id_comparison_key",
+                identity.Column.Identifier,
+                StringComparison.Ordinal));
         Assert.Collection(
             BenchmarkModelFactory.IndexFor(model.Route, ordered: true).Columns,
             scope => Assert.Equal("storage_scope", scope.Column.LogicalName),
             status => Assert.Equal(PhysicalSortDirection.Ascending, status.Direction),
-            rank => Assert.Equal(PhysicalSortDirection.Descending, rank.Direction));
+            rank => Assert.Equal(PhysicalSortDirection.Descending, rank.Direction),
+            identity => Assert.EndsWith(
+                expectsLinkedStorage ? "document_id_comparison_key" : "id_comparison_key",
+                identity.Column.Identifier,
+                StringComparison.Ordinal));
         Assert.Equal(
             [BenchmarkModelFactory.IndexedQueryIdentity, BenchmarkModelFactory.QueryIdentity],
             model.Manifest.StorageUnits.Single().PhysicalStorage!.BoundedQueries.Select(query => query.Identity));
@@ -45,6 +56,21 @@ public sealed class BenchmarkModelFactoryTests
             expectsLinkedStorage ? "document_id_comparison_key" : "id_comparison_key",
             fields.IdentityComparison,
             StringComparison.Ordinal);
+        var selection = new BenchmarkPlanRequest(
+            BenchmarkWorkload.IndexedQuery,
+            NativePlanOperation.Selection,
+            Ordered: false,
+            Skip: null,
+            Take: 20);
+        var count = selection with { Operation = NativePlanOperation.Count };
+        Assert.Equal(
+            [BenchmarkModelFactory.IndexedIndexIdentity],
+            BenchmarkModelFactory.PlanIndexCandidatesFor(model.Route, selection)
+                .Select(index => index.Identity));
+        Assert.Equal(
+            [BenchmarkModelFactory.IndexedIndexIdentity, BenchmarkModelFactory.CompoundIndexIdentity],
+            BenchmarkModelFactory.PlanIndexCandidatesFor(model.Route, count)
+                .Select(index => index.Identity));
     }
 
     [Theory]

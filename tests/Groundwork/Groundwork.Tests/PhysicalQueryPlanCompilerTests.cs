@@ -606,7 +606,8 @@ public sealed class PhysicalQueryPlanCompilerTests
                     logicalIndex.Identity,
                     [
                         new PhysicalIndexColumnDefinition("storage_scope", 0),
-                        new PhysicalIndexColumnDefinition("document_kind", 1)
+                        new PhysicalIndexColumnDefinition("document_kind", 1),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 2)
                     ],
                     target: PhysicalIndexStorageTarget.PrimaryStorage)
             ]);
@@ -855,6 +856,91 @@ public sealed class PhysicalQueryPlanCompilerTests
             ["category", "id_lookup_key"],
             plan.Order.Select(order => order.Field.Identifier));
         Assert.True(plan.Order[^1].IsIdentityTieBreak);
+    }
+
+    [Fact]
+    public void Scale_bearing_ordered_offset_route_rejects_a_physical_index_missing_the_comparison_tie_break()
+    {
+        var fixture = CreateOffsetTieBreakFixture(includeTieBreak: false);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-006" &&
+            diagnostic.Message.Contains(PhysicalDocumentIdentityFieldPaths.Comparison, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Scale_bearing_ordered_offset_route_accepts_the_comparison_tie_break()
+    {
+        var fixture = CreateOffsetTieBreakFixture(includeTieBreak: true);
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)));
+
+        Assert.Equal(PhysicalDocumentIdentityFieldPaths.Comparison, plan.Order[^1].Field.Path);
+        Assert.True(plan.Order[^1].IsIdentityTieBreak);
+    }
+
+    [Fact]
+    public void Scale_bearing_ordered_offset_route_rejects_a_reversed_comparison_tie_break_direction()
+    {
+        var fixture = CreateOffsetTieBreakFixture(
+            includeTieBreak: true,
+            tieBreakDirection: PhysicalSortDirection.Descending);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-006" &&
+            diagnostic.Message.Contains("directions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Scale_bearing_ordered_offset_route_keeps_its_equality_prefix_requirement()
+    {
+        var fixture = CreateOffsetTieBreakFixture(
+            includeTieBreak: true,
+            predicateOperation: PortableQueryOperation.GreaterThan);
+
+        var result = PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Plans);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-QUERY-006" &&
+            diagnostic.Message.Contains("single-value equality", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Scale_bearing_unique_offset_route_uses_the_unique_key_without_an_identity_tail()
+    {
+        var fixture = CreateOffsetTieBreakFixture(includeTieBreak: false, isUnique: true);
+
+        var plan = AssertPlan(PhysicalQueryPlanCompiler.Compile(
+            fixture.Route,
+            fixture.Storage,
+            Capabilities(PhysicalQuerySourceKind.PrimaryProjectedColumns)));
+
+        Assert.DoesNotContain(plan.Order, order => order.Path == PhysicalDocumentFieldPaths.Id);
+        Assert.DoesNotContain(
+            Assert.Single(fixture.Route.Indexes).Columns,
+            column => column.Column.LogicalName == "id_comparison_key");
     }
 
     [Fact]
@@ -2356,9 +2442,9 @@ public sealed class PhysicalQueryPlanCompilerTests
         Assert.Equal(
             new[]
             {
-                "8fb5514ab47436ccd86c257d9c0ab5d3d68a476bc66cc816a8117078347ce94c",
-                "3a88aa5cb812e34ee9766c232e1925045ad288060a5bf5711f75824247b2a195",
-                "12d64e6eea56a5f5e763f459084fefb3b39bf7ae874685e4d8f10a01ca3d8a26"
+                "8f457d1772399abb094517c06321b8e45fb9349aa5da3d3a83db76f78a1d7137",
+                "ace0a876a8f749e9c3c7e6b667645aae919ea58e4f30a3dba090de86d35a9bc3",
+                "2aa9826fc204b0fc4b6762a3ed32e2f8211169d80273673eeabe9a6a8e8f5879"
             },
             fingerprints);
     }
@@ -3752,7 +3838,8 @@ public sealed class PhysicalQueryPlanCompilerTests
                         categoryIndex.Identity,
                         [
                             new PhysicalIndexColumnDefinition("storage_scope", 0),
-                            new PhysicalIndexColumnDefinition("category", 1)
+                            new PhysicalIndexColumnDefinition("category", 1),
+                            new PhysicalIndexColumnDefinition("id_comparison_key", 2)
                         ])
                 ])),
             [categoryIndex],
@@ -4580,10 +4667,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [
                 new PhysicalIndexDefinition(
                     logicalIndex.Identity,
-                    [
-                        new PhysicalIndexColumnDefinition("storage_scope", 0),
-                        new PhysicalIndexColumnDefinition("stimulusType", 1)
-                    ])
+                    ScopedStimulusTypeIndexColumns(query))
             ]);
         var storage = new StorageUnitPhysicalStorage(
             StorageUnitProvisioningMode.Declared,
@@ -4617,10 +4701,7 @@ public sealed class PhysicalQueryPlanCompilerTests
                 [
                     new PhysicalIndexDefinition(
                         logicalIndex.Identity,
-                        [
-                            new PhysicalIndexColumnDefinition("storage_scope", 0),
-                            new PhysicalIndexColumnDefinition("stimulusType", 1)
-                        ])
+                        ScopedStimulusTypeIndexColumns(query))
                 ],
                 linkedProjectionLogicalName: "workflow_trigger_binding_index"),
             PhysicalStorageForm.DedicatedDocumentTable when query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing =>
@@ -4630,10 +4711,7 @@ public sealed class PhysicalQueryPlanCompilerTests
                     [
                         new PhysicalIndexDefinition(
                             logicalIndex.Identity,
-                            [
-                                new PhysicalIndexColumnDefinition("storage_scope", 0),
-                                new PhysicalIndexColumnDefinition("stimulusType", 1)
-                            ])
+                            ScopedStimulusTypeIndexColumns(query))
                     ],
                     linkedProjectedColumns:
                     [new ProjectedColumnDefinition("stimulusType", "stimulusType", PortablePhysicalType.String)],
@@ -4648,6 +4726,120 @@ public sealed class PhysicalQueryPlanCompilerTests
             [logicalIndex],
             [query]);
         return Resolve(storage, form == PhysicalStorageForm.SharedDocuments ? binding : null);
+    }
+
+    private static PlanningFixture CreateOffsetTieBreakFixture(
+        bool includeTieBreak,
+        PhysicalSortDirection tieBreakDirection = PhysicalSortDirection.Ascending,
+        PortableQueryOperation predicateOperation = PortableQueryOperation.Equal,
+        bool isUnique = false)
+    {
+        var logicalIndex = new LogicalIndexDeclaration(
+            "by-category-rank",
+            [new IndexField("category"), new IndexField("rank", IndexValueKind.Number)],
+            IndexValueKind.Keyword,
+            isUnique,
+            MissingValueBehavior.Excluded);
+        var columns = new List<PhysicalIndexColumnDefinition>
+        {
+            new("storage_scope", 0),
+            new("category", 1, PhysicalSortDirection.Ascending),
+            new("rank", 2, PhysicalSortDirection.Ascending)
+        };
+        if (!isUnique)
+            columns.Add(new("id_comparison_key", 3, PhysicalSortDirection.Ascending));
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "ordered_documents",
+            [
+                new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String),
+                new ProjectedColumnDefinition("rank", "rank", PortablePhysicalType.Decimal, Precision: 18, Scale: 4)
+            ],
+            indexes: [new PhysicalIndexDefinition(logicalIndex.Identity, columns, isUnique)]);
+        BoundedQueryDeclaration Query(PortableQueryOperation operation) => new(
+            "list-by-category-rank",
+            logicalIndex.Identity,
+            new HashSet<PortableQueryOperation> { operation },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField("rank", PhysicalSortDirection.Ascending)],
+            predicateFields:
+            [
+                new BoundedQueryPredicateField(
+                    "category",
+                    new HashSet<PortableQueryOperation> { operation })
+            ]);
+        var admittedQuery = Query(PortableQueryOperation.Equal);
+        var query = predicateOperation == PortableQueryOperation.Equal
+            ? admittedQuery
+            : Query(predicateOperation);
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [logicalIndex],
+            [admittedQuery]);
+        var fixture = Resolve(physicalStorage, null);
+        var routeColumns = fixture.Route.Indexes.Single().Columns
+            .Where(column => includeTieBreak ||
+                column.Column.LogicalName != "id_comparison_key")
+            .Select(column => column.Column.LogicalName == "id_comparison_key"
+                ? column with { Direction = tieBreakDirection }
+                : column)
+            .ToArray();
+        return new PlanningFixture(
+            ReplacePhysicalIndexColumns(fixture.Route, routeColumns),
+            query == admittedQuery
+                ? fixture.Storage
+                : new StorageUnitPhysicalStorage(
+                    fixture.Storage.ProvisioningMode,
+                    fixture.Storage.Policy,
+                    fixture.Storage.LogicalIndexes,
+                    [query]));
+    }
+
+    private static ExecutableStorageRoute ReplacePhysicalIndexColumns(
+        ExecutableStorageRoute route,
+        IReadOnlyList<ExecutableIndexColumnRoute> columns)
+    {
+        var index = Assert.Single(route.Indexes);
+        var definition = new PhysicalIndexDefinition(
+            index.Definition.LogicalName,
+            columns.Select(column => new PhysicalIndexColumnDefinition(
+                column.Column.LogicalName,
+                column.Order,
+                column.Direction)).ToArray(),
+            index.Definition.IsUnique,
+            index.Definition.SchemaVersion,
+            index.Definition.Evolution,
+            index.Definition.Target,
+            index.Definition.MissingValueBehavior);
+        var replacement = new ExecutablePhysicalIndexRoute(
+            definition,
+            index.Name,
+            index.Target,
+            columns);
+        return new ExecutableStorageRoute(
+            route.StorageUnit,
+            route.ProvisioningMode,
+            route.Form,
+            route.SharedStorage,
+            route.ScopePolicy,
+            route.PrimaryStorage,
+            route.LinkedIndexStorage,
+            route.Envelope,
+            route.LinkedRelationship,
+            route.Discriminator,
+            route.ScopeKey,
+            route.PrimaryKey,
+            route.AuxiliaryKey,
+            route.ProjectedColumns,
+            route.CollectionElementStorages,
+            route.Indexes.Select(candidate => candidate.Identity == index.Identity ? replacement : candidate).ToArray(),
+            route.MaintenanceRoutes,
+            route.CandidateQueryPaths,
+            route.CapabilityRequirements,
+            route.DefinitionFingerprint,
+            route.Fingerprint);
     }
 
     private static PlanningFixture CreateIntrinsicMutationFixture(
@@ -4802,11 +4994,13 @@ public sealed class PhysicalQueryPlanCompilerTests
                 index + 1,
                 query.SortFields.SingleOrDefault(sort => sort.Path == field.Path)?.Direction
                 ?? PhysicalSortDirection.Ascending)));
-        if (query.PagingSupport == QueryPagingSupport.Cursor &&
+        if (query.PagingSupport is QueryPagingSupport.Cursor or QueryPagingSupport.Offset &&
             logicalIndex.Fields.All(field => field.Path != PhysicalDocumentFieldPaths.Id))
         {
             columns.Add(new PhysicalIndexColumnDefinition(
-                new DocumentEnvelopeDefinition().IdLookupKeyColumn,
+                query.PagingSupport == QueryPagingSupport.Cursor
+                    ? new DocumentEnvelopeDefinition().IdLookupKeyColumn
+                    : new DocumentEnvelopeDefinition().IdComparisonKeyColumn,
                 columns.Count));
         }
         var definition = PhysicalTableDefinition.PhysicalEntityTable(
@@ -5381,6 +5575,25 @@ public sealed class PhysicalQueryPlanCompilerTests
             predicateFields,
             resultOperations,
             latestPerKeyPath);
+
+    private static IReadOnlyList<PhysicalIndexColumnDefinition> ScopedStimulusTypeIndexColumns(
+        BoundedQueryDeclaration query)
+    {
+        var columns = new List<PhysicalIndexColumnDefinition>
+        {
+            new("storage_scope", 0),
+            new("stimulusType", 1)
+        };
+        if (query.PagingSupport is QueryPagingSupport.Cursor or QueryPagingSupport.Offset)
+        {
+            columns.Add(new PhysicalIndexColumnDefinition(
+                query.PagingSupport == QueryPagingSupport.Cursor
+                    ? "id_lookup_key"
+                    : "id_comparison_key",
+                columns.Count));
+        }
+        return columns;
+    }
 
     private static IReadOnlySet<PortableQueryOperation> ScalarQueryOperations() =>
         Enum.GetValues<PortableQueryOperation>()

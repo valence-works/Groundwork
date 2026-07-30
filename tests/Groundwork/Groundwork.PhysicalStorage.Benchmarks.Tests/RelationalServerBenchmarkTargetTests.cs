@@ -125,6 +125,20 @@ public sealed class RelationalServerBenchmarkTargetTests(
             "document_lookup"));
     }
 
+    [Fact]
+    public void PostgreSql_count_plan_gate_records_one_compatible_declared_index()
+    {
+        const string plan =
+            """[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"document_lookup","Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"by_status_rank"}]}}]""";
+
+        var selected = PostgreSqlBenchmarkTarget.SelectDeclaredIndexWithoutScanningIndexedRelation(
+            plan,
+            ["by_status", "by_status_rank"],
+            "document_lookup");
+
+        Assert.Equal("by_status_rank", selected);
+    }
+
     [Theory]
     [InlineData(
         """[{"Plan":{"Node Type":"Seq Scan","Relation Name":"document_lookup","Plans":[{"Node Type":"Index Scan","Relation Name":"other","Index Name":"by_status"}]}}]""")]

@@ -378,7 +378,8 @@ public sealed class PhysicalTableDefinitionTests
                     "by-category",
                     [
                         new PhysicalIndexColumnDefinition("storage_scope", 0),
-                        new PhysicalIndexColumnDefinition("category", 1)
+                        new PhysicalIndexColumnDefinition("category", 1),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 2)
                     ])
             ],
             linkedProjectedColumns:

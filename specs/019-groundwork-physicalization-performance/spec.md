@@ -83,6 +83,33 @@ verify the exact recovered state through a new process.
    recovered-state digest is altered without the caller's out-of-band exact-file digest changing,
    **Then** evidence verification rejects it.
 
+### User Story 5 - Certify The Complete Stable Query Order (Priority: P1)
+
+A persistence designer can trust a scale-bearing physical index certification to cover the complete
+provider-applied order, including Groundwork's mandatory identity tie-break, rather than only the
+caller-declared prefix.
+
+**Why this priority**: Issue #50 cannot use native plans or timings from a query that Groundwork
+certified as index-backed while the provider still performs a blocking sort.
+
+**Independent Test**: Compile ordered and unordered offset-paged benchmark queries, prove that
+indexes without the comparison-key tail fail admission, and run the real MongoDB benchmark plan
+gate across all three physical forms.
+
+**Acceptance Scenarios**:
+
+1. **Given** a scale-bearing offset query whose non-unique logical index omits document identity,
+   **When** Groundwork resolves or validates its physical index, **Then** the required comparison-key
+   identity tail is included in the exact index shape.
+2. **Given** an ordered offset query whose physical index covers only the declared predicate and
+   sort fields, **When** query-plan compilation runs, **Then** certification fails before provider
+   traffic because the runtime identity tie-break is not index-backed.
+3. **Given** the benchmark's ordered MongoDB query on any supported physical form, **When** strict
+   native-plan capture runs, **Then** the winning plan uses the declared compound index and contains
+   neither a collection scan nor a blocking sort.
+4. **Given** a unique logical key, **When** Groundwork certifies its stable order, **Then** the unique
+   business key remains the total order and no identity tail weakens its uniqueness constraint.
+
 ### Edge Cases
 
 - Optimized storage units with no eligible single-field indexes fall back to portable behavior.
@@ -116,6 +143,14 @@ verify the exact recovered state through a new process.
   connection values or credentials. Exact-file SHA-256 retention MUST remain outside the evidence.
 - **FR-015**: This SQLite slice MUST remain non-promotable and MUST NOT claim four-provider recovery,
   immutable-baseline approval, form selection, or an Elsa performance verdict.
+- **FR-016**: Scale-bearing physical index resolution and admission MUST certify the complete
+  provider-applied stable order, including the comparison-key identity tie-break for offset paging
+  and the lookup-key identity tie-break for cursor paging when the declared logical key is not
+  already unique.
+- **FR-017**: The benchmark's indexed and ordered physical forms MUST include the exact identity
+  tail required by the runtime order on all three physical storage forms.
+- **FR-018**: The strict MongoDB native-plan gate MUST reject a winning collection scan or blocking
+  sort even when the expected index also appears in the winning-plan subtree.
 
 ### Key Entities
 
@@ -137,10 +172,15 @@ verify the exact recovered state through a new process.
   bounds.
 - **SC-006**: Contract tests reject tampered, incomplete, timed-out, or same-process recovery
   evidence.
+- **SC-007**: Core tests reject an offset-query index without the runtime comparison-key tail and
+  accept the exact corrected shape, while preserving a unique logical key without an identity tail.
+- **SC-008**: A real MongoDB-backed benchmark test proves the ordered strict plan gate across shared
+  documents, dedicated document table, and physical entity table forms.
 
 ## Assumptions
 
-- G7 optimizes declared single-field equality indexes first; compound indexes and sort-specific optimization are deferred.
+- The original G7 slice optimized declared single-field equality indexes first. Issue #50's
+  benchmark amendment now also owns the bounded compound-index shapes exercised by its harness.
 - SQLite counts as the relational provider proof for G7 because the relational document store is shared by SQLite, SQL Server, and PostgreSQL.
 - Optimized physicalization remains opt-in; runtime-defined entities continue to default to portable document storage.
 - G7 proves correctness of optimized paths and exposes enough plan evidence for future benchmarking; deeper benchmark harnesses remain part of G8 hardening.

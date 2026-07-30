@@ -56,7 +56,7 @@ public sealed class SqlServerBenchmarkTarget(
         var evidence = new List<NativePlanEvidence>(requests.Count);
         foreach (var request in requests)
         {
-            var indexName = BenchmarkModelFactory.IndexFor(Model.Route, request.Ordered).Name.Identifier;
+            var expectedIndexName = BenchmarkModelFactory.IndexFor(Model.Route, request.Ordered).Name.Identifier;
             var rendered = RenderPlan(request, store);
             await using var command = connection.CreateCommand();
             command.CommandText = $"SET STATISTICS XML ON; {rendered.CommandText} SET STATISTICS XML OFF;";
@@ -67,11 +67,16 @@ public sealed class SqlServerBenchmarkTarget(
             var plan = plans.SingleOrDefault() ?? throw new InvalidOperationException(
                 $"SQL Server returned no native XML plan for {request.Workload}/{request.Operation}.");
             var physicalObject = (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier;
-            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
-                !UsesDeclaredIndex(plan, indexName, physicalObject))
+            var indexName = expectedIndexName;
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
             {
-                throw new InvalidOperationException(
-                    $"SQL Server native-plan gate rejected {request.Workload}/{request.Operation}.");
+                var candidates = BenchmarkModelFactory.PlanIndexCandidatesFor(Model.Route, request)
+                    .Select(index => index.Name.Identifier)
+                    .ToArray();
+                indexName = SqlServerShowplanReader.SelectScaleBearingIndex(
+                    plan,
+                    candidates,
+                    physicalObject);
             }
             var queryReceipt = NativePlanQueryReceipt.FromRelational(
                 request,

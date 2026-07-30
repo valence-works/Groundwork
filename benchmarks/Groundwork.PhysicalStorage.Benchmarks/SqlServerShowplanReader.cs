@@ -57,6 +57,17 @@ internal static class SqlServerShowplanReader
         string physicalObject)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(indexName);
+        _ = SelectScaleBearingIndex(value, [indexName], physicalObject);
+    }
+
+    public static string SelectScaleBearingIndex(
+        string value,
+        IReadOnlyCollection<string> indexNames,
+        string physicalObject)
+    {
+        ArgumentNullException.ThrowIfNull(indexNames);
+        if (indexNames.Count == 0 || indexNames.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("At least one non-empty index name is required.", nameof(indexNames));
         ArgumentException.ThrowIfNullOrWhiteSpace(physicalObject);
         var document = Parse(value);
         var operators = document
@@ -71,18 +82,26 @@ internal static class SqlServerShowplanReader
         };
         var hasForbiddenScan = operators.Any(element =>
             forbiddenScans.Contains(element.Attribute("PhysicalOp")?.Value ?? string.Empty));
-        var usesDeclaredIndex = operators.Any(element =>
-            string.Equals(element.Attribute("PhysicalOp")?.Value, "Index Seek", StringComparison.OrdinalIgnoreCase) &&
-            element.Descendants().Any(candidate =>
-                candidate.Name.LocalName == "Object" &&
-                IsIndex(candidate.Attribute("Index")?.Value, indexName) &&
-                IsIdentifier(candidate.Attribute("Table")?.Value, physicalObject)));
-        if (!usesDeclaredIndex || hasForbiddenScan)
+        var selected = indexNames
+            .Where(indexName => operators.Any(element =>
+                string.Equals(
+                    element.Attribute("PhysicalOp")?.Value,
+                    "Index Seek",
+                    StringComparison.OrdinalIgnoreCase) &&
+                element.Descendants().Any(candidate =>
+                    candidate.Name.LocalName == "Object" &&
+                    IsIndex(candidate.Attribute("Index")?.Value, indexName) &&
+                    IsIdentifier(candidate.Attribute("Table")?.Value, physicalObject))))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (selected.Length != 1 || hasForbiddenScan)
         {
             throw new InvalidOperationException(
-                $"SQL Server native-plan gate rejected the scale-bearing query. Expected an Index Seek on '{indexName}'. " +
+                "SQL Server native-plan gate rejected the scale-bearing query. " +
+                $"Expected exactly one compatible Index Seek from [{string.Join(", ", indexNames)}]. " +
                 DescribeAccessPaths(document));
         }
+        return selected[0];
     }
 
     internal static string RetainSafeStructure(
