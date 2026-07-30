@@ -9,13 +9,15 @@ scheduled gating.
 
 Generations are append-only. A successor retains its predecessor, names it through
 `supersedesGenerationId`, and changes separate explicit activation records. A previous-to-candidate
-transition rejects deleted, mutated, or reordered history; cycles/forward references; and active
-activation removal or replacement without exact supersession. A compatibility tuple may have at
-most one active generation. Selection fails closed if the source, fixed input profile, provider image/version/
-effective-settings identity, machine fingerprint, content digests, or tuple set drift; it also
-fails when evidence is incomplete or the review/hosted-check prerequisites are absent. Required
-correctness, result, native-plan, and synchronized-contention maps each name a canonical retained
-artifact; selection verifies both the artifact SHA-256 and its parsed map contents.
+transition rejects deleted, mutated, or reordered history and cycles/forward references. Once an
+exact tuple is active, its activation cannot be removed or staged through a deactivated registry;
+replacement must occur in one transition and the successor must explicitly supersede the previously
+active generation. A compatibility tuple may have at most one active generation. Selection fails
+closed if the source, fixed input profile, provider image/version/effective-settings identity,
+machine fingerprint, content digests, or tuple set drift; it also fails when evidence is incomplete
+or the review/hosted-check prerequisites are absent. Required correctness, result, native-plan, and
+synchronized-contention maps each name a canonical retained artifact; selection verifies both the
+artifact SHA-256 and its parsed map contents.
 
 The registry is intentionally empty (`no-active-generations`). Do not add synthetic
 numbers, smoke results, or partial scheduled results. Before activation, issue #50 must execute the
