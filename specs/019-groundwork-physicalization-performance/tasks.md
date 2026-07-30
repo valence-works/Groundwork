@@ -45,8 +45,8 @@
 
 ## Phase 7: Complete Stable-Order Certification
 
-- [x] T026 Reproduce the MongoDB ordered-query strict native-plan failure on current main and retain the exact mechanism without timing claims. — Evidence: the current-main runner failed before timing because MongoDB selected `by-status` plus a blocking `SORT`; the retained checkpoint records the exact source/provider/form and makes no performance claim.
+- [x] T026 Reproduce the MongoDB ordered-query strict native-plan failure on current main and retain the exact mechanism without timing claims. — Evidence: `evidence/stable-order-reproduction.md` binds the clean base SHA, MongoDB 7.0.24, shared form, exact canonical invocation, redacted winning/rejected plan shapes, and pre-timing failure disposition.
 - [x] T027 Require scale-bearing offset-query physical indexes to include and validate the runtime comparison-key identity tail while preserving cursor lookup-key semantics. — Evidence: shared core admission now requires the comparison tail for nonunique offset routes, the lookup tail for nonunique cursor routes, preserves already-total unique keys, and rejects incompatible shared tail shapes.
 - [x] T028 Correct both benchmark indexes and harden the strict MongoDB winning-plan gate against blocking sorts. — Evidence: both ordered benchmark indexes carry the certified identity tail, MongoDB execution and explain bind the declared physical index, and the strict inspector rejects every winning-plan `SORT`.
-- [x] T029 Add core, model, inspector, and real MongoDB all-form regression coverage. — Evidence: compiler/resolver/serializer, provider-model, hinting, strict-inspector, uniqueness, shared-index, and real four-form MongoDB regressions cover the certified mechanism.
+- [x] T029 Add core, model, inspector, and real MongoDB all-form regression coverage. — Evidence: compiler/resolver/serializer, provider-model, hinting, strict-inspector, uniqueness, shared-index, and real three-form MongoDB regressions cover the certified mechanism.
 - [ ] T030 Run focused/container-free/full relevant gates and record exact-range adversarial review verdicts and nonclaims in the quickstart.

@@ -234,7 +234,10 @@ This checkpoint starts from Groundwork main
 `c48b5a1d04c2664211af1f14d403e3f0391846ca`. It closes the false-certification gap that allowed an
 ordered MongoDB benchmark query to pass core index admission while the provider selected
 `by-status` and performed a blocking `SORT`. The failure was reproduced on that exact base before
-timing began; no latency or throughput sample from the failed route was retained or trusted.
+timing began; no latency or throughput sample from the failed route was retained or trusted. The
+[redacted reproduction record](evidence/stable-order-reproduction.md) binds MongoDB 7.0.24, the
+shared form, exact canonical invocation, workload inputs, and winning/rejected plan shapes without
+retaining connection, container, database, host, or generated physical-name values.
 
 The certified mechanism is:
 
@@ -253,14 +256,19 @@ The certified mechanism is:
 Candidate verification:
 
 - 631/631 Groundwork core tests passed.
-- 556/556 MongoDB provider tests passed before the final provider-neutral shared-index
-  compatibility refinement; the final source was then rechecked with all 121/121
-  `MongoDbPhysicalStorageConformanceTests` cases and the real ordered all-form benchmark test.
+- 556/556 MongoDB provider tests passed in 27m39s on the frozen production candidate; the focused
+  final-source check also passed all 121/121 `MongoDbPhysicalStorageConformanceTests` cases.
 - 590/590 SQLite provider tests passed.
-- 802/802 PostgreSQL and SQL Server provider tests passed in 6m33s.
-- 361/361 container-free benchmark-harness tests passed.
-- The real MongoDB ordered-plan regression passed across every physical storage form and retained
-  two strict plan artifacts per case.
+- The final PostgreSQL and SQL Server inventory passed as 801/801 suite cases plus the one
+  scheduler-sensitive diagnostic case in isolation. The unfiltered full invocation executed all
+  802 cases but raced that unrelated test's 20ms diagnostic deadline at suite startup; it passed
+  immediately in isolation in 5ms. The review-remediated ordered/identity subset passed 16/16 across
+  both providers and every physical form.
+- 361/361 container-free benchmark-harness tests passed with
+  `--filter "FullyQualifiedName!~MongoDbBenchmarkSignalEvidenceTests&FullyQualifiedName!~RelationalServerBenchmarkTargetTests"`.
+- The real MongoDB ordered-plan regression passed across all three physical storage forms and
+  emitted and validated two temporary strict plan artifacts per case; fixture disposal then removed
+  the temporary output.
 - `dotnet build Groundwork.slnx --no-restore` passed with zero errors. The existing
   `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisory remains visible rather than suppressed.
 - Targeted `dotnet format --verify-no-changes` passed for every changed C# file, and
