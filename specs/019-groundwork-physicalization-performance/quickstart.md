@@ -279,3 +279,47 @@ Candidate verification:
 This checkpoint does **not** execute or approve the scheduled 1K/100K/1M four-provider matrix,
 promote an immutable baseline, select a final physical form, produce an Elsa performance verdict,
 or close issue #50. Those claims remain gated by the controlled matrix and baseline review.
+
+### Stable-order exact-range review
+
+Three independent adversarial reviewers inspected the complete source candidate
+`c48b5a1d04c2664211af1f14d403e3f0391846ca..dad91794279d2a08fad3251957e8bff84f7ea158`
+read-only:
+
+- Correctness/mechanism: PASS. The reviewer traced compiler, resolver, serializer, provider
+  execution, native-plan inspection, and the remediated relational fixtures; independently rerun
+  subsets passed 309/309 core cases and 12/12 container-free benchmark model/inspector cases.
+- Evidence integrity/security: PASS. The redacted base reproduction binds the exact provider,
+  version, form, command, pre-timing failure, and plan mechanism without connection or generated
+  physical names. The reviewer independently reran the documented benchmark filter: 361/361
+  passed.
+- Scope/test preservation: PASS. The final range removes no tests and changes no package, project,
+  workflow, or Docker files. Both server fixtures retain the compound ordered route and Unicode
+  offset identity coverage across all forms.
+
+The required Luna reviewer model was unavailable; all three reviews used GPT-5.6 Terra High as the
+documented fallback.
+
+Confirmed findings and dispositions:
+
+- HIGH: the initial candidate removed the ordinary PostgreSQL and SQL Server compound-index
+  fixture and changed the Unicode identity fixture from offset paging to nonpaged. Disposition:
+  restore both fixture shapes, make the explain probe execute the ordered page, and drop dependent
+  route indexes before corrupting comparison evidence. The focused remediated server subset passed
+  16/16.
+- HIGH: T026 initially lacked durable provider/version/form/command/failure provenance.
+  Disposition: add `evidence/stable-order-reproduction.md` with the exact clean base reproduction,
+  redacted plan mechanism, and explicit pre-timing nonclaims.
+- HIGH: the quickstart initially called fixture-disposed plan artifacts retained evidence.
+  Disposition: state precisely that the tests emitted and validated temporary artifacts before
+  fixture disposal removed them.
+- MEDIUM: T029 initially called the storage set four-form. Disposition: correct it to the actual
+  three-form set.
+- WITHDRAWN: a re-review initially inferred that the documented benchmark filter selected 357
+  tests from `--list-tests`. Direct execution of that exact filter passed 361/361; the reviewer
+  reproduced the execution and withdrew the finding as a parameterized-discovery accounting
+  discrepancy.
+
+This review record and the T030 evidence link are the only changes after `dad91794279d2a08fad3251957e8bff84f7ea158`.
+Before merge, the same three axes re-verify the resulting record-only head so the durable account
+and PR candidate cannot diverge.
