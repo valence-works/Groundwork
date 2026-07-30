@@ -129,9 +129,9 @@ available only for diagnostic comparison and can never satisfy scheduled gating.
 
 Baseline generations are append-only. A successor supersedes an earlier generation by adding a
 new record; it does not rewrite the predecessor. A previous-to-candidate transition rejects
-deleted/mutated/reordered history and cyclic, forward, or implicit replacement. Activation is a
-separate explicit record, and at most one generation may be active for an exact compatibility
-tuple. Activation and selection fail closed
+deleted/mutated/reordered history; cyclic or forward supersession; and activation removal or
+implicit replacement. Activation is a separate explicit record, and at most one generation may be
+active for an exact compatibility tuple. Activation and selection fail closed
 on content drift, incomplete evidence, source/profile/provider/machine incompatibility, an
 unreviewed generation, or a missing/duplicate tuple.
 
@@ -179,8 +179,9 @@ executes a matrix nor selects a physical form or performance verdict.
 - **FR-019**: Promotable scheduled baseline selection MUST resolve exclusively through a committed,
   versioned registry generation approved by a reviewed Groundwork merge commit on `main` and bound
   to immutable run-group and artifact content digests.
-- **FR-020**: Registry generations MUST be append-only and structurally immutable, activation MUST
-  be separate and explicit, and selection MUST fail closed unless exactly one trusted activation
+- **FR-020**: Registry generations MUST be append-only and structurally immutable; activation MUST
+  be separate, explicit, and non-removable; replacement MUST name the previously active generation
+  as its exact predecessor; and selection MUST fail closed unless exactly one trusted activation
   exists for the requested exact compatibility tuple.
 - **FR-021**: Baseline activation MUST reject incomplete or drifting evidence and require the
   complete closed exact-HEAD tuple set, clean source, fixed inputs, reproducible provider and

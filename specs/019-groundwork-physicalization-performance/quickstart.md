@@ -363,8 +363,8 @@ artifact paths remain diagnostic-only and cannot make a scheduled comparison pro
 
 The registry model retains immutable append-only generations, explicit supersession, and separate
 activation records. Previous-to-candidate validation rejects deleted, mutated, or reordered
-history; forward/cyclic supersession; and replacement of an active exact tuple without explicit
-supersession. A tuple has at most one activation. Activation and selection reject untrusted
+history; forward/cyclic supersession; removal of an active exact tuple; and replacement without
+explicit supersession. A tuple has at most one activation. Activation and selection reject untrusted
 authority, content drift, malformed paths/digests, duplicate active tuples, incomplete closed-
 matrix evidence, dirty or incompatible source, unavailable provider or machine identity, missing
 raw/summary/correctness/result/plan/synchronized-contention/recovery digests, or missing three-
@@ -375,11 +375,12 @@ contents, and every mapped digest must identify separately retained artifact con
 Final container-free verification:
 
 - `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --no-restore --filter 'FullyQualifiedName~BaselineRegistryTests|FullyQualifiedName~BenchmarkSchemaTests'`
-  passed 46/46. This includes artifact-byte drift, a byte-verified canonical map that disagrees
+  passed 47/47. This includes artifact-byte drift, a byte-verified canonical map that disagrees
   with its registry claim, missing artifact binding, independent trust, exact-HEAD authority,
-  append-only transition, supersession, activation, and truthful-empty-registry cases.
+  append-only transition, staged-deactivation rejection, supersession, activation, and
+  truthful-empty-registry cases.
 - `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName!~MongoDbBenchmarkSignalEvidenceTests&FullyQualifiedName!~RelationalServerBenchmarkTargetTests&FullyQualifiedName!~SqliteProcessFailureRecoveryTests&FullyQualifiedName!~BenchmarkSubprocessCoordinatorTests'`
-  passed 356/356. The two provider-backed classes and two process-lifecycle/deadline classes are
+  passed 357/357. The two provider-backed classes and two process-lifecycle/deadline classes are
   excluded explicitly; no database-server container or provider suite ran.
 - A broader attempt excluding the provider-backed classes but retaining the SQLite
   process-failure inventory encountered repeated pre-existing `TaskCanceledException` deadlines

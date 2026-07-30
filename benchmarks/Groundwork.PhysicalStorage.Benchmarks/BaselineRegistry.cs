@@ -410,7 +410,11 @@ public static class BaselineRegistryTransitionValidator
         foreach (var (tuple, priorActivation) in priorActivations)
         {
             if (!candidateActivations.TryGetValue(tuple, out var candidateActivation))
+            {
+                diagnostics.Add(
+                    $"Activation for '{tuple}' cannot be removed; replacement must explicitly supersede generation '{priorActivation.GenerationId}'.");
                 continue;
+            }
             if (candidateActivation.GenerationId.Equals(priorActivation.GenerationId, StringComparison.Ordinal))
                 continue;
             var replacement = candidate.Generations.Single(generation =>

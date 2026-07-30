@@ -478,7 +478,8 @@ non-decision smoke remained green.
 - Exercise the target-scoped provider database-work signals and sealed concurrent-create evidence
   under controlled live evidence for all providers. The current observable client signals do not
   by themselves close the provider-work acceptance item.
-- Define, approve, integrity-protect, and exercise the immutable-baseline workflow.
+- Operationalize the reviewed-main approval trust input, execute the controlled matrix, populate
+  and activate eligible append-only registry generations, and exercise committed selection.
 - Extend the bounded SQLite process-failure slice to the remaining providers and any additional
   ratified crash/failure modes required for issue #50. The current slice is real process
   termination evidence, but it is deliberately non-promotable and does not close that acceptance

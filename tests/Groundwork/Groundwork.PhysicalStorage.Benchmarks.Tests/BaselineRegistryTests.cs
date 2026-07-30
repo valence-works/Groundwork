@@ -316,6 +316,21 @@ public sealed class BaselineRegistryTests
         Assert.Contains("must explicitly supersede", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Transition_rejects_staged_deactivation_that_would_bypass_supersession()
+    {
+        using var fixture = new ArtifactFixture();
+        var initial = Generation(fixture, "generation-1", ApprovalCommit);
+        var previous = Registry(initial);
+        var deactivated = previous with { Activations = [] };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            BaselineRegistryTransitionValidator.Validate(previous, deactivated, Trust()));
+
+        Assert.Contains("cannot be removed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("must explicitly supersede", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static BaselineSelection Select(BaselineRegistry registry, ArtifactFixture fixture) =>
         BaselineRegistrySelector.Select(
             registry,

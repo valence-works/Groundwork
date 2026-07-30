@@ -10,8 +10,8 @@ scheduled gating.
 Generations are append-only. A successor retains its predecessor, names it through
 `supersedesGenerationId`, and changes separate explicit activation records. A previous-to-candidate
 transition rejects deleted, mutated, or reordered history; cycles/forward references; and active
-overlap replacement without exact supersession. A compatibility tuple may have at most one active
-generation. Selection fails closed if the source, fixed input profile, provider image/version/
+activation removal or replacement without exact supersession. A compatibility tuple may have at
+most one active generation. Selection fails closed if the source, fixed input profile, provider image/version/
 effective-settings identity, machine fingerprint, content digests, or tuple set drift; it also
 fails when evidence is incomplete or the review/hosted-check prerequisites are absent. Required
 correctness, result, native-plan, and synchronized-contention maps each name a canonical retained
