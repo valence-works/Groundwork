@@ -1,4 +1,7 @@
+using System.Buffers.Binary;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Text;
@@ -16,6 +19,10 @@ internal sealed class SqliteRelationshipTransitionExecutor
     private const string ActiveTable = "groundwork_relationship_active_v1";
     private const string ReferenceTable = "groundwork_relationship_reference_sidecar_v1";
     private const string FenceTable = "groundwork_relationship_target_fence_v1";
+    private const string CandidateInputDigestScheme = "hmac-sha256-v1:";
+    private const string CandidateInputDigestDomain =
+        "groundwork.relationship-materialization.sqlite-transition-input.hmac-sha256.v1";
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     private readonly string connectionString;
     private readonly PhysicalRelationshipPlan plan;
@@ -68,9 +75,10 @@ internal sealed class SqliteRelationshipTransitionExecutor
         options ??= SqliteRelationshipTransitionTestOptions.None;
         var sources = NormalizeSources(sourceRecords);
         var targets = NormalizeTargets(targetRecords);
+        var candidateInputDigest = CreateCandidateInputDigest(sources, targets);
 
         await EnsureInfrastructureAsync(cancellationToken);
-        var initial = await EnsureCandidateAsync(cancellationToken);
+        var initial = await EnsureCandidateAsync(candidateInputDigest, cancellationToken);
         if (initial is not null)
             return initial;
 
@@ -79,16 +87,16 @@ internal sealed class SqliteRelationshipTransitionExecutor
             if (options.CancelAfterProcessedSourceCount is int cancellationPoint && index >= cancellationPoint)
                 throw new OperationCanceledException("Injected test-only relationship transition cancellation.", cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            var result = await BackfillOneAsync(index, sources[index], targets, cancellationToken);
+            var result = await BackfillOneAsync(index, sources[index], targets, candidateInputDigest, cancellationToken);
             if (result is not null)
                 return result;
         }
 
-        var validation = await ValidateAsync(sources.Length, options, cancellationToken);
+        var validation = await ValidateAsync(sources.Length, candidateInputDigest, options, cancellationToken);
         if (validation is not null)
             return validation;
 
-        return await ActivateAsync(options, cancellationToken);
+        return await ActivateAsync(candidateInputDigest, options, cancellationToken);
     }
 
     internal async Task<SqliteRelationshipTransitionSnapshot> InspectForTestOnlyAsync(
@@ -109,6 +117,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
     }
 
     private async Task<SqliteRelationshipTransitionExecutionResult?> EnsureCandidateAsync(
+        string candidateInputDigest,
         CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Create(connectionString);
@@ -128,13 +137,23 @@ internal sealed class SqliteRelationshipTransitionExecutor
         }
 
         var state = await ReadStateAsync(connection, transaction, cancellationToken);
-        if (state is not null && !state.Matches(requirement))
+        if (state is not null && !state.MatchesRequirement(requirement))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
+        if (state?.Phase == SqliteRelationshipTransitionPhase.Failed)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return RestoreStoredFailure(state);
+        }
+        if (state is not null && !state.MatchesInput(candidateInputDigest))
         {
             await transaction.CommitAsync(cancellationToken);
             return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
         }
         if (state is null)
-            await InsertStateAsync(connection, transaction, cancellationToken);
+            await InsertStateAsync(connection, transaction, candidateInputDigest, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return null;
     }
@@ -143,6 +162,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
         int index,
         SqliteRelationshipTransitionSourceRecord source,
         HashSet<TargetKey> targets,
+        string candidateInputDigest,
         CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Create(connectionString);
@@ -159,7 +179,12 @@ internal sealed class SqliteRelationshipTransitionExecutor
         if (state.Phase == SqliteRelationshipTransitionPhase.Failed)
         {
             await transaction.CommitAsync(cancellationToken);
-            return await CreateStoredFailureAsync(source, targets);
+            return RestoreStoredFailure(state);
+        }
+        if (!state.Matches(requirement, candidateInputDigest))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
         }
         if (state.Phase is SqliteRelationshipTransitionPhase.Validated or SqliteRelationshipTransitionPhase.Active ||
             state.ProcessedSourceCount > index)
@@ -192,6 +217,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
 
     private async Task<SqliteRelationshipTransitionExecutionResult?> ValidateAsync(
         int expectedSourceCount,
+        string candidateInputDigest,
         SqliteRelationshipTransitionTestOptions options,
         CancellationToken cancellationToken)
     {
@@ -209,7 +235,12 @@ internal sealed class SqliteRelationshipTransitionExecutor
         if (state.Phase == SqliteRelationshipTransitionPhase.Failed)
         {
             await transaction.CommitAsync(cancellationToken);
-            return SqliteRelationshipTransitionExecutionResult.Failed;
+            return RestoreStoredFailure(state);
+        }
+        if (!state.Matches(requirement, candidateInputDigest))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
         }
         if (state.ProcessedSourceCount != expectedSourceCount)
             throw new InvalidOperationException("Relationship transition cannot validate before bounded backfill completes.");
@@ -235,6 +266,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
     }
 
     private async Task<SqliteRelationshipTransitionExecutionResult> ActivateAsync(
+        string candidateInputDigest,
         SqliteRelationshipTransitionTestOptions options,
         CancellationToken cancellationToken)
     {
@@ -249,6 +281,16 @@ internal sealed class SqliteRelationshipTransitionExecutor
         }
         var state = await ReadStateAsync(connection, transaction, cancellationToken)
             ?? throw new InvalidOperationException("The durable relationship transition state disappeared during activation.");
+        if (state.Phase == SqliteRelationshipTransitionPhase.Failed)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return RestoreStoredFailure(state);
+        }
+        if (!state.Matches(requirement, candidateInputDigest))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
         if (state.Phase != SqliteRelationshipTransitionPhase.Validated || !ExpectedActiveMatches(active))
         {
             await transaction.CommitAsync(cancellationToken);
@@ -341,17 +383,24 @@ internal sealed class SqliteRelationshipTransitionExecutor
                 targetScope,
                 targetComparisonKey));
 
-    private Task<SqliteRelationshipTransitionExecutionResult> CreateStoredFailureAsync(
-        SqliteRelationshipTransitionSourceRecord source,
-        HashSet<TargetKey> targets)
+    private SqliteRelationshipTransitionExecutionResult RestoreStoredFailure(TransitionState state)
     {
-        var projected = plan.ProjectReferenceIdentity(source.SerializedReference);
-        if (projected is { } identity && !targets.Contains(new(source.TargetScope, identity.LookupKey, identity.ComparisonKey)))
+        try
         {
-            return Task.FromResult(SqliteRelationshipTransitionExecutionResult.Dangling(
-                CreateDanglingDiagnostic(source.TargetScope, identity.ComparisonKey)));
+            return SqliteRelationshipTransitionExecutionResult.Dangling(
+                RelationshipMaterializationDanglingReference.Restore(
+                    requirement,
+                    state.FailureCode ?? throw new InvalidOperationException(),
+                    state.FailureCorrelation ?? throw new InvalidOperationException()));
         }
-        return Task.FromResult(SqliteRelationshipTransitionExecutionResult.Failed);
+        catch (ArgumentException)
+        {
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
+        catch (InvalidOperationException)
+        {
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
     }
 
     private async Task EnsureInfrastructureAsync(CancellationToken cancellationToken)
@@ -372,6 +421,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
                 expected_kind INTEGER NOT NULL,
                 expected_generation TEXT NULL,
                 expected_fingerprint TEXT NULL,
+                candidate_input_digest TEXT NOT NULL,
                 phase INTEGER NOT NULL,
                 processed_source_count INTEGER NOT NULL,
                 failure_code TEXT NULL,
@@ -416,7 +466,11 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private async Task InsertStateAsync(SqliteConnection connection, SqliteTransaction transaction, CancellationToken cancellationToken)
+    private async Task InsertStateAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string candidateInputDigest,
+        CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -424,16 +478,17 @@ internal sealed class SqliteRelationshipTransitionExecutor
             INSERT INTO {StateTable} (
                 relationship_identity, candidate_generation, candidate_fingerprint,
                 expected_kind, expected_generation, expected_fingerprint,
-                phase, processed_source_count, failure_code, failure_correlation)
+                candidate_input_digest, phase, processed_source_count, failure_code, failure_correlation)
             VALUES (
                 @relationshipIdentity, @candidateGeneration, @candidateFingerprint,
                 @expectedKind, @expectedGeneration, @expectedFingerprint,
-                @phase, 0, NULL, NULL);
+                @candidateInputDigest, @phase, 0, NULL, NULL);
             """;
         AddCandidateParameters(command);
         command.Parameters.AddWithValue("@expectedKind", requirement.ExpectedActive.IsAbsent ? 0 : 1);
         command.Parameters.AddWithValue("@expectedGeneration", (object?)requirement.ExpectedActive.ExactGeneration?.GenerationIdentity ?? DBNull.Value);
         command.Parameters.AddWithValue("@expectedFingerprint", (object?)requirement.ExpectedActive.ExactGeneration?.MaterializationFingerprint ?? DBNull.Value);
+        command.Parameters.AddWithValue("@candidateInputDigest", candidateInputDigest);
         command.Parameters.AddWithValue("@phase", (int)SqliteRelationshipTransitionPhase.Preparing);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -542,7 +597,8 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"""
-            SELECT expected_kind, expected_generation, expected_fingerprint, phase, processed_source_count
+            SELECT expected_kind, expected_generation, expected_fingerprint, candidate_input_digest,
+                   phase, processed_source_count, failure_code, failure_correlation
             FROM {StateTable}
             WHERE relationship_identity = @relationshipIdentity
               AND candidate_generation = @candidateGeneration
@@ -556,8 +612,11 @@ internal sealed class SqliteRelationshipTransitionExecutor
             reader.GetInt32(0),
             reader.IsDBNull(1) ? null : reader.GetString(1),
             reader.IsDBNull(2) ? null : reader.GetString(2),
-            (SqliteRelationshipTransitionPhase)reader.GetInt32(3),
-            reader.GetInt32(4));
+            reader.GetString(3),
+            (SqliteRelationshipTransitionPhase)reader.GetInt32(4),
+            reader.GetInt32(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7));
     }
 
     private async Task<ActiveGeneration?> ReadActiveAsync(
@@ -615,17 +674,107 @@ internal sealed class SqliteRelationshipTransitionExecutor
         return targets;
     }
 
+    private string CreateCandidateInputDigest(
+        IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
+        IReadOnlyCollection<TargetKey> targets)
+    {
+        using var framed = new MemoryStream();
+        WriteFramedString(framed, CandidateInputDigestDomain);
+        WriteFramedString(framed, requirement.CandidateGeneration.RelationshipIdentity);
+        WriteFramedString(framed, requirement.CandidateGeneration.GenerationIdentity);
+        WriteFramedString(framed, requirement.CandidateGeneration.MaterializationFingerprint);
+        WriteFramedUnsignedInteger(framed, checked((uint)sources.Count));
+        foreach (var source in sources)
+        {
+            WriteFramedString(framed, source.SourceScope);
+            WriteFramedString(framed, source.SourceLookupKey);
+            WriteFramedString(framed, source.SourceComparisonKey);
+            WriteFramedString(framed, source.TargetScope);
+            WriteFramedNullableString(framed, source.SerializedReference);
+        }
+
+        var orderedTargets = targets.OrderBy(TargetKeyOrder.Create, StringComparer.Ordinal).ToArray();
+        WriteFramedUnsignedInteger(framed, checked((uint)orderedTargets.Length));
+        foreach (var target in orderedTargets)
+        {
+            WriteFramedString(framed, target.Scope);
+            WriteFramedString(framed, target.LookupKey);
+            WriteFramedString(framed, target.ComparisonKey);
+        }
+
+        var input = framed.ToArray();
+        try
+        {
+            var digest = HMACSHA256.HashData(diagnosticKey, input);
+            try
+            {
+                return CandidateInputDigestScheme + Convert.ToHexString(digest).ToLowerInvariant();
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(digest);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(input);
+        }
+    }
+
+    private static void WriteFramedString(Stream stream, string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        stream.WriteByte(1);
+        var encoded = StrictUtf8.GetBytes(value);
+        try
+        {
+            WriteFramedUnsignedInteger(stream, checked((uint)encoded.Length));
+            stream.Write(encoded);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encoded);
+        }
+    }
+
+    private static void WriteFramedNullableString(Stream stream, string? value)
+    {
+        if (value is null)
+        {
+            stream.WriteByte(0);
+            return;
+        }
+
+        WriteFramedString(stream, value);
+    }
+
+    private static void WriteFramedUnsignedInteger(Stream stream, uint value)
+    {
+        Span<byte> encoded = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32BigEndian(encoded, value);
+        stream.Write(encoded);
+    }
+
     private sealed record TransitionState(
         int ExpectedKind,
         string? ExpectedGeneration,
         string? ExpectedFingerprint,
+        string CandidateInputDigest,
         SqliteRelationshipTransitionPhase Phase,
-        int ProcessedSourceCount)
+        int ProcessedSourceCount,
+        string? FailureCode,
+        string? FailureCorrelation)
     {
-        public bool Matches(RelationshipMaterializationTransitionRequirement current) =>
+        public bool MatchesRequirement(RelationshipMaterializationTransitionRequirement current) =>
             ExpectedKind == (current.ExpectedActive.IsAbsent ? 0 : 1) &&
             string.Equals(ExpectedGeneration, current.ExpectedActive.ExactGeneration?.GenerationIdentity, StringComparison.Ordinal) &&
             string.Equals(ExpectedFingerprint, current.ExpectedActive.ExactGeneration?.MaterializationFingerprint, StringComparison.Ordinal);
+
+        public bool MatchesInput(string candidateInputDigest) =>
+            string.Equals(CandidateInputDigest, candidateInputDigest, StringComparison.Ordinal);
+
+        public bool Matches(RelationshipMaterializationTransitionRequirement current, string candidateInputDigest) =>
+            MatchesRequirement(current) && MatchesInput(candidateInputDigest);
     }
 
     private sealed record ActiveGeneration(string GenerationIdentity, string MaterializationFingerprint);
@@ -635,6 +784,12 @@ internal sealed class SqliteRelationshipTransitionExecutor
     {
         public static string Create(SqliteRelationshipTransitionSourceRecord source) =>
             string.Concat(source.SourceScope.Length, ":", source.SourceScope, "|", source.SourceLookupKey.Length, ":", source.SourceLookupKey, "|", source.SourceComparisonKey.Length, ":", source.SourceComparisonKey);
+    }
+
+    private static class TargetKeyOrder
+    {
+        public static string Create(TargetKey target) =>
+            string.Concat(target.Scope.Length, ":", target.Scope, "|", target.LookupKey.Length, ":", target.LookupKey, "|", target.ComparisonKey.Length, ":", target.ComparisonKey);
     }
 }
 

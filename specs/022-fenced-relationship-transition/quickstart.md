@@ -43,11 +43,11 @@ complete Groundwork #141 / Elsa #643.
 ```bash
 dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj \
   --filter RelationshipTransition --no-restore
-# Passed: 8, Failed: 0
+# Passed: 12, Failed: 0
 
 dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj \
   --filter Relationship --no-restore
-# Passed: 50, Failed: 0
+# Passed: 51, Failed: 0
 
 dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj \
   --filter Relationship --no-restore
@@ -57,5 +57,9 @@ dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materia
 The SQLite suite uses file-backed temporary databases and distinct executor instances. It proves
 valid exact sidecar/fence backfill, opaque dangling diagnostics, durable bounded progress,
 validation/cutover acknowledgement loss, concurrent candidate competition, and the closed public
-admission gate. It does not claim ordinary fence maintenance, guarded prunes, a non-SQLite provider,
-production HMAC custody, or public relationship capability.
+admission gate. Pending candidates bind a keyed, collision-safe frame of every normalized source
+identity/scope/reference and target identity before any restart can skip progress, replay validation,
+or activate; a terminal failure instead restores only its persisted `GW-RELATIONSHIP-013` code and
+opaque correlation without inspecting current source or target data. It does not claim ordinary fence
+maintenance, guarded prunes, a non-SQLite provider, production HMAC custody, or public relationship
+capability.

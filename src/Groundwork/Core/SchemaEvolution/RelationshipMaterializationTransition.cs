@@ -193,6 +193,51 @@ public sealed class RelationshipMaterializationKeyCorrelationIdentity :
         }
     }
 
+    /// <summary>
+    /// Restores a persisted opaque correlation only after validating its closed wire shape. This is
+    /// intentionally internal: providers may replay the one durable failure envelope, but callers
+    /// cannot manufacture a diagnostic identity from storage text.
+    /// </summary>
+    internal static RelationshipMaterializationKeyCorrelationIdentity Restore(
+        RelationshipMaterializationTransitionRequirement transitionRequirement,
+        string value)
+    {
+        ArgumentNullException.ThrowIfNull(transitionRequirement);
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+
+        if (!value.StartsWith(Scheme, StringComparison.Ordinal) ||
+            value.Length != Scheme.Length + 64)
+        {
+            throw new ArgumentException("The persisted relationship correlation has an invalid closed wire shape.", nameof(value));
+        }
+
+        var encodedDigest = value[Scheme.Length..];
+        if (!string.Equals(encodedDigest, encodedDigest.ToLowerInvariant(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The persisted relationship correlation must use canonical lowercase hexadecimal.", nameof(value));
+        }
+
+        try
+        {
+            var digest = Convert.FromHexString(encodedDigest);
+            try
+            {
+                if (digest.Length != 32)
+                    throw new ArgumentException("The persisted relationship correlation has an invalid digest length.", nameof(value));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(digest);
+            }
+        }
+        catch (FormatException exception)
+        {
+            throw new ArgumentException("The persisted relationship correlation is not hexadecimal.", nameof(value), exception);
+        }
+
+        return new(value, transitionRequirement.CandidateGeneration);
+    }
+
     public string Value { get; }
 
     internal RelationshipMaterializationGeneration CandidateGeneration { get; }
@@ -242,6 +287,27 @@ public sealed class RelationshipMaterializationDanglingReference :
     IEquatable<RelationshipMaterializationDanglingReference>
 {
     public const string DiagnosticCode = "GW-RELATIONSHIP-013";
+
+    /// <summary>
+    /// Restores the only persisted relationship-transition failure envelope. It does not inspect
+    /// current source or target data, so a terminal failure cannot be relabelled by a changed
+    /// replay request.
+    /// </summary>
+    internal static RelationshipMaterializationDanglingReference Restore(
+        RelationshipMaterializationTransitionRequirement transitionRequirement,
+        string failureCode,
+        string failureCorrelation)
+    {
+        ArgumentNullException.ThrowIfNull(transitionRequirement);
+        if (!string.Equals(failureCode, DiagnosticCode, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The persisted relationship failure code is not an admitted envelope.", nameof(failureCode));
+        }
+
+        return new(
+            transitionRequirement,
+            RelationshipMaterializationKeyCorrelationIdentity.Restore(transitionRequirement, failureCorrelation));
+    }
 
     internal RelationshipMaterializationDanglingReference(
         RelationshipMaterializationTransitionRequirement transitionRequirement,

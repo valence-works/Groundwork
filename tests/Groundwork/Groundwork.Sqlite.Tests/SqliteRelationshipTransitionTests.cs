@@ -100,6 +100,59 @@ public sealed class SqliteRelationshipTransitionTests
     }
 
     [Fact]
+    public async Task Changed_source_set_after_cancellation_fails_closed_instead_of_resuming_by_progress_index()
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan("changed-source-set");
+        var authorizationA = plan.ProjectReferenceIdentity("authorization-a")!.Value;
+        var authorizationB = plan.ProjectReferenceIdentity("authorization-b")!.Value;
+        var originalSources = new[] { Source("token-a", "authorization-a"), Source("token-b", "authorization-b") };
+        var targets = new[] { Target(authorizationA), Target(authorizationB) };
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
+                originalSources,
+                targets,
+                new SqliteRelationshipTransitionTestOptions(false, CancelAfterProcessedSourceCount: 1)));
+
+        var replay = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
+            [Source("token-a", "authorization-a"), Source("token-c", "authorization-b")],
+            targets);
+
+        Assert.Equal(SqliteRelationshipTransitionStatus.RelationshipConflict, replay.Status);
+        var snapshot = await CreateExecutor(database.ConnectionString, plan).InspectForTestOnlyAsync();
+        Assert.Null(snapshot.ActiveGeneration);
+        Assert.Equal(SqliteRelationshipTransitionPhase.Preparing, snapshot.CandidatePhase);
+        Assert.Equal(1, snapshot.ProcessedSourceCount);
+    }
+
+    [Fact]
+    public async Task Changed_serialized_reference_for_the_same_source_identity_after_cancellation_fails_closed()
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan("changed-source-reference");
+        var authorizationA = plan.ProjectReferenceIdentity("authorization-a")!.Value;
+        var authorizationB = plan.ProjectReferenceIdentity("authorization-b")!.Value;
+        var source = Source("token-a", "authorization-a");
+        var targets = new[] { Target(authorizationA), Target(authorizationB) };
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
+                [source, Source("token-b", "authorization-b")],
+                targets,
+                new SqliteRelationshipTransitionTestOptions(false, CancelAfterProcessedSourceCount: 1)));
+
+        var replay = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
+            [Source("token-a", "authorization-b"), Source("token-b", "authorization-b")],
+            targets);
+
+        Assert.Equal(SqliteRelationshipTransitionStatus.RelationshipConflict, replay.Status);
+        var snapshot = await CreateExecutor(database.ConnectionString, plan).InspectForTestOnlyAsync();
+        Assert.Null(snapshot.ActiveGeneration);
+        Assert.Equal(1, snapshot.ProcessedSourceCount);
+    }
+
+    [Fact]
     public async Task Same_candidate_lost_acknowledgement_converges()
     {
         await using var database = TemporaryDatabase.Create();
@@ -138,6 +191,58 @@ public sealed class SqliteRelationshipTransitionTests
         Assert.Equal(SqliteRelationshipTransitionPhase.Validated, interrupted.CandidatePhase);
         var resumed = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync([source], [target]);
         Assert.Equal(SqliteRelationshipTransitionStatus.Activated, resumed.Status);
+    }
+
+    [Fact]
+    public async Task Changed_source_and_target_after_validation_acknowledgement_loss_cannot_activate_the_candidate()
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan("validated-input-change");
+        var authorizationA = plan.ProjectReferenceIdentity("authorization-a")!.Value;
+        var authorizationB = plan.ProjectReferenceIdentity("authorization-b")!.Value;
+        var source = Source("token-a", "authorization-a");
+
+        await Assert.ThrowsAsync<SqliteRelationshipTransitionValidationAcknowledgementLostException>(() =>
+            CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
+                [source],
+                [Target(authorizationA)],
+                new SqliteRelationshipTransitionTestOptions(false, ThrowAfterValidationCommit: true)));
+
+        var replay = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
+            [Source("token-a", "authorization-b")],
+            [Target(authorizationB)]);
+
+        Assert.Equal(SqliteRelationshipTransitionStatus.RelationshipConflict, replay.Status);
+        var snapshot = await CreateExecutor(database.ConnectionString, plan).InspectForTestOnlyAsync();
+        Assert.Null(snapshot.ActiveGeneration);
+        Assert.Equal(SqliteRelationshipTransitionPhase.Validated, snapshot.CandidatePhase);
+    }
+
+    [Fact]
+    public async Task Failed_candidate_replays_its_persisted_diagnostic_when_the_current_input_omits_the_dangling_source_or_adds_its_target()
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan("persisted-failure");
+        var authorizationA = plan.ProjectReferenceIdentity("authorization-a")!.Value;
+        var authorizationB = plan.ProjectReferenceIdentity("authorization-b")!.Value;
+        var valid = Source("token-a", "authorization-a");
+        var dangling = Source("token-b", "authorization-b");
+
+        var first = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync([valid, dangling], [Target(authorizationA)]);
+        var expected = Assert.IsType<RelationshipMaterializationDanglingReference>(first.DanglingReference);
+
+        var replay = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
+            [valid],
+            [Target(authorizationA), Target(authorizationB)]);
+
+        Assert.Equal(SqliteRelationshipTransitionStatus.DanglingReference, replay.Status);
+        var restored = Assert.IsType<RelationshipMaterializationDanglingReference>(replay.DanglingReference);
+        Assert.Contains(RelationshipMaterializationDanglingReference.DiagnosticCode, restored.Message, StringComparison.Ordinal);
+        Assert.Equal(expected.TargetKeyCorrelationIdentity, restored.TargetKeyCorrelationIdentity);
+        Assert.Equal(expected.CanonicalJson, restored.CanonicalJson);
+        var snapshot = await CreateExecutor(database.ConnectionString, plan).InspectForTestOnlyAsync();
+        Assert.Null(snapshot.ActiveGeneration);
+        Assert.Equal(SqliteRelationshipTransitionPhase.Failed, snapshot.CandidatePhase);
     }
 
     [Fact]

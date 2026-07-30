@@ -143,6 +143,35 @@ public sealed class RelationshipMaterializationTransitionTests
     }
 
     [Fact]
+    public void Persisted_dangling_envelope_restores_only_the_closed_code_and_canonical_opaque_correlation()
+    {
+        var transition = new RelationshipMaterializationTransitionRequirement(
+            RelationshipMaterializationExpectedActive.Absent,
+            Generation("generation-candidate"));
+        var correlation = KeyCorrelationIdentity(transition, 'a');
+
+        var restored = RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            RelationshipMaterializationDanglingReference.DiagnosticCode,
+            correlation.Value);
+
+        Assert.Equal(correlation, restored.TargetKeyCorrelationIdentity);
+        Assert.Contains(RelationshipMaterializationDanglingReference.DiagnosticCode, restored.Message, StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            "GW-RELATIONSHIP-999",
+            correlation.Value));
+        Assert.Throws<ArgumentException>(() => RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            RelationshipMaterializationDanglingReference.DiagnosticCode,
+            correlation.Value.ToUpperInvariant()));
+        Assert.Throws<ArgumentException>(() => RelationshipMaterializationDanglingReference.Restore(
+            transition,
+            RelationshipMaterializationDanglingReference.DiagnosticCode,
+            "hmac-sha256-v1:not-a-digest"));
+    }
+
+    [Fact]
     public void Canonical_diagnostic_framing_preserves_route_delimiters_without_aliasing()
     {
         const string delimiterBearingRoute = "token\u001e\"authorization\nroute";
