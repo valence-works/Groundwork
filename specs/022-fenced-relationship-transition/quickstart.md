@@ -76,3 +76,31 @@ target-index, and descending-index schema substitutions cannot reopen an active 
 test-only inspection exposes exact candidate and source/target identity tuples but omits serialized
 references, failure material, and key data. This slice does not claim ordinary fence maintenance,
 guarded prunes, a non-SQLite provider, production HMAC custody, or public relationship capability.
+
+## Independent Exact-Range Review
+
+Three read-only reviewers adversarially inspected
+`eacb3209e3710834cd78c49e65d4bc763b746769..6713916147ee8fa61ba22e88f39a23e15fd4cccf`
+on distinct axes. Each was instructed to assume the implementation had green-washed its evidence.
+The implementation candidate passed all three axes after the following confirmed findings were
+remediated and re-verified by their originating reviewers:
+
+- Correctness/mechanism: the first candidate could resume from a count without authenticating the
+  complete input and could not restore a persisted dangling diagnostic. Later candidates trusted
+  incomplete active materialization evidence and accepted SQLite schema substitutions hidden by
+  basic pragma metadata. The final mechanism authenticates complete inputs and failure envelopes,
+  verifies exact candidate tuples and cardinality, migrates only the exact legacy state shape, and
+  validates visible/hidden columns, table options, every text collation, every primary key, the
+  target index, foreign keys, triggers, and the complete index inventory in one immediate
+  transaction. Originating-reviewer verdict: **PASS**.
+- Evidence integrity: prior evidence did not authenticate stored failure correlation, did not prove
+  exact backfill tuples, lacked a pre-MAC schema-upgrade case, and overstated all 29 SQLite cases as
+  file-backed. The final record binds the exact 29 / 51 / 1 rerun, distinguishes 28 file-backed
+  transition cases from the in-memory closed-connection admission guard, and retains the exact
+  source head and nonclaims. Originating-reviewer verdict: **PASS**.
+- Scope and test preservation: an earlier record used the wrong evidence date, asserted only row
+  counts, and could not see generated/hidden schema drift. The final range is confined to the
+  ratified internal SQLite proof and Spec 022, preserves the public pre-I/O `GW-RELATIONSHIP-012`
+  gate, removes or weakens no test, and leaves public capability, ordinary fence maintenance,
+  guarded prune, non-SQLite certification, and production key custody explicitly open.
+  Originating-reviewer verdict: **PASS**.
