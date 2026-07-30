@@ -702,6 +702,10 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await ValidateTableSchemaAsync(connection, transaction, ActiveTable, ActiveColumns, cancellationToken);
         await ValidateTableSchemaAsync(connection, transaction, ReferenceTable, ReferenceColumns, cancellationToken);
         await ValidateTableSchemaAsync(connection, transaction, FenceTable, FenceColumns, cancellationToken);
+        await ValidateTextColumnCollationsAsync(connection, transaction, StateTable, StateColumns, cancellationToken);
+        await ValidateTextColumnCollationsAsync(connection, transaction, ActiveTable, ActiveColumns, cancellationToken);
+        await ValidateTextColumnCollationsAsync(connection, transaction, ReferenceTable, ReferenceColumns, cancellationToken);
+        await ValidateTextColumnCollationsAsync(connection, transaction, FenceTable, FenceColumns, cancellationToken);
         await ValidatePrimaryKeySchemaAsync(connection, transaction, StateTable, StateColumns, cancellationToken);
         await ValidatePrimaryKeySchemaAsync(connection, transaction, ActiveTable, ActiveColumns, cancellationToken);
         await ValidatePrimaryKeySchemaAsync(connection, transaction, ReferenceTable, ReferenceColumns, cancellationToken);
@@ -728,6 +732,10 @@ internal sealed class SqliteRelationshipTransitionExecutor
                 new("target_comparison_key", "BINARY", false)
             ],
             cancellationToken);
+        await ValidateIndexInventoryAsync(connection, transaction, StateTable, [], cancellationToken);
+        await ValidateIndexInventoryAsync(connection, transaction, ActiveTable, [], cancellationToken);
+        await ValidateIndexInventoryAsync(connection, transaction, ReferenceTable, [ReferenceTargetIndex], cancellationToken);
+        await ValidateIndexInventoryAsync(connection, transaction, FenceTable, [], cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
 
@@ -760,6 +768,8 @@ internal sealed class SqliteRelationshipTransitionExecutor
             throw new InvalidOperationException(
                 $"Durable relationship transition table '{table}' does not match its required versioned schema.");
         }
+
+        await ValidateTableContainerAsync(connection, transaction, table, expected.Count, cancellationToken);
     }
 
     private static async Task<IReadOnlyList<SchemaColumn>> ReadTableSchemaAsync(
@@ -771,7 +781,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
         var columns = new List<SchemaColumn>();
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"PRAGMA table_info('{table}');";
+        command.CommandText = $"PRAGMA table_xinfo('{table}');";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -779,10 +789,101 @@ internal sealed class SqliteRelationshipTransitionExecutor
                 reader.GetString(1),
                 reader.GetString(2).ToUpperInvariant(),
                 reader.GetInt32(3) == 1,
-                reader.GetInt32(5)));
+                reader.GetInt32(5),
+                reader.GetInt32(6)));
         }
 
         return columns;
+    }
+
+    private static async Task ValidateTableContainerAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        int expectedColumnCount,
+        CancellationToken cancellationToken)
+    {
+        var tableMatches = false;
+        await using (var tableCommand = connection.CreateCommand())
+        {
+            tableCommand.Transaction = transaction;
+            tableCommand.CommandText = $"PRAGMA table_list('{table}');";
+            await using var reader = await tableCommand.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                tableMatches =
+                    string.Equals(reader.GetString(1), table, StringComparison.Ordinal) &&
+                    string.Equals(reader.GetString(2), "table", StringComparison.Ordinal) &&
+                    reader.GetInt32(3) == expectedColumnCount &&
+                    reader.GetInt32(4) == 0 &&
+                    reader.GetInt32(5) == 0 &&
+                    !await reader.ReadAsync(cancellationToken);
+            }
+        }
+
+        if (!tableMatches)
+        {
+            throw new InvalidOperationException(
+                $"Durable relationship transition table '{table}' does not match its required table options.");
+        }
+
+        await using (var foreignKeyCommand = connection.CreateCommand())
+        {
+            foreignKeyCommand.Transaction = transaction;
+            foreignKeyCommand.CommandText = $"PRAGMA foreign_key_list('{table}');";
+            await using var reader = await foreignKeyCommand.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    $"Durable relationship transition table '{table}' must not declare foreign keys.");
+            }
+        }
+
+        await using var triggerCommand = connection.CreateCommand();
+        triggerCommand.Transaction = transaction;
+        triggerCommand.CommandText = """
+            SELECT COUNT(*)
+            FROM sqlite_schema
+            WHERE type = 'trigger' AND tbl_name = @table;
+            """;
+        triggerCommand.Parameters.AddWithValue("@table", table);
+        if (Convert.ToInt64(await triggerCommand.ExecuteScalarAsync(cancellationToken)) != 0)
+        {
+            throw new InvalidOperationException(
+                $"Durable relationship transition table '{table}' must not declare triggers.");
+        }
+    }
+
+    private static async Task ValidateTextColumnCollationsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        IReadOnlyList<SchemaColumn> expectedColumns,
+        CancellationToken cancellationToken)
+    {
+        var textColumns = expectedColumns.Where(column => column.Type == "TEXT").ToArray();
+        var probeIndex = $"ix_groundwork_relationship_schema_probe_{table}";
+        await using var createCommand = connection.CreateCommand();
+        createCommand.Transaction = transaction;
+        createCommand.CommandText = $"CREATE INDEX {probeIndex} ON {table} ({string.Join(", ", textColumns.Select(column => column.Name))});";
+        await createCommand.ExecuteNonQueryAsync(cancellationToken);
+        try
+        {
+            var expected = textColumns.Select(column => new IndexColumn(column.Name, "BINARY", false));
+            var actual = await ReadIndexKeySchemaAsync(connection, transaction, probeIndex, cancellationToken);
+            if (!actual.SequenceEqual(expected))
+            {
+                throw new InvalidOperationException(
+                    $"Durable relationship transition table '{table}' does not have its required ordinal text-column schema.");
+            }
+        }
+        finally
+        {
+            await using var dropCommand = connection.CreateCommand();
+            dropCommand.Transaction = transaction;
+            dropCommand.CommandText = $"DROP INDEX {probeIndex};";
+            await dropCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     private static async Task ValidateIndexSchemaAsync(
@@ -889,6 +990,43 @@ internal sealed class SqliteRelationshipTransitionExecutor
         }
 
         return columns;
+    }
+
+    private static async Task ValidateIndexInventoryAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        IReadOnlyCollection<string> expectedCreatedIndexes,
+        CancellationToken cancellationToken)
+    {
+        var primaryKeyCount = 0;
+        var createdIndexes = new HashSet<string>(StringComparer.Ordinal);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA index_list('{table}');";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var origin = reader.GetString(3);
+            if (string.Equals(origin, "pk", StringComparison.Ordinal))
+            {
+                primaryKeyCount++;
+                continue;
+            }
+
+            if (!string.Equals(origin, "c", StringComparison.Ordinal) ||
+                !createdIndexes.Add(reader.GetString(1)))
+            {
+                throw new InvalidOperationException(
+                    $"Durable relationship transition table '{table}' contains an unexpected index.");
+            }
+        }
+
+        if (primaryKeyCount != 1 || !createdIndexes.SetEquals(expectedCreatedIndexes))
+        {
+            throw new InvalidOperationException(
+                $"Durable relationship transition table '{table}' does not have its required index inventory.");
+        }
     }
 
     private async Task InsertStateAsync(
@@ -1300,7 +1438,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
 
     private sealed record ActiveGeneration(string GenerationIdentity, string MaterializationFingerprint);
     private sealed record IndexColumn(string Name, string Collation, bool Descending);
-    private sealed record SchemaColumn(string Name, string Type, bool NotNull, int PrimaryKeyOrder);
+    private sealed record SchemaColumn(string Name, string Type, bool NotNull, int PrimaryKeyOrder, int Hidden = 0);
     private sealed record TargetKey(string Scope, string LookupKey, string ComparisonKey);
 
     private static class SourceKey
