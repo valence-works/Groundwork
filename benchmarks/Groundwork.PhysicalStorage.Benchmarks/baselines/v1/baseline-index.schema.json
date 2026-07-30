@@ -1,39 +1,145 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ValenceWorks/Groundwork/benchmarks/physical-storage/v1/baseline-index.schema.json",
-  "title": "Groundwork physical-storage future baseline registry scaffold v1",
+  "title": "Groundwork physical-storage immutable baseline registry v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "status", "baselines"],
+  "required": ["$schema", "schemaVersion", "status", "generations", "activations"],
   "properties": {
-    "$schema": { "type": "string", "minLength": 1 },
-    "schemaVersion": { "const": "groundwork.physical-storage.benchmark/v1" },
-    "status": { "const": "scaffolding-no-approved-baselines" },
-    "baselines": {
+    "$schema": { "const": "baseline-index.schema.json" },
+    "schemaVersion": { "const": "groundwork.physical-storage.baseline-registry/v1" },
+    "status": { "enum": ["no-active-generations", "active-generations"] },
+    "generations": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "artifactUri",
-          "gitCommit",
-          "capturedAtUtc",
-          "machineFingerprint",
-          "evidenceReport",
-          "approvedBy",
-          "approvedAtUtc"
-        ],
+      "items": { "$ref": "#/$defs/generation" }
+    },
+    "activations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/activation" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "no-active-generations" } } },
+      "then": {
         "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "artifactUri": { "type": "string", "minLength": 1 },
-          "gitCommit": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
-          "capturedAtUtc": { "type": "string", "format": "date-time" },
-          "machineFingerprint": { "type": "string", "minLength": 1 },
-          "evidenceReport": { "type": "string", "minLength": 1 },
-          "approvedBy": { "type": "string", "minLength": 1 },
-          "approvedAtUtc": { "type": "string", "format": "date-time" }
+          "activations": { "maxItems": 0 }
         }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "active-generations" } } },
+      "then": {
+        "properties": {
+          "activations": { "minItems": 1 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
+    "contentDigest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relativePath", "sha256"],
+      "properties": {
+        "relativePath": { "type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/).+$" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "tuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "storageForm", "workload", "dataShapeIdentity", "sourceCommit", "sourceTreeDigest", "inputProfileDigest", "providerIdentityDigest", "machineFingerprint"],
+      "properties": {
+        "provider": { "enum": ["sqlite", "sqlServer", "postgreSql", "mongoDb"] },
+        "storageForm": { "enum": ["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"] },
+        "workload": { "type": "string", "minLength": 1 },
+        "dataShapeIdentity": { "type": "string", "minLength": 1 },
+        "sourceCommit": { "$ref": "#/$defs/commit" },
+        "sourceTreeDigest": { "$ref": "#/$defs/sha256" },
+        "inputProfileDigest": { "$ref": "#/$defs/sha256" },
+        "providerIdentityDigest": { "$ref": "#/$defs/sha256" },
+        "machineFingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "digestValues": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "digestMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "digests"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/contentDigest" },
+        "digests": { "$ref": "#/$defs/digestValues" }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mainMergeCommit", "approvedExactHeadCommit", "approvedExactHeadTreeDigest"],
+      "properties": {
+        "mainMergeCommit": { "$ref": "#/$defs/commit" },
+        "approvedExactHeadCommit": { "$ref": "#/$defs/commit" },
+        "approvedExactHeadTreeDigest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compatibilityTupleIdentity", "generationId"],
+      "properties": {
+        "compatibilityTupleIdentity": { "type": "string", "minLength": 1 },
+        "generationId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exactHeadCommit", "exactHeadTreeDigest", "sourceClean", "fixedInputProfileDigest", "providerIdentityDigests", "machineMetadataDigest", "rawMeasurementDigests", "summaryDigests", "correctnessDigests", "resultDigests", "nativePlanDigests", "synchronizedContentionDigests", "requiredRecoveryEvidenceDigests", "threeAdversarialReviewsPassed", "hostedChecksPassed"],
+      "properties": {
+        "exactHeadCommit": { "$ref": "#/$defs/commit" },
+        "exactHeadTreeDigest": { "$ref": "#/$defs/sha256" },
+        "sourceClean": { "const": true },
+        "fixedInputProfileDigest": { "$ref": "#/$defs/sha256" },
+        "providerIdentityDigests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sqlite", "sqlServer", "postgreSql", "mongoDb"],
+          "properties": {
+            "sqlite": { "$ref": "#/$defs/sha256" },
+            "sqlServer": { "$ref": "#/$defs/sha256" },
+            "postgreSql": { "$ref": "#/$defs/sha256" },
+            "mongoDb": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "machineMetadataDigest": { "$ref": "#/$defs/sha256" },
+        "rawMeasurementDigests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/contentDigest" } },
+        "summaryDigests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/contentDigest" } },
+        "correctnessDigests": { "$ref": "#/$defs/digestMap" },
+        "resultDigests": { "$ref": "#/$defs/digestMap" },
+        "nativePlanDigests": { "$ref": "#/$defs/digestMap" },
+        "synchronizedContentionDigests": { "$ref": "#/$defs/digestMap" },
+        "requiredRecoveryEvidenceDigests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/contentDigest" } },
+        "threeAdversarialReviewsPassed": { "const": true },
+        "hostedChecksPassed": { "const": true }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "approval", "supersedesGenerationId", "compatibilityTuples", "runGroup", "artifactDigests", "evidence"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "approval": { "$ref": "#/$defs/approval" },
+        "supersedesGenerationId": { "type": ["string", "null"] },
+        "compatibilityTuples": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tuple" } },
+        "runGroup": { "$ref": "#/$defs/contentDigest" },
+        "artifactDigests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/contentDigest" } },
+        "evidence": { "$ref": "#/$defs/evidence" }
       }
     }
   }

@@ -350,3 +350,49 @@ This updated review record and T030 evidence link are the only changes after the
 candidate `8be79be8a183380518ed1ec79b9cae12c24ad261`.
 Before merge, the same three axes re-verify the resulting record-only head so the durable account
 and PR candidate cannot diverge.
+
+## Issue #50 immutable-baseline governance checkpoint
+
+This container-free checkpoint implements the ratified baseline control plane only. The committed
+`baselines/v1/baseline-index.json` is a strict, versioned registry and is currently truthful and
+empty (`no-active-generations`). Validation receives an independently trusted set of reviewed
+Groundwork `main` merge commits; a generation binds one trusted authority to its exact source
+commit/tree plus the immutable run-group and retained artifact SHA-256 content digests. Hex shape
+alone is not authority. The registry is the only promotable selector. Caller-supplied direct
+artifact paths remain diagnostic-only and cannot make a scheduled comparison promotable.
+
+The registry model retains immutable append-only generations, explicit supersession, and separate
+activation records. Previous-to-candidate validation rejects deleted, mutated, or reordered
+history; forward/cyclic supersession; and replacement of an active exact tuple without explicit
+supersession. A tuple has at most one activation. Activation and selection reject untrusted
+authority, content drift, malformed paths/digests, duplicate active tuples, incomplete closed-
+matrix evidence, dirty or incompatible source, unavailable provider or machine identity, missing
+raw/summary/correctness/result/plan/synchronized-contention/recovery digests, or missing three-
+review/hosted-check prerequisites. Correctness, result, native-plan, and contention digest maps
+each bind a canonical retained map artifact; selection verifies its SHA-256 and exact parsed
+contents, and every mapped digest must identify separately retained artifact content.
+
+Final container-free verification:
+
+- `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --no-restore --filter 'FullyQualifiedName~BaselineRegistryTests|FullyQualifiedName~BenchmarkSchemaTests'`
+  passed 46/46. This includes artifact-byte drift, a byte-verified canonical map that disagrees
+  with its registry claim, missing artifact binding, independent trust, exact-HEAD authority,
+  append-only transition, supersession, activation, and truthful-empty-registry cases.
+- `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName!~MongoDbBenchmarkSignalEvidenceTests&FullyQualifiedName!~RelationalServerBenchmarkTargetTests&FullyQualifiedName!~SqliteProcessFailureRecoveryTests&FullyQualifiedName!~BenchmarkSubprocessCoordinatorTests'`
+  passed 356/356. The two provider-backed classes and two process-lifecycle/deadline classes are
+  excluded explicitly; no database-server container or provider suite ran.
+- A broader attempt excluding the provider-backed classes but retaining the SQLite
+  process-failure inventory encountered repeated pre-existing `TaskCanceledException` deadlines
+  while the machine was contended. A second attempt excluding that class exposed a timing failure
+  in `BenchmarkSubprocessCoordinatorTests.Cancellation_terminates_and_awaits_the_worker_process_tree`.
+  Both attempts were stopped after preserving their failure output. Neither failure exercised the
+  baseline-registry mechanism, and neither is represented as passing evidence.
+- `dotnet build benchmarks/Groundwork.PhysicalStorage.Benchmarks/Groundwork.PhysicalStorage.Benchmarks.csproj --no-restore`
+  passed with zero errors. The two visible warnings are the existing
+  `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisory.
+- `dotnet format ... --no-restore --verify-no-changes --include ...` passed separately for the
+  changed benchmark source and benchmark test source. `jq empty` passed for the registry and
+  schema, and `git diff --check` passed.
+
+This checkpoint does **not** execute a provider matrix, populate or activate any generation,
+select a physical form, compare EF, produce a performance verdict, or close issue #50.

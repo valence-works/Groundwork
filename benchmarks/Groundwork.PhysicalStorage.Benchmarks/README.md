@@ -142,7 +142,10 @@ otherwise. Providing payload values does not make a run promotable.
 
 Both profiles always emit `baselineEligibility.eligible: false`. Diagnostics explain that issue #50
 still requires controlled execution of the complete reviewed matrix, exact-HEAD live evidence from
-all four providers, and the Elsa-owned EF Core oracle.
+all four providers, and the Elsa-owned EF Core oracle. A caller-provided `--baseline` path is
+diagnostic-only; it is not a scheduled-promotion selector. A promotable Groundwork baseline can
+only be selected through the committed versioned registry after a reviewed `main` merge binds the
+run-group and every retained artifact to immutable SHA-256 content digests.
 
 The GitHub workflow is named `Physical Storage Benchmark Evidence (Scaffolding)`. Pull requests run
 a deliberately narrow SQLite/shared-form smoke over seven representative workloads. Weekly/manual

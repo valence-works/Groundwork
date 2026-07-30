@@ -6,7 +6,7 @@
 
 ## Summary
 
-Implement G7 by extending Groundwork's existing manifest/planner/provider stack with opt-in optimized physicalization for declared single-field equality indexes. Portable units keep the generic document/index tables and MongoDB content-path indexes. Optimized units additionally project eligible index values into provider-native physical structures, and provider stores route eligible equality queries through those structures without changing `IDocumentStore`. The issue #50 evidence-completion amendment adds a bounded, real process-failure/recovery protocol and SQLite proof while preserving the harness's non-promotable state. Its native-plan amendment also makes scale-bearing index certification cover Groundwork's complete stable provider order, including the runtime identity tie-break, and proves the corrected MongoDB ordered form without weakening the strict gate.
+Implement G7 by extending Groundwork's existing manifest/planner/provider stack with opt-in optimized physicalization for declared single-field equality indexes. Portable units keep the generic document/index tables and MongoDB content-path indexes. Optimized units additionally project eligible index values into provider-native physical structures, and provider stores route eligible equality queries through those structures without changing `IDocumentStore`. The issue #50 evidence-completion amendment adds a bounded, real process-failure/recovery protocol and SQLite proof while preserving the harness's non-promotable state. Its native-plan amendment also makes scale-bearing index certification cover Groundwork's complete stable provider order, including the runtime identity tie-break, and proves the corrected MongoDB ordered form without weakening the strict gate. The immutable-baseline governance amendment adds a container-free, fail-closed registry: independently trusted reviewed-`main` authority is bound to exact source and retained content, generations are transition-validated as immutable history, and no direct artifact path can become scheduled-promotable.
 
 ## Technical Context
 
@@ -31,8 +31,10 @@ promotion remains gated by issue #50
 
 **Scale/Scope**: Physicalization plan metadata, relational optimized projections for SQLite
 validation, MongoDB optimized projections, provider tests, one non-promotable SQLite
-process-failure recovery slice, and complete stable-order certification for the benchmark's bounded
-offset-query forms without weakening unique business-key constraints
+process-failure recovery slice, complete stable-order certification for the benchmark's bounded
+offset-query forms without weakening unique business-key constraints, and a container-free
+immutable-baseline registry/approval/selection mechanism. Controlled execution, physical-form
+selection, and final reports remain later reviewed work.
 
 ## Constitution Check
 

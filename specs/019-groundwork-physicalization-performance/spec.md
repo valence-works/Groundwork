@@ -118,6 +118,31 @@ gate across all three physical forms.
 - Missing indexed values must remain excluded from optimized projections.
 - Stale expected versions must not update optimized projections.
 
+### Issue #50 Immutable-Baseline Governance Amendment (2026-07-30)
+
+The reviewed Groundwork merge commit on `main` that adds a generation to the committed,
+versioned baseline registry is the approval authority. Validation receives independently trusted
+reviewed-main commit identities and binds the selected authority to the generation's exact source
+commit/tree plus immutable run-group and artifact content digests; hex shape alone is not
+authority. The registry is the sole promotable selector. A caller-supplied direct run path remains
+available only for diagnostic comparison and can never satisfy scheduled gating.
+
+Baseline generations are append-only. A successor supersedes an earlier generation by adding a
+new record; it does not rewrite the predecessor. A previous-to-candidate transition rejects
+deleted/mutated/reordered history and cyclic, forward, or implicit replacement. Activation is a
+separate explicit record, and at most one generation may be active for an exact compatibility
+tuple. Activation and selection fail closed
+on content drift, incomplete evidence, source/profile/provider/machine incompatibility, an
+unreviewed generation, or a missing/duplicate tuple.
+
+An eligible generation must bind the complete closed exact-HEAD matrix, clean source identity,
+fixed workload/profile inputs, provider image/version/effective-setting identities, machine
+metadata, raw and summary artifact digests, correctness and result digests, provider-native plan
+gates, synchronized-contention gates, required recovery evidence, and no missing or extra tuple.
+Three adversarial exact-range reviews and passing hosted checks are prerequisites for activation.
+The current registry remains empty until such a reviewed matrix exists; this amendment neither
+executes a matrix nor selects a physical form or performance verdict.
+
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
@@ -151,6 +176,16 @@ gate across all three physical forms.
   tail required by the runtime order on all three physical storage forms.
 - **FR-018**: The strict MongoDB native-plan gate MUST reject a winning collection scan or blocking
   sort even when the expected index also appears in the winning-plan subtree.
+- **FR-019**: Promotable scheduled baseline selection MUST resolve exclusively through a committed,
+  versioned registry generation approved by a reviewed Groundwork merge commit on `main` and bound
+  to immutable run-group and artifact content digests.
+- **FR-020**: Registry generations MUST be append-only and structurally immutable, activation MUST
+  be separate and explicit, and selection MUST fail closed unless exactly one trusted activation
+  exists for the requested exact compatibility tuple.
+- **FR-021**: Baseline activation MUST reject incomplete or drifting evidence and require the
+  complete closed exact-HEAD tuple set, clean source, fixed inputs, reproducible provider and
+  machine identities, raw/summary/correctness/result/plan digests, synchronized-contention,
+  required recovery evidence, three adversarial reviews, and passing hosted checks.
 
 ### Key Entities
 
@@ -176,6 +211,9 @@ gate across all three physical forms.
   accept the exact corrected shape, while preserving a unique logical key without an identity tail.
 - **SC-008**: A real MongoDB-backed benchmark test proves the ordered strict plan gate across shared
   documents, dedicated document table, and physical entity table forms.
+- **SC-009**: Container-free registry tests prove that direct paths cannot promote a scheduled
+  comparison, content drift and incomplete eligibility fail closed, append-only generations retain
+  history, and selection requires exactly one active reviewed generation for an exact tuple.
 
 ## Assumptions
 
