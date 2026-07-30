@@ -67,7 +67,7 @@ public sealed class PostgreSqlBenchmarkTarget(
         var evidence = new List<NativePlanEvidence>(requests.Count);
         foreach (var request in requests)
         {
-            var indexName = BenchmarkModelFactory.IndexFor(Model.Route, request.Ordered).Name.Identifier;
+            var expectedIndexName = BenchmarkModelFactory.IndexFor(Model.Route, request.Ordered).Name.Identifier;
             var rendered = RenderPlan(request, store);
             await using var command = connection.CreateCommand();
             command.CommandText = $"EXPLAIN (FORMAT JSON) {rendered.CommandText}";
@@ -75,11 +75,19 @@ public sealed class PostgreSqlBenchmarkTarget(
                 command.Parameters.AddWithValue(name, value ?? DBNull.Value);
             var plan = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken)) ?? string.Empty;
             var indexedRelation = (Model.Route.LinkedIndexStorage ?? Model.Route.PrimaryStorage).Name.Identifier;
-            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex &&
-                !UsesDeclaredIndexWithoutScanningIndexedRelation(plan, indexName, indexedRelation))
+            var indexName = expectedIndexName;
+            if (assertionMode == NativePlanAssertionMode.RequireDeclaredIndex)
             {
-                throw new InvalidOperationException(
-                    $"PostgreSQL native-plan gate rejected {request.Workload}/{request.Operation}. Expected index '{indexName}'.{Environment.NewLine}{plan}");
+                var candidates = BenchmarkModelFactory.PlanIndexCandidatesFor(Model.Route, request)
+                    .Select(index => index.Name.Identifier)
+                    .ToArray();
+                indexName = SelectDeclaredIndexWithoutScanningIndexedRelation(
+                    plan,
+                    candidates,
+                    indexedRelation) ?? throw new InvalidOperationException(
+                    $"PostgreSQL native-plan gate rejected {request.Workload}/{request.Operation}. " +
+                    $"Expected exactly one compatible declared index from [{string.Join(", ", candidates)}]." +
+                    $"{Environment.NewLine}{plan}");
             }
             var queryReceipt = NativePlanQueryReceipt.FromRelational(
                 request,
@@ -169,6 +177,22 @@ public sealed class PostgreSqlBenchmarkTarget(
             return element.ValueKind == JsonValueKind.Array &&
                    element.EnumerateArray().Any(child => ContainsIndex(child, expectedIndex));
         }
+    }
+
+    internal static string? SelectDeclaredIndexWithoutScanningIndexedRelation(
+        string plan,
+        IReadOnlyCollection<string> indexNames,
+        string indexedRelation)
+    {
+        ArgumentNullException.ThrowIfNull(indexNames);
+        var selected = indexNames
+            .Where(indexName => UsesDeclaredIndexWithoutScanningIndexedRelation(
+                plan,
+                indexName,
+                indexedRelation))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return selected.Length == 1 ? selected[0] : null;
     }
 
     public override async Task<StorageSnapshot> CaptureStorageAsync(CancellationToken cancellationToken)

@@ -36,6 +36,31 @@ public static class BenchmarkModelFactory
         return route.Indexes.Single(index => index.Identity == identity);
     }
 
+    public static IReadOnlyList<ExecutablePhysicalIndexRoute> PlanIndexCandidatesFor(
+        ExecutableStorageRoute route,
+        BenchmarkPlanRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        ArgumentNullException.ThrowIfNull(request);
+        var expected = IndexFor(route, request.Ordered);
+        if (request.Operation != NativePlanOperation.Count)
+            return [expected];
+
+        var predicateIndex = IndexFor(route, ordered: false);
+        var predicatePrefix = predicateIndex.Columns.Take(predicateIndex.Columns.Count - 1).ToArray();
+        return route.Indexes
+            .Where(candidate =>
+                candidate.Target == expected.Target &&
+                candidate.Columns.Count >= predicatePrefix.Length &&
+                candidate.Columns.Take(predicatePrefix.Length).Select(ColumnShape)
+                    .SequenceEqual(predicatePrefix.Select(ColumnShape)))
+            .ToArray();
+
+        static (string LogicalName, PhysicalSortDirection Direction) ColumnShape(
+            ExecutableIndexColumnRoute column) =>
+            (column.Column.LogicalName, column.Direction);
+    }
+
     public static NativePlanFieldBinding FieldBindingFor(ExecutableStorageRoute route)
     {
         ArgumentNullException.ThrowIfNull(route);
@@ -57,7 +82,9 @@ public static class BenchmarkModelFactory
         var binding = new SharedStorageBinding("benchmark-runtime");
         var columns = new List<ProjectedColumnDefinition>
         {
-            new("status", "status", PortablePhysicalType.String, Length: 64, IsNullable: false),
+            // Scope (256 bytes) + status (90) + rank (4) + comparison identity (1350)
+            // reaches SQL Server's 1700-byte key limit without weakening the stable-order tail.
+            new("status", "status", PortablePhysicalType.String, Length: 45, IsNullable: false),
             new("rank", "rank", PortablePhysicalType.Int32, IsNullable: false)
         };
         if (includeCategory)
