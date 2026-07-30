@@ -38,12 +38,14 @@ complete Groundwork #141 / Elsa #643.
 
 ## Evidence
 
-2026-07-30 candidate evidence:
+2026-07-31 candidate evidence. The prior 12 / 51 / 1 rerun tested source head
+`3c12f20944eb02d4c4f795dd2f6449b5bbfd1ba2`; the exact second-remediation worktree rerun below
+extends that source with the review fixes recorded in this section.
 
 ```bash
 dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj \
   --filter RelationshipTransition --no-restore
-# Passed: 12, Failed: 0
+# Passed: 22, Failed: 0
 
 dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj \
   --filter Relationship --no-restore
@@ -59,7 +61,11 @@ valid exact sidecar/fence backfill, opaque dangling diagnostics, durable bounded
 validation/cutover acknowledgement loss, concurrent candidate competition, and the closed public
 admission gate. Pending candidates bind a keyed, collision-safe frame of every normalized source
 identity/scope/reference and target identity before any restart can skip progress, replay validation,
-or activate; a terminal failure instead restores only its persisted `GW-RELATIONSHIP-013` code and
-opaque correlation without inspecting current source or target data. It does not claim ordinary fence
-maintenance, guarded prunes, a non-SQLite provider, production HMAC custody, or public relationship
-capability.
+or activate. Active reopen additionally requires the exact Active state, completed progress, input
+digest, and candidate-scoped reference/fence tuples to agree with the supplied snapshot. A terminal
+failure restores only its persisted `GW-RELATIONSHIP-013` code and opaque correlation after a
+domain-separated authenticated envelope binds the candidate, input digest, code, and correlation;
+it does not inspect current source or target data. The test-only inspection exposes exact candidate
+and source/target identity tuples but omits serialized references, failure material, and key data.
+This slice does not claim ordinary fence maintenance, guarded prunes, a non-SQLite provider,
+production HMAC custody, or public relationship capability.

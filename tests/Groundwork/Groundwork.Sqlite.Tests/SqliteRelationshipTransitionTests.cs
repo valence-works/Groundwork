@@ -40,6 +40,10 @@ public sealed class SqliteRelationshipTransitionTests
         Assert.Equal(3, snapshot.ProcessedSourceCount);
         Assert.Equal(2, snapshot.ReferenceCount);
         Assert.Equal(1, snapshot.FenceCount);
+        Assert.Equal(
+            [ExpectedReference(plan, "token-a", authorization), ExpectedReference(plan, "token-b", authorization)],
+            snapshot.References);
+        Assert.Equal([ExpectedFence(plan, authorization)], snapshot.Fences);
 
         var replay = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync(
             [Source("token-a", "authorization-a"), Source("token-b", "authorization-a"), Source("token-c", null)],
@@ -245,6 +249,51 @@ public sealed class SqliteRelationshipTransitionTests
         Assert.Equal(SqliteRelationshipTransitionPhase.Failed, snapshot.CandidatePhase);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Failed_candidate_rejects_a_swapped_correlation_or_corrupt_failure_mac(bool corruptMac)
+    {
+        await using var firstDatabase = TemporaryDatabase.Create();
+        await using var secondDatabase = TemporaryDatabase.Create();
+        var firstPlan = CreatePlan("failure-mac-a");
+        var secondPlan = CreatePlan("failure-mac-b");
+        var source = Source("token-missing", "missing-target-value");
+
+        Assert.Equal(
+            SqliteRelationshipTransitionStatus.DanglingReference,
+            (await CreateExecutor(firstDatabase.ConnectionString, firstPlan).ExecuteAsync([source], [])).Status);
+        Assert.Equal(
+            SqliteRelationshipTransitionStatus.DanglingReference,
+            (await CreateExecutor(secondDatabase.ConnectionString, secondPlan).ExecuteAsync([source], [])).Status);
+
+        if (corruptMac)
+        {
+            await ExecuteSqlAsync(
+                firstDatabase.ConnectionString,
+                "UPDATE groundwork_relationship_transition_state_v1 SET failure_mac = @value;",
+                ("@value", $"hmac-sha256-v1:{new string('0', 64)}"));
+        }
+        else
+        {
+            var otherCorrelation = await ReadScalarAsync(
+                secondDatabase.ConnectionString,
+                "SELECT failure_correlation FROM groundwork_relationship_transition_state_v1;");
+            var otherMac = await ReadScalarAsync(
+                secondDatabase.ConnectionString,
+                "SELECT failure_mac FROM groundwork_relationship_transition_state_v1;");
+            await ExecuteSqlAsync(
+                firstDatabase.ConnectionString,
+                "UPDATE groundwork_relationship_transition_state_v1 SET failure_correlation = @correlation, failure_mac = @mac;",
+                ("@correlation", otherCorrelation),
+                ("@mac", otherMac));
+        }
+
+        var replay = await CreateExecutor(firstDatabase.ConnectionString, firstPlan).ExecuteAsync([source], []);
+        Assert.Equal(SqliteRelationshipTransitionStatus.RelationshipConflict, replay.Status);
+        Assert.Null(replay.DanglingReference);
+    }
+
     [Fact]
     public async Task Competing_expected_absent_candidates_serialize_to_one_authoritative_generation()
     {
@@ -297,6 +346,42 @@ public sealed class SqliteRelationshipTransitionTests
         Assert.Equal(SqliteRelationshipTransitionStatus.RelationshipConflict, stale.Status);
         var snapshot = await CreateExecutor(database.ConnectionString, secondPlan).InspectForTestOnlyAsync();
         Assert.Equal(secondPlan.MaterializationSchema.GenerationIdentity, snapshot.ActiveGeneration);
+        Assert.Equal([ExpectedReference(secondPlan, "token-a", secondPlan.ProjectReferenceIdentity("authorization-a")!.Value)], snapshot.References);
+        Assert.Equal([ExpectedFence(secondPlan, secondPlan.ProjectReferenceIdentity("authorization-a")!.Value)], snapshot.Fences);
+
+        var priorCandidate = await CreateExecutor(database.ConnectionString, firstPlan).InspectForTestOnlyAsync();
+        Assert.Equal(secondPlan.MaterializationSchema.GenerationIdentity, priorCandidate.ActiveGeneration);
+        Assert.Equal([ExpectedReference(firstPlan, "token-a", firstPlan.ProjectReferenceIdentity("authorization-a")!.Value)], priorCandidate.References);
+        Assert.Equal([ExpectedFence(firstPlan, firstPlan.ProjectReferenceIdentity("authorization-a")!.Value)], priorCandidate.Fences);
+        Assert.NotEqual(
+            priorCandidate.References[0].CandidateGeneration,
+            snapshot.References[0].CandidateGeneration);
+    }
+
+    [Theory]
+    [InlineData("DELETE FROM groundwork_relationship_transition_state_v1;")]
+    [InlineData("UPDATE groundwork_relationship_transition_state_v1 SET phase = 1;")]
+    [InlineData("UPDATE groundwork_relationship_transition_state_v1 SET candidate_generation = candidate_generation || '-corrupt';")]
+    [InlineData("DELETE FROM groundwork_relationship_reference_sidecar_v1;")]
+    [InlineData("UPDATE groundwork_relationship_reference_sidecar_v1 SET candidate_generation = candidate_generation || '-corrupt';")]
+    [InlineData("DELETE FROM groundwork_relationship_target_fence_v1;")]
+    [InlineData("UPDATE groundwork_relationship_target_fence_v1 SET candidate_generation = candidate_generation || '-corrupt';")]
+    [InlineData("UPDATE groundwork_relationship_active_v1 SET materialization_fingerprint = materialization_fingerprint || '-corrupt';")]
+    public async Task Active_candidate_reopen_fails_closed_when_durable_evidence_is_missing_or_corrupt(string corruption)
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan($"active-corruption-{Guid.NewGuid():N}");
+        var source = Source("token-a", "authorization-a");
+        var target = Target(plan.ProjectReferenceIdentity("authorization-a")!.Value);
+        var executor = CreateExecutor(database.ConnectionString, plan);
+
+        Assert.Equal(
+            SqliteRelationshipTransitionStatus.Activated,
+            (await executor.ExecuteAsync([source], [target])).Status);
+        await ExecuteSqlAsync(database.ConnectionString, corruption);
+
+        var replay = await CreateExecutor(database.ConnectionString, plan).ExecuteAsync([source], [target]);
+        Assert.Equal(SqliteRelationshipTransitionStatus.RelationshipConflict, replay.Status);
     }
 
     [Fact]
@@ -333,6 +418,55 @@ public sealed class SqliteRelationshipTransitionTests
 
     private static SqliteRelationshipTransitionTargetRecord Target(Groundwork.Core.Text.PortableStringIdentityProjection identity) =>
         new("tenant-a", identity.LookupKey, identity.ComparisonKey);
+
+    private static SqliteRelationshipTransitionReferenceSnapshot ExpectedReference(
+        PhysicalRelationshipPlan plan,
+        string sourceId,
+        Groundwork.Core.Text.PortableStringIdentityProjection target) =>
+        new(
+            plan.MaterializationSchema.RelationshipIdentity,
+            plan.MaterializationSchema.GenerationIdentity,
+            plan.MaterializationSchema.Fingerprint,
+            "tenant-a",
+            $"lookup:{sourceId}",
+            $"comparison:{sourceId}",
+            "tenant-a",
+            target.LookupKey,
+            target.ComparisonKey);
+
+    private static SqliteRelationshipTransitionFenceSnapshot ExpectedFence(
+        PhysicalRelationshipPlan plan,
+        Groundwork.Core.Text.PortableStringIdentityProjection target) =>
+        new(
+            plan.MaterializationSchema.RelationshipIdentity,
+            plan.MaterializationSchema.GenerationIdentity,
+            plan.MaterializationSchema.Fingerprint,
+            "tenant-a",
+            target.LookupKey,
+            target.ComparisonKey);
+
+    private static async Task ExecuteSqlAsync(
+        string connectionString,
+        string commandText,
+        params (string Name, object Value)[] parameters)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        foreach (var parameter in parameters)
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<string> ReadScalarAsync(string connectionString, string commandText)
+    {
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        return Assert.IsType<string>(await command.ExecuteScalarAsync());
+    }
 
     private static PhysicalRelationshipPlan CreatePlan(string suffix)
     {

@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Groundwork.Core.PhysicalStorage;
@@ -22,6 +21,9 @@ internal sealed class SqliteRelationshipTransitionExecutor
     private const string CandidateInputDigestScheme = "hmac-sha256-v1:";
     private const string CandidateInputDigestDomain =
         "groundwork.relationship-materialization.sqlite-transition-input.hmac-sha256.v1";
+    private const string FailureEnvelopeMacScheme = "hmac-sha256-v1:";
+    private const string FailureEnvelopeMacDomain =
+        "groundwork.relationship-materialization.sqlite-transition-failure-envelope.hmac-sha256.v1";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     private readonly string connectionString;
@@ -78,7 +80,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
         var candidateInputDigest = CreateCandidateInputDigest(sources, targets);
 
         await EnsureInfrastructureAsync(cancellationToken);
-        var initial = await EnsureCandidateAsync(candidateInputDigest, cancellationToken);
+        var initial = await EnsureCandidateAsync(sources, targets, candidateInputDigest, cancellationToken);
         if (initial is not null)
             return initial;
 
@@ -87,16 +89,22 @@ internal sealed class SqliteRelationshipTransitionExecutor
             if (options.CancelAfterProcessedSourceCount is int cancellationPoint && index >= cancellationPoint)
                 throw new OperationCanceledException("Injected test-only relationship transition cancellation.", cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            var result = await BackfillOneAsync(index, sources[index], targets, candidateInputDigest, cancellationToken);
+            var result = await BackfillOneAsync(
+                index,
+                sources[index],
+                sources,
+                targets,
+                candidateInputDigest,
+                cancellationToken);
             if (result is not null)
                 return result;
         }
 
-        var validation = await ValidateAsync(sources.Length, candidateInputDigest, options, cancellationToken);
+        var validation = await ValidateAsync(sources, targets, candidateInputDigest, options, cancellationToken);
         if (validation is not null)
             return validation;
 
-        return await ActivateAsync(candidateInputDigest, options, cancellationToken);
+        return await ActivateAsync(sources, targets, candidateInputDigest, options, cancellationToken);
     }
 
     internal async Task<SqliteRelationshipTransitionSnapshot> InspectForTestOnlyAsync(
@@ -107,16 +115,20 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await EnsureInfrastructureAsync(connection, cancellationToken);
         var state = await ReadStateAsync(connection, null, cancellationToken);
         var active = await ReadActiveAsync(connection, null, cancellationToken);
+        var references = await ReadCandidateReferencesAsync(connection, null, cancellationToken);
+        var fences = await ReadCandidateFencesAsync(connection, null, cancellationToken);
         return new(
             active?.GenerationIdentity,
             active?.MaterializationFingerprint,
             state?.Phase,
             state?.ProcessedSourceCount ?? 0,
-            await CountAsync(connection, ReferenceTable, cancellationToken),
-            await CountAsync(connection, FenceTable, cancellationToken));
+            references,
+            fences);
     }
 
     private async Task<SqliteRelationshipTransitionExecutionResult?> EnsureCandidateAsync(
+        IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
+        HashSet<TargetKey> targets,
         string candidateInputDigest,
         CancellationToken cancellationToken)
     {
@@ -125,10 +137,20 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await EnsureInfrastructureAsync(connection, cancellationToken);
         await using var transaction = connection.BeginTransaction(deferred: false);
         var active = await ReadActiveAsync(connection, transaction, cancellationToken);
-        if (IsCandidate(active))
+        var state = await ReadStateAsync(connection, transaction, cancellationToken);
+        var activeResult = await ResolveActiveCandidateAsync(
+            connection,
+            transaction,
+            active,
+            state,
+            sources,
+            targets,
+            candidateInputDigest,
+            cancellationToken);
+        if (activeResult is not null)
         {
             await transaction.CommitAsync(cancellationToken);
-            return SqliteRelationshipTransitionExecutionResult.Activated;
+            return activeResult;
         }
         if (!ExpectedActiveMatches(active))
         {
@@ -136,7 +158,6 @@ internal sealed class SqliteRelationshipTransitionExecutor
             return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
         }
 
-        var state = await ReadStateAsync(connection, transaction, cancellationToken);
         if (state is not null && !state.MatchesRequirement(requirement))
         {
             await transaction.CommitAsync(cancellationToken);
@@ -161,6 +182,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
     private async Task<SqliteRelationshipTransitionExecutionResult?> BackfillOneAsync(
         int index,
         SqliteRelationshipTransitionSourceRecord source,
+        IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
         HashSet<TargetKey> targets,
         string candidateInputDigest,
         CancellationToken cancellationToken)
@@ -169,13 +191,26 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await connection.OpenAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction(deferred: false);
         var active = await ReadActiveAsync(connection, transaction, cancellationToken);
-        if (IsCandidate(active))
+        var state = await ReadStateAsync(connection, transaction, cancellationToken);
+        var activeResult = await ResolveActiveCandidateAsync(
+            connection,
+            transaction,
+            active,
+            state,
+            sources,
+            targets,
+            candidateInputDigest,
+            cancellationToken);
+        if (activeResult is not null)
         {
             await transaction.CommitAsync(cancellationToken);
-            return SqliteRelationshipTransitionExecutionResult.Activated;
+            return activeResult;
         }
-        var state = await ReadStateAsync(connection, transaction, cancellationToken)
-            ?? throw new InvalidOperationException("The durable relationship transition state disappeared during backfill.");
+        if (state is null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
         if (state.Phase == SqliteRelationshipTransitionPhase.Failed)
         {
             await transaction.CommitAsync(cancellationToken);
@@ -202,7 +237,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
             if (!targets.Contains(target))
             {
                 var diagnostic = CreateDanglingDiagnostic(source.TargetScope, identity.ComparisonKey);
-                await MarkFailedAsync(connection, transaction, diagnostic, cancellationToken);
+                await MarkFailedAsync(connection, transaction, diagnostic, candidateInputDigest, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 return SqliteRelationshipTransitionExecutionResult.Dangling(diagnostic);
             }
@@ -216,7 +251,8 @@ internal sealed class SqliteRelationshipTransitionExecutor
     }
 
     private async Task<SqliteRelationshipTransitionExecutionResult?> ValidateAsync(
-        int expectedSourceCount,
+        IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
+        HashSet<TargetKey> targets,
         string candidateInputDigest,
         SqliteRelationshipTransitionTestOptions options,
         CancellationToken cancellationToken)
@@ -225,13 +261,26 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await connection.OpenAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction(deferred: false);
         var active = await ReadActiveAsync(connection, transaction, cancellationToken);
-        if (IsCandidate(active))
+        var state = await ReadStateAsync(connection, transaction, cancellationToken);
+        var activeResult = await ResolveActiveCandidateAsync(
+            connection,
+            transaction,
+            active,
+            state,
+            sources,
+            targets,
+            candidateInputDigest,
+            cancellationToken);
+        if (activeResult is not null)
         {
             await transaction.CommitAsync(cancellationToken);
-            return SqliteRelationshipTransitionExecutionResult.Activated;
+            return activeResult;
         }
-        var state = await ReadStateAsync(connection, transaction, cancellationToken)
-            ?? throw new InvalidOperationException("The durable relationship transition state disappeared during validation.");
+        if (state is null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
         if (state.Phase == SqliteRelationshipTransitionPhase.Failed)
         {
             await transaction.CommitAsync(cancellationToken);
@@ -242,8 +291,12 @@ internal sealed class SqliteRelationshipTransitionExecutor
             await transaction.CommitAsync(cancellationToken);
             return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
         }
-        if (state.ProcessedSourceCount != expectedSourceCount)
-            throw new InvalidOperationException("Relationship transition cannot validate before bounded backfill completes.");
+        if (state.ProcessedSourceCount != sources.Count ||
+            !await CandidateMaterializationMatchesAsync(connection, transaction, sources, targets, cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
         if (state.Phase == SqliteRelationshipTransitionPhase.Preparing)
         {
             await using var command = connection.CreateCommand();
@@ -257,7 +310,11 @@ internal sealed class SqliteRelationshipTransitionExecutor
                 """;
             AddCandidateParameters(command);
             command.Parameters.AddWithValue("@phase", (int)SqliteRelationshipTransitionPhase.Validated);
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+            }
         }
         await transaction.CommitAsync(cancellationToken);
         if (options.ThrowAfterValidationCommit)
@@ -266,6 +323,8 @@ internal sealed class SqliteRelationshipTransitionExecutor
     }
 
     private async Task<SqliteRelationshipTransitionExecutionResult> ActivateAsync(
+        IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
+        HashSet<TargetKey> targets,
         string candidateInputDigest,
         SqliteRelationshipTransitionTestOptions options,
         CancellationToken cancellationToken)
@@ -274,13 +333,26 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await connection.OpenAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction(deferred: false);
         var active = await ReadActiveAsync(connection, transaction, cancellationToken);
-        if (IsCandidate(active))
+        var state = await ReadStateAsync(connection, transaction, cancellationToken);
+        var activeResult = await ResolveActiveCandidateAsync(
+            connection,
+            transaction,
+            active,
+            state,
+            sources,
+            targets,
+            candidateInputDigest,
+            cancellationToken);
+        if (activeResult is not null)
         {
             await transaction.CommitAsync(cancellationToken);
-            return SqliteRelationshipTransitionExecutionResult.Activated;
+            return activeResult;
         }
-        var state = await ReadStateAsync(connection, transaction, cancellationToken)
-            ?? throw new InvalidOperationException("The durable relationship transition state disappeared during activation.");
+        if (state is null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
         if (state.Phase == SqliteRelationshipTransitionPhase.Failed)
         {
             await transaction.CommitAsync(cancellationToken);
@@ -291,7 +363,9 @@ internal sealed class SqliteRelationshipTransitionExecutor
             await transaction.CommitAsync(cancellationToken);
             return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
         }
-        if (state.Phase != SqliteRelationshipTransitionPhase.Validated || !ExpectedActiveMatches(active))
+        if (state.Phase != SqliteRelationshipTransitionPhase.Validated ||
+            !ExpectedActiveMatches(active) ||
+            !await CandidateMaterializationMatchesAsync(connection, transaction, sources, targets, cancellationToken))
         {
             await transaction.CommitAsync(cancellationToken);
             return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
@@ -315,7 +389,11 @@ internal sealed class SqliteRelationshipTransitionExecutor
                 """;
             AddCandidateParameters(command);
             command.Parameters.AddWithValue("@phase", (int)SqliteRelationshipTransitionPhase.Active);
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+            }
         }
         await transaction.CommitAsync(cancellationToken);
         if (options.ThrowAfterActivationCommit)
@@ -372,6 +450,82 @@ internal sealed class SqliteRelationshipTransitionExecutor
         string.Equals(active.GenerationIdentity, requirement.CandidateGeneration.GenerationIdentity, StringComparison.Ordinal) &&
         string.Equals(active.MaterializationFingerprint, requirement.CandidateGeneration.MaterializationFingerprint, StringComparison.Ordinal);
 
+    private async Task<SqliteRelationshipTransitionExecutionResult?> ResolveActiveCandidateAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ActiveGeneration? active,
+        TransitionState? state,
+        IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
+        HashSet<TargetKey> targets,
+        string candidateInputDigest,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCandidate(active))
+            return null;
+
+        if (state is null ||
+            state.Phase != SqliteRelationshipTransitionPhase.Active ||
+            state.ProcessedSourceCount != sources.Count ||
+            !state.Matches(requirement, candidateInputDigest) ||
+            !await CandidateMaterializationMatchesAsync(connection, transaction, sources, targets, cancellationToken))
+        {
+            return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
+
+        return SqliteRelationshipTransitionExecutionResult.Activated;
+    }
+
+    private async Task<bool> CandidateMaterializationMatchesAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
+        HashSet<TargetKey> targets,
+        CancellationToken cancellationToken)
+    {
+        var expectedReferences = new HashSet<SqliteRelationshipTransitionReferenceSnapshot>();
+        var expectedFences = new HashSet<SqliteRelationshipTransitionFenceSnapshot>();
+        foreach (var source in sources)
+        {
+            var projected = plan.ProjectReferenceIdentity(source.SerializedReference);
+            if (projected is not { } identity)
+                continue;
+
+            var target = new TargetKey(source.TargetScope, identity.LookupKey, identity.ComparisonKey);
+            if (!targets.Contains(target))
+                return false;
+
+            expectedReferences.Add(CreateReferenceSnapshot(source, identity));
+            expectedFences.Add(CreateFenceSnapshot(target));
+        }
+
+        var actualReferences = await ReadCandidateReferencesAsync(connection, transaction, cancellationToken);
+        var actualFences = await ReadCandidateFencesAsync(connection, transaction, cancellationToken);
+        return expectedReferences.SetEquals(actualReferences) && expectedFences.SetEquals(actualFences);
+    }
+
+    private SqliteRelationshipTransitionReferenceSnapshot CreateReferenceSnapshot(
+        SqliteRelationshipTransitionSourceRecord source,
+        PortableStringIdentityProjection target) =>
+        new(
+            requirement.CandidateGeneration.RelationshipIdentity,
+            requirement.CandidateGeneration.GenerationIdentity,
+            requirement.CandidateGeneration.MaterializationFingerprint,
+            source.SourceScope,
+            source.SourceLookupKey,
+            source.SourceComparisonKey,
+            source.TargetScope,
+            target.LookupKey,
+            target.ComparisonKey);
+
+    private SqliteRelationshipTransitionFenceSnapshot CreateFenceSnapshot(TargetKey target) =>
+        new(
+            requirement.CandidateGeneration.RelationshipIdentity,
+            requirement.CandidateGeneration.GenerationIdentity,
+            requirement.CandidateGeneration.MaterializationFingerprint,
+            target.Scope,
+            target.LookupKey,
+            target.ComparisonKey);
+
     private RelationshipMaterializationDanglingReference CreateDanglingDiagnostic(
         string targetScope,
         string targetComparisonKey) =>
@@ -387,11 +541,23 @@ internal sealed class SqliteRelationshipTransitionExecutor
     {
         try
         {
+            var failureCode = state.FailureCode ?? throw new InvalidOperationException();
+            var failureCorrelation = state.FailureCorrelation ?? throw new InvalidOperationException();
+            var failureMac = state.FailureMac ?? throw new InvalidOperationException();
+            if (!state.MatchesRequirement(requirement) ||
+                !IsCanonicalMac(failureMac, FailureEnvelopeMacScheme) ||
+                !FixedTimeEquals(
+                    failureMac,
+                    CreateFailureEnvelopeMac(state.CandidateInputDigest, failureCode, failureCorrelation)))
+            {
+                return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+            }
+
             return SqliteRelationshipTransitionExecutionResult.Dangling(
                 RelationshipMaterializationDanglingReference.Restore(
                     requirement,
-                    state.FailureCode ?? throw new InvalidOperationException(),
-                    state.FailureCorrelation ?? throw new InvalidOperationException()));
+                    failureCode,
+                    failureCorrelation));
         }
         catch (ArgumentException)
         {
@@ -400,6 +566,27 @@ internal sealed class SqliteRelationshipTransitionExecutor
         catch (InvalidOperationException)
         {
             return SqliteRelationshipTransitionExecutionResult.RelationshipConflict;
+        }
+    }
+
+    private static bool IsCanonicalMac(string value, string scheme) =>
+        value.Length == scheme.Length + 64 &&
+        value.StartsWith(scheme, StringComparison.Ordinal) &&
+        value.AsSpan(scheme.Length).IndexOfAnyExcept("0123456789abcdef") < 0;
+
+    private static bool FixedTimeEquals(string actual, string expected)
+    {
+        var actualBytes = StrictUtf8.GetBytes(actual);
+        var expectedBytes = StrictUtf8.GetBytes(expected);
+        try
+        {
+            return actualBytes.Length == expectedBytes.Length &&
+                   CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(actualBytes);
+            CryptographicOperations.ZeroMemory(expectedBytes);
         }
     }
 
@@ -426,6 +613,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
                 processed_source_count INTEGER NOT NULL,
                 failure_code TEXT NULL,
                 failure_correlation TEXT NULL,
+                failure_mac TEXT NULL,
                 PRIMARY KEY (relationship_identity, candidate_generation, candidate_fingerprint)
             );
             CREATE TABLE IF NOT EXISTS {ActiveTable} (
@@ -478,11 +666,12 @@ internal sealed class SqliteRelationshipTransitionExecutor
             INSERT INTO {StateTable} (
                 relationship_identity, candidate_generation, candidate_fingerprint,
                 expected_kind, expected_generation, expected_fingerprint,
-                candidate_input_digest, phase, processed_source_count, failure_code, failure_correlation)
+                candidate_input_digest, phase, processed_source_count,
+                failure_code, failure_correlation, failure_mac)
             VALUES (
                 @relationshipIdentity, @candidateGeneration, @candidateFingerprint,
                 @expectedKind, @expectedGeneration, @expectedFingerprint,
-                @candidateInputDigest, @phase, 0, NULL, NULL);
+                @candidateInputDigest, @phase, 0, NULL, NULL, NULL);
             """;
         AddCandidateParameters(command);
         command.Parameters.AddWithValue("@expectedKind", requirement.ExpectedActive.IsAbsent ? 0 : 1);
@@ -549,6 +738,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
         SqliteConnection connection,
         SqliteTransaction transaction,
         RelationshipMaterializationDanglingReference diagnostic,
+        string candidateInputDigest,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -557,7 +747,8 @@ internal sealed class SqliteRelationshipTransitionExecutor
             UPDATE {StateTable}
             SET phase = @phase,
                 failure_code = @failureCode,
-                failure_correlation = @failureCorrelation
+                failure_correlation = @failureCorrelation,
+                failure_mac = @failureMac
             WHERE relationship_identity = @relationshipIdentity
               AND candidate_generation = @candidateGeneration
               AND candidate_fingerprint = @candidateFingerprint;
@@ -566,6 +757,12 @@ internal sealed class SqliteRelationshipTransitionExecutor
         command.Parameters.AddWithValue("@phase", (int)SqliteRelationshipTransitionPhase.Failed);
         command.Parameters.AddWithValue("@failureCode", RelationshipMaterializationDanglingReference.DiagnosticCode);
         command.Parameters.AddWithValue("@failureCorrelation", diagnostic.TargetKeyCorrelationIdentity.Value);
+        command.Parameters.AddWithValue(
+            "@failureMac",
+            CreateFailureEnvelopeMac(
+                candidateInputDigest,
+                RelationshipMaterializationDanglingReference.DiagnosticCode,
+                diagnostic.TargetKeyCorrelationIdentity.Value));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -598,7 +795,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
         command.Transaction = transaction;
         command.CommandText = $"""
             SELECT expected_kind, expected_generation, expected_fingerprint, candidate_input_digest,
-                   phase, processed_source_count, failure_code, failure_correlation
+                   phase, processed_source_count, failure_code, failure_correlation, failure_mac
             FROM {StateTable}
             WHERE relationship_identity = @relationshipIdentity
               AND candidate_generation = @candidateGeneration
@@ -616,7 +813,8 @@ internal sealed class SqliteRelationshipTransitionExecutor
             (SqliteRelationshipTransitionPhase)reader.GetInt32(4),
             reader.GetInt32(5),
             reader.IsDBNull(6) ? null : reader.GetString(6),
-            reader.IsDBNull(7) ? null : reader.GetString(7));
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            reader.IsDBNull(8) ? null : reader.GetString(8));
     }
 
     private async Task<ActiveGeneration?> ReadActiveAsync(
@@ -638,11 +836,75 @@ internal sealed class SqliteRelationshipTransitionExecutor
             : null;
     }
 
-    private static async Task<long> CountAsync(SqliteConnection connection, string table, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<SqliteRelationshipTransitionReferenceSnapshot>> ReadCandidateReferencesAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {table};";
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT relationship_identity, candidate_generation, candidate_fingerprint,
+                   source_scope, source_lookup_key, source_comparison_key,
+                   target_scope, target_lookup_key, target_comparison_key
+            FROM {ReferenceTable}
+            WHERE relationship_identity = @relationshipIdentity
+              AND candidate_generation = @candidateGeneration
+              AND candidate_fingerprint = @candidateFingerprint
+            ORDER BY source_scope, source_lookup_key, source_comparison_key,
+                     target_scope, target_lookup_key, target_comparison_key;
+            """;
+        AddCandidateParameters(command);
+        var results = new List<SqliteRelationshipTransitionReferenceSnapshot>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.GetString(8)));
+        }
+
+        return results;
+    }
+
+    private async Task<IReadOnlyList<SqliteRelationshipTransitionFenceSnapshot>> ReadCandidateFencesAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT relationship_identity, candidate_generation, candidate_fingerprint,
+                   target_scope, target_lookup_key, target_comparison_key
+            FROM {FenceTable}
+            WHERE relationship_identity = @relationshipIdentity
+              AND candidate_generation = @candidateGeneration
+              AND candidate_fingerprint = @candidateFingerprint
+            ORDER BY target_scope, target_lookup_key, target_comparison_key;
+            """;
+        AddCandidateParameters(command);
+        var results = new List<SqliteRelationshipTransitionFenceSnapshot>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5)));
+        }
+
+        return results;
     }
 
     private void AddCandidateParameters(SqliteCommand command)
@@ -674,6 +936,22 @@ internal sealed class SqliteRelationshipTransitionExecutor
         return targets;
     }
 
+    private string CreateFailureEnvelopeMac(
+        string candidateInputDigest,
+        string failureCode,
+        string failureCorrelation)
+    {
+        using var framed = new MemoryStream();
+        WriteFramedString(framed, FailureEnvelopeMacDomain);
+        WriteFramedString(framed, requirement.CandidateGeneration.RelationshipIdentity);
+        WriteFramedString(framed, requirement.CandidateGeneration.GenerationIdentity);
+        WriteFramedString(framed, requirement.CandidateGeneration.MaterializationFingerprint);
+        WriteFramedString(framed, candidateInputDigest);
+        WriteFramedString(framed, failureCode);
+        WriteFramedString(framed, failureCorrelation);
+        return CreateMac(FailureEnvelopeMacScheme, framed);
+    }
+
     private string CreateCandidateInputDigest(
         IReadOnlyList<SqliteRelationshipTransitionSourceRecord> sources,
         IReadOnlyCollection<TargetKey> targets)
@@ -702,13 +980,18 @@ internal sealed class SqliteRelationshipTransitionExecutor
             WriteFramedString(framed, target.ComparisonKey);
         }
 
+        return CreateMac(CandidateInputDigestScheme, framed);
+    }
+
+    private string CreateMac(string scheme, MemoryStream framed)
+    {
         var input = framed.ToArray();
         try
         {
             var digest = HMACSHA256.HashData(diagnosticKey, input);
             try
             {
-                return CandidateInputDigestScheme + Convert.ToHexString(digest).ToLowerInvariant();
+                return scheme + Convert.ToHexString(digest).ToLowerInvariant();
             }
             finally
             {
@@ -763,7 +1046,8 @@ internal sealed class SqliteRelationshipTransitionExecutor
         SqliteRelationshipTransitionPhase Phase,
         int ProcessedSourceCount,
         string? FailureCode,
-        string? FailureCorrelation)
+        string? FailureCorrelation,
+        string? FailureMac)
     {
         public bool MatchesRequirement(RelationshipMaterializationTransitionRequirement current) =>
             ExpectedKind == (current.ExpectedActive.IsAbsent ? 0 : 1) &&
@@ -863,8 +1147,31 @@ internal sealed record SqliteRelationshipTransitionSnapshot(
     string? ActiveFingerprint,
     SqliteRelationshipTransitionPhase? CandidatePhase,
     int ProcessedSourceCount,
-    long ReferenceCount,
-    long FenceCount);
+    IReadOnlyList<SqliteRelationshipTransitionReferenceSnapshot> References,
+    IReadOnlyList<SqliteRelationshipTransitionFenceSnapshot> Fences)
+{
+    public int ReferenceCount => References.Count;
+    public int FenceCount => Fences.Count;
+}
+
+internal sealed record SqliteRelationshipTransitionReferenceSnapshot(
+    string RelationshipIdentity,
+    string CandidateGeneration,
+    string CandidateFingerprint,
+    string SourceScope,
+    string SourceLookupKey,
+    string SourceComparisonKey,
+    string TargetScope,
+    string TargetLookupKey,
+    string TargetComparisonKey);
+
+internal sealed record SqliteRelationshipTransitionFenceSnapshot(
+    string RelationshipIdentity,
+    string CandidateGeneration,
+    string CandidateFingerprint,
+    string TargetScope,
+    string TargetLookupKey,
+    string TargetComparisonKey);
 
 internal sealed record SqliteRelationshipTransitionTestOptions(
     bool ThrowAfterActivationCommit,
