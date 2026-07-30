@@ -702,6 +702,10 @@ internal sealed class SqliteRelationshipTransitionExecutor
         await ValidateTableSchemaAsync(connection, transaction, ActiveTable, ActiveColumns, cancellationToken);
         await ValidateTableSchemaAsync(connection, transaction, ReferenceTable, ReferenceColumns, cancellationToken);
         await ValidateTableSchemaAsync(connection, transaction, FenceTable, FenceColumns, cancellationToken);
+        await ValidatePrimaryKeySchemaAsync(connection, transaction, StateTable, StateColumns, cancellationToken);
+        await ValidatePrimaryKeySchemaAsync(connection, transaction, ActiveTable, ActiveColumns, cancellationToken);
+        await ValidatePrimaryKeySchemaAsync(connection, transaction, ReferenceTable, ReferenceColumns, cancellationToken);
+        await ValidatePrimaryKeySchemaAsync(connection, transaction, FenceTable, FenceColumns, cancellationToken);
 
         command.CommandText = $"""
             CREATE INDEX IF NOT EXISTS {ReferenceTargetIndex}
@@ -715,7 +719,14 @@ internal sealed class SqliteRelationshipTransitionExecutor
             transaction,
             ReferenceTable,
             ReferenceTargetIndex,
-            ["relationship_identity", "candidate_generation", "candidate_fingerprint", "target_scope", "target_lookup_key", "target_comparison_key"],
+            [
+                new("relationship_identity", "BINARY", false),
+                new("candidate_generation", "BINARY", false),
+                new("candidate_fingerprint", "BINARY", false),
+                new("target_scope", "BINARY", false),
+                new("target_lookup_key", "BINARY", false),
+                new("target_comparison_key", "BINARY", false)
+            ],
             cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
@@ -779,7 +790,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
         SqliteTransaction transaction,
         string table,
         string index,
-        IReadOnlyList<string> expectedColumns,
+        IReadOnlyList<IndexColumn> expectedColumns,
         CancellationToken cancellationToken)
     {
         var found = false;
@@ -800,21 +811,84 @@ internal sealed class SqliteRelationshipTransitionExecutor
             }
         }
 
-        var actualColumns = new List<string>();
-        await using (var infoCommand = connection.CreateCommand())
-        {
-            infoCommand.Transaction = transaction;
-            infoCommand.CommandText = $"PRAGMA index_info('{index}');";
-            await using var reader = await infoCommand.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-                actualColumns.Add(reader.GetString(2));
-        }
-
+        var actualColumns = await ReadIndexKeySchemaAsync(connection, transaction, index, cancellationToken);
         if (!found || !actualColumns.SequenceEqual(expectedColumns))
         {
             throw new InvalidOperationException(
                 $"Durable relationship transition index '{index}' does not match its required versioned schema.");
         }
+    }
+
+    private static async Task ValidatePrimaryKeySchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        IReadOnlyList<SchemaColumn> expectedColumns,
+        CancellationToken cancellationToken)
+    {
+        string? primaryKeyIndex = null;
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = $"PRAGMA index_list('{table}');";
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!string.Equals(reader.GetString(3), "pk", StringComparison.Ordinal))
+                    continue;
+
+                if (primaryKeyIndex is not null || reader.GetInt32(2) != 1 || reader.GetInt32(4) != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Durable relationship transition table '{table}' does not have its required primary-key index.");
+                }
+
+                primaryKeyIndex = reader.GetString(1);
+            }
+        }
+
+        if (primaryKeyIndex is null)
+        {
+            throw new InvalidOperationException(
+                $"Durable relationship transition table '{table}' does not have its required primary-key index.");
+        }
+
+        var expected = expectedColumns
+            .Where(column => column.PrimaryKeyOrder > 0)
+            .OrderBy(column => column.PrimaryKeyOrder)
+            .Select(column => new IndexColumn(column.Name, "BINARY", false))
+            .ToArray();
+        var actual = await ReadIndexKeySchemaAsync(connection, transaction, primaryKeyIndex, cancellationToken);
+        if (!actual.SequenceEqual(expected))
+        {
+            throw new InvalidOperationException(
+                $"Durable relationship transition table '{table}' does not have its required ordinal primary-key schema.");
+        }
+    }
+
+    private static async Task<IReadOnlyList<IndexColumn>> ReadIndexKeySchemaAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string index,
+        CancellationToken cancellationToken)
+    {
+        var columns = new List<IndexColumn>();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA index_xinfo('{index}');";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.GetInt32(5) != 1)
+                continue;
+
+            columns.Add(new(
+                reader.GetString(2),
+                reader.GetString(4).ToUpperInvariant(),
+                reader.GetInt32(3) == 1));
+        }
+
+        return columns;
     }
 
     private async Task InsertStateAsync(
@@ -1225,6 +1299,7 @@ internal sealed class SqliteRelationshipTransitionExecutor
     }
 
     private sealed record ActiveGeneration(string GenerationIdentity, string MaterializationFingerprint);
+    private sealed record IndexColumn(string Name, string Collation, bool Descending);
     private sealed record SchemaColumn(string Name, string Type, bool NotNull, int PrimaryKeyOrder);
     private sealed record TargetKey(string Scope, string LookupKey, string ComparisonKey);
 

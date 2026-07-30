@@ -460,6 +460,73 @@ public sealed class SqliteRelationshipTransitionTests
     }
 
     [Fact]
+    public async Task Active_candidate_reopen_rejects_a_case_insensitive_primary_key()
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan("malformed-sidecar-collation");
+        var source = Source("token-a", "authorization-a");
+        var target = Target(plan.ProjectReferenceIdentity("authorization-a")!.Value);
+        var executor = CreateExecutor(database.ConnectionString, plan);
+        Assert.Equal(
+            SqliteRelationshipTransitionStatus.Activated,
+            (await executor.ExecuteAsync([source], [target])).Status);
+        await ExecuteSqlAsync(
+            database.ConnectionString,
+            """
+            ALTER TABLE groundwork_relationship_reference_sidecar_v1
+                RENAME TO groundwork_relationship_reference_sidecar_legacy;
+            CREATE TABLE groundwork_relationship_reference_sidecar_v1 (
+                relationship_identity TEXT NOT NULL,
+                candidate_generation TEXT NOT NULL,
+                candidate_fingerprint TEXT NOT NULL,
+                source_scope TEXT COLLATE NOCASE NOT NULL,
+                source_lookup_key TEXT NOT NULL,
+                source_comparison_key TEXT NOT NULL,
+                target_scope TEXT NOT NULL,
+                target_lookup_key TEXT NOT NULL,
+                target_comparison_key TEXT NOT NULL,
+                PRIMARY KEY (
+                    relationship_identity, candidate_generation, candidate_fingerprint,
+                    source_scope, source_lookup_key, source_comparison_key)
+            );
+            INSERT INTO groundwork_relationship_reference_sidecar_v1
+            SELECT * FROM groundwork_relationship_reference_sidecar_legacy;
+            """);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CreateExecutor(database.ConnectionString, plan).ExecuteAsync([source], [target]));
+
+        Assert.Contains("ordinal primary-key schema", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Active_candidate_reopen_rejects_a_non_ordinal_or_descending_target_index()
+    {
+        await using var database = TemporaryDatabase.Create();
+        var plan = CreatePlan("malformed-target-index");
+        var source = Source("token-a", "authorization-a");
+        var target = Target(plan.ProjectReferenceIdentity("authorization-a")!.Value);
+        var executor = CreateExecutor(database.ConnectionString, plan);
+        Assert.Equal(
+            SqliteRelationshipTransitionStatus.Activated,
+            (await executor.ExecuteAsync([source], [target])).Status);
+        await ExecuteSqlAsync(
+            database.ConnectionString,
+            """
+            DROP INDEX ix_groundwork_relationship_reference_sidecar_v1_target;
+            CREATE INDEX ix_groundwork_relationship_reference_sidecar_v1_target
+                ON groundwork_relationship_reference_sidecar_v1 (
+                    relationship_identity, candidate_generation, candidate_fingerprint,
+                    target_scope COLLATE NOCASE, target_lookup_key, target_comparison_key DESC);
+            """);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CreateExecutor(database.ConnectionString, plan).ExecuteAsync([source], [target]));
+
+        Assert.Contains("ix_groundwork_relationship_reference_sidecar_v1_target", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Public_factory_still_rejects_relationship_manifest_before_it_opens_the_connection()
     {
         var manifest = CreateManifest("public-gate");

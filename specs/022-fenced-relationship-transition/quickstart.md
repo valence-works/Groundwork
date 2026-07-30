@@ -38,14 +38,14 @@ complete Groundwork #141 / Elsa #643.
 
 ## Evidence
 
-2026-07-31 candidate evidence. The prior 22 / 51 / 1 rerun tested source head
-`546bfbf5b708639e8bae226ec45a916d62913c1b`; the exact third-remediation worktree rerun below
-extends that source with the schema-evolution review fixes recorded in this section.
+2026-07-31 candidate evidence. The prior 24 / 51 / 1 rerun tested source head
+`09e86294aa440e0ccc2454082a23d234c42ea5cb`; the exact fourth-remediation worktree rerun below
+extends that source with the schema-semantic review fixes recorded in this section.
 
 ```bash
 dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj \
   --filter RelationshipTransition --no-restore
-# Passed: 24, Failed: 0
+# Passed: 26, Failed: 0
 
 dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj \
   --filter Relationship --no-restore
@@ -67,9 +67,10 @@ failure restores only its persisted `GW-RELATIONSHIP-013` code and opaque correl
 domain-separated authenticated envelope binds the candidate, input digest, code, and correlation;
 it does not inspect current source or target data. Infrastructure initialization serializes schema
 creation and validation, upgrades only the exact pre-`failure_mac` state-v1 layout, and rejects
-unexpected columns, primary-key shapes, or target-index definitions before reading transition
-evidence. Active materialization checks require both exact tuple cardinality and set equality; the
-suite proves a duplicate-capable malformed sidecar cannot reopen an active candidate. The test-only
-inspection exposes exact candidate and source/target identity tuples but omits serialized
-references, failure material, and key data. This slice does not claim ordinary fence maintenance,
-guarded prunes, a non-SQLite provider, production HMAC custody, or public relationship capability.
+unexpected columns, primary-key shapes, ordinal collations, index sort directions, or target-index
+definitions before reading transition evidence. Active materialization checks require both exact
+tuple cardinality and set equality; the suite proves duplicate-capable, case-insensitive, and
+descending-index schema substitutions cannot reopen an active candidate. The test-only inspection
+exposes exact candidate and source/target identity tuples but omits serialized references, failure
+material, and key data. This slice does not claim ordinary fence maintenance, guarded prunes, a
+non-SQLite provider, production HMAC custody, or public relationship capability.

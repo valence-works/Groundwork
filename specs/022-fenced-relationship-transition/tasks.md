@@ -9,7 +9,7 @@
 
 - [x] T002A Ratify and encode the provider-neutral expected-absent inaugural-transition representation — Evidence: `RelationshipMaterializationExpectedActive` is the closed `Absent | ExactGeneration` contract and Core tests cover both forms.
 - [x] T003 Define provider-owned active/candidate transition state and legal phase transitions — Evidence: `SqliteRelationshipTransitionExecutor` persists Preparing, Validated, Active, and Failed state with candidate-bound expected-active preconditions, an opaque HMAC of the complete normalized candidate input, and a separate domain-authenticated failure envelope.
-- [x] T004 Materialize versioned SQLite transition, reference-sidecar, and target-fence storage — Evidence: executor transactionally creates and validates the exact `*_v1` SQLite state, active, sidecar, target-index, and fence schema; it upgrades only the exact pre-`failure_mac` state-v1 shape and otherwise fails closed.
+- [x] T004 Materialize versioned SQLite transition, reference-sidecar, and target-fence storage — Evidence: executor transactionally creates and validates the `*_v1` SQLite state, active, sidecar, target-index, and fence schema, including primary-key/index collation and sort semantics; it upgrades only the exact pre-`failure_mac` state-v1 shape and otherwise fails closed.
 - [x] T005 Add internal test-only admission that cannot enable public relationship capability — Evidence: `CreateForTestOnly` is internal and `Public_factory_still_rejects_relationship_manifest_before_it_opens_the_connection` preserves `GW-RELATIONSHIP-012`.
 
 ## Phase 3: Backfill And Validation
@@ -27,8 +27,8 @@
 
 ## Phase 5: Evidence
 
-- [x] T013 Add real durable SQLite tests for valid backfill, dangling failure, cutover competition, replay, cancellation, and restart — Evidence: `SqliteRelationshipTransitionTests` has twenty-four file-backed SQLite cases, including authenticated failure replay, exact tuple/isolation assertions, pre-MAC schema upgrade, and missing/corrupt/duplicate-capable state/reference/fence/active evidence rejection.
+- [x] T013 Add real durable SQLite tests for valid backfill, dangling failure, cutover competition, replay, cancellation, and restart — Evidence: `SqliteRelationshipTransitionTests` has twenty-six file-backed SQLite cases, including authenticated failure replay, exact tuple/isolation assertions, pre-MAC schema upgrade, and missing/corrupt/duplicate-capable/case-insensitive/descending state/reference/fence/active evidence rejection.
 - [x] T014 Prove public `GW-RELATIONSHIP-012` admission remains fail-closed before provider I/O — Evidence: focused factory test observes `GW-RELATIONSHIP-012` while the supplied SQLite connection remains Closed.
-- [x] T015 Run focused/Core/materialization/provider gates and record exact evidence and nonclaims in the quickstart — Evidence: quickstart records the third remediation's 24 SQLite, 51 Core, and 1 materialization relationship test passing on the exact worktree diff over the identified source head.
+- [x] T015 Run focused/Core/materialization/provider gates and record exact evidence and nonclaims in the quickstart — Evidence: quickstart records the fourth remediation's 26 SQLite, 51 Core, and 1 materialization relationship test passing on the exact worktree diff over the identified source head.
 - [ ] T016 Run three adversarial exact-range reviews, remediate findings, and record dispositions
 - [ ] T017 Land by Model B, verify remote main containment, and update Groundwork #141 plus Elsa #643
