@@ -98,9 +98,9 @@ remediated and re-verified by their originating reviewers:
   file-backed. The final record binds the exact 29 / 51 / 1 rerun, distinguishes 28 file-backed
   transition cases from the in-memory closed-connection admission guard, and retains the exact
   source head and nonclaims. Originating-reviewer verdict: **PASS**.
-- Scope and test preservation: an earlier record used the wrong evidence date, asserted only row
-  counts, and could not see generated/hidden schema drift. The final range is confined to the
-  ratified internal SQLite proof and Spec 022, preserves the public pre-I/O `GW-RELATIONSHIP-012`
-  gate, removes or weakens no test, and leaves public capability, ordinary fence maintenance,
-  guarded prune, non-SQLite certification, and production key custody explicitly open.
+- Scope and test preservation: earlier backfill tests asserted only row counts and could not see
+  generated/hidden schema drift. The final range is confined to the ratified internal SQLite proof
+  and Spec 022, preserves the public pre-I/O `GW-RELATIONSHIP-012` gate, removes or weakens no test,
+  and leaves public capability, ordinary fence maintenance, guarded prune, non-SQLite certification,
+  and production key custody explicitly open.
   Originating-reviewer verdict: **PASS**.
