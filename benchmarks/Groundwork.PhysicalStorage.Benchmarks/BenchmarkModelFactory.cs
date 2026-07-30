@@ -67,14 +67,16 @@ public static class BenchmarkModelFactory
             IndexedIndexIdentity,
             [
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
-                new PhysicalIndexColumnDefinition("status", 1)
+                new PhysicalIndexColumnDefinition("status", 1),
+                new PhysicalIndexColumnDefinition("id_comparison_key", 2)
             ]);
         var orderedIndex = new PhysicalIndexDefinition(
             CompoundIndexIdentity,
             [
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
                 new PhysicalIndexColumnDefinition("status", 1),
-                new PhysicalIndexColumnDefinition("rank", 2, PhysicalSortDirection.Descending)
+                new PhysicalIndexColumnDefinition("rank", 2, PhysicalSortDirection.Descending),
+                new PhysicalIndexColumnDefinition("id_comparison_key", 3)
             ]);
         var table = form switch
         {

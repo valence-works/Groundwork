@@ -2786,6 +2786,75 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Scalar_queries_and_native_explains_bind_the_declared_index_and_reject_a_replacement_name()
+    {
+        var commands = new ConcurrentQueue<(string Name, BsonDocument Command)>();
+        var settings = MongoClientSettings.FromConnectionString(container.GetConnectionString());
+        settings.ClusterConfigurator = builder => builder.Subscribe<CommandStartedEvent>(started =>
+        {
+            if (started.CommandName is "aggregate" or "find" or "explain")
+                commands.Enqueue((started.CommandName, started.Command.DeepClone().AsBsonDocument));
+        });
+        using var client = new MongoClient(settings);
+        var database = client.GetDatabase($"groundwork_scalar_hint_{Guid.NewGuid():N}");
+        var model = LatestPerKeyModel(PhysicalStorageForm.PhysicalEntityTable);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(
+            database,
+            model,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "one", "1", """{"category":"alpha","priority":1,"visible":true}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "two", "1", """{"category":"beta","priority":2,"visible":true}"""));
+
+        var query = new DocumentQuery(
+            "workItem",
+            "latest-by-category",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("visible", "true"))],
+            [new DocumentQueryOrder("category"), new DocumentQueryOrder("priority")],
+            take: 1,
+            latestPerKeyPath: "category");
+        var route = Assert.Single(model.Routes);
+        var expectedIndex = Assert.Single(route.Indexes);
+        var expectedHint = expectedIndex.Name.Identifier;
+
+        commands.Clear();
+        await store.QueryAsync(query);
+        await store.CountAsync(query.Select(BoundedQueryResultOperation.Count));
+        await store.FirstOrDefaultAsync(query.Select(BoundedQueryResultOperation.First));
+        await store.AnyAsync(query.Select(BoundedQueryResultOperation.Any));
+
+        var executions = commands.Where(command => command.Name is "aggregate" or "find").ToArray();
+        Assert.Equal(6, executions.Length);
+        Assert.All(executions, command => Assert.Equal(expectedHint, command.Command["hint"].AsString));
+
+        commands.Clear();
+        await store.ExplainAsync(query);
+        await store.ExplainAsync(query.Select(BoundedQueryResultOperation.Count));
+        await store.ExplainAsync(query.Select(BoundedQueryResultOperation.First));
+        await store.ExplainAsync(query.Select(BoundedQueryResultOperation.Any));
+
+        var explains = commands.Where(command => command.Name == "explain").ToArray();
+        Assert.Equal(6, explains.Length);
+        Assert.All(explains, command =>
+            Assert.Equal(expectedHint, command.Command["explain"].AsBsonDocument["hint"].AsString));
+
+        var collection = database.GetCollection<BsonDocument>(expectedIndex.Target == ExecutableStorageObjectRole.PrimaryStorage
+            ? route.PrimaryStorage.Name.Identifier
+            : route.LinkedIndexStorage!.Name.Identifier);
+        var actualIndex = (await (await collection.Indexes.ListAsync()).ToListAsync())
+            .Single(index => index["name"].AsString == expectedHint);
+        await collection.Indexes.DropOneAsync(expectedHint);
+        await collection.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(
+            new BsonDocumentIndexKeysDefinition<BsonDocument>(actualIndex["key"].AsBsonDocument),
+            new CreateIndexOptions { Name = $"{expectedHint}_replacement" }));
+
+        await Assert.ThrowsAsync<MongoCommandException>(() => store.QueryAsync(query));
+        await Assert.ThrowsAsync<MongoCommandException>(() => store.ExplainAsync(query));
+    }
+
+    [Fact]
     public async Task Cursor_pages_apply_documented_live_view_mutation_semantics()
     {
         var database = Database();
@@ -3382,8 +3451,10 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             new("storage_scope", 0),
             new(path, 1)
         };
-        if (pagingSupport == QueryPagingSupport.Cursor)
+        if (!isUnique && pagingSupport == QueryPagingSupport.Cursor)
             physicalIndexColumns.Add(new("id_lookup_key", physicalIndexColumns.Count));
+        else if (!isUnique && pagingSupport == QueryPagingSupport.Offset)
+            physicalIndexColumns.Add(new("id_comparison_key", physicalIndexColumns.Count));
         var physicalIndex = new PhysicalIndexDefinition(
             indexIdentity,
             physicalIndexColumns,
@@ -3533,7 +3604,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             "by-category",
             [
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
-                new PhysicalIndexColumnDefinition("category", 1)
+                new PhysicalIndexColumnDefinition("category", 1),
+                new PhysicalIndexColumnDefinition("id_comparison_key", 2)
             ]);
         var logicalIndexes = new List<LogicalIndexDeclaration>
         {
@@ -3685,7 +3757,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             [
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
                 new PhysicalIndexColumnDefinition("category", 1),
-                new PhysicalIndexColumnDefinition("priority", 2)
+                new PhysicalIndexColumnDefinition("priority", 2),
+                new PhysicalIndexColumnDefinition("id_comparison_key", 3)
             ]);
         var definition = form switch
         {

@@ -25,6 +25,8 @@ internal static class MongoWinningPlanInspector
             .ToArray();
         if (stages.Any(document => document["stage"].AsString.Equals("COLLSCAN", StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("MongoDB winning plan contains a COLLSCAN stage.");
+        if (stages.Any(document => document["stage"].AsString.Equals("SORT", StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("MongoDB winning plan contains a blocking SORT stage.");
         if (!stages.Any(document =>
                 document["stage"].AsString.Equals("IXSCAN", StringComparison.OrdinalIgnoreCase) &&
                 document.TryGetValue("indexName", out var indexName) &&
@@ -43,14 +45,14 @@ internal static class MongoWinningPlanInspector
             var document = value.AsBsonDocument;
             yield return document;
             foreach (var element in document.Elements)
-            foreach (var descendant in Descendants(element.Value))
-                yield return descendant;
+                foreach (var descendant in Descendants(element.Value))
+                    yield return descendant;
         }
         else if (value.IsBsonArray)
         {
             foreach (var item in value.AsBsonArray)
-            foreach (var descendant in Descendants(item))
-                yield return descendant;
+                foreach (var descendant in Descendants(item))
+                    yield return descendant;
         }
     }
 }

@@ -227,3 +227,47 @@ Confirmed findings and dispositions:
 This review record is the only change after the remediated source head. Before merge, the three
 reviewers re-verify the final record-only head so the durable account and PR candidate cannot
 diverge.
+
+## Issue #50 Complete Stable-Order Certification Checkpoint
+
+This checkpoint starts from Groundwork main
+`c48b5a1d04c2664211af1f14d403e3f0391846ca`. It closes the false-certification gap that allowed an
+ordered MongoDB benchmark query to pass core index admission while the provider selected
+`by-status` and performed a blocking `SORT`. The failure was reproduced on that exact base before
+timing began; no latency or throughput sample from the failed route was retained or trusted.
+
+The certified mechanism is:
+
+- a nonunique scale-bearing offset query requires the order-preserving identity comparison key as
+  the final physical-index column;
+- a nonunique scale-bearing cursor query requires the identity lookup key instead;
+- an already-unique logical key remains the complete total order, so no appended identity column
+  weakens its business-key uniqueness;
+- nonpaged queries may share an index carrying the required tail, while offset and cursor queries
+  cannot share one index because their required identity representations differ;
+- MongoDB execution and explain bind the exact route-declared index, and the strict winning-plan
+  inspector independently rejects both `COLLSCAN` and `SORT`;
+- executable-route serialization preserves both the manifest definition name and the
+  provider-resolved executable name when a linked identity-tail column is renamed.
+
+Candidate verification:
+
+- 631/631 Groundwork core tests passed.
+- 556/556 MongoDB provider tests passed before the final provider-neutral shared-index
+  compatibility refinement; the final source was then rechecked with all 121/121
+  `MongoDbPhysicalStorageConformanceTests` cases and the real ordered all-form benchmark test.
+- 590/590 SQLite provider tests passed.
+- 802/802 PostgreSQL and SQL Server provider tests passed in 6m33s.
+- 361/361 container-free benchmark-harness tests passed.
+- The real MongoDB ordered-plan regression passed across every physical storage form and retained
+  two strict plan artifacts per case.
+- `dotnet build Groundwork.slnx --no-restore` passed with zero errors. The existing
+  `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisory remains visible rather than suppressed.
+- Targeted `dotnet format --verify-no-changes` passed for every changed C# file, and
+  `git diff --check` passed.
+- All task-owned Testcontainers exited; the unrelated pre-existing `elsa-keycloak` container was
+  not touched.
+
+This checkpoint does **not** execute or approve the scheduled 1K/100K/1M four-provider matrix,
+promote an immutable baseline, select a final physical form, produce an Elsa performance verdict,
+or close issue #50. Those claims remain gated by the controlled matrix and baseline review.

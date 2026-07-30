@@ -1562,7 +1562,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             SqlServerGroundworkCapabilities.Provider,
             includePriority: true,
             dedicatedWithoutLinked: dedicatedWithoutLinked,
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames));
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
+            includeCategoryPriorityQuery: false));
 
     protected override async Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
     {
@@ -1611,7 +1612,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             SqlServerGroundworkCapabilities.Provider,
             includePriority: true,
             normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            stringCasePolicy: stringCasePolicy);
+            stringCasePolicy: stringCasePolicy,
+            categoryPaging: QueryPagingSupport.None);
         await PhysicalSchemaApplication.ApplyAsync(
             model.Target,
             new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));

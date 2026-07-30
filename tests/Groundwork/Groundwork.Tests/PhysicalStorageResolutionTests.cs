@@ -203,7 +203,8 @@ public sealed class PhysicalStorageResolutionTests
         Assert.Collection(
             Assert.Single(definition.Indexes).Columns,
             column => Assert.Equal("storage_scope", column.ColumnLogicalName),
-            column => Assert.Equal("tenantId", column.ColumnLogicalName));
+            column => Assert.Equal("tenantId", column.ColumnLogicalName),
+            column => Assert.Equal("id_comparison_key", column.ColumnLogicalName));
     }
 
     [Fact]
@@ -292,7 +293,8 @@ public sealed class PhysicalStorageResolutionTests
         Assert.Collection(
             index.Columns,
             column => Assert.Equal("storage_scope", column.ColumnLogicalName),
-            column => Assert.Equal("document_kind", column.ColumnLogicalName));
+            column => Assert.Equal("document_kind", column.ColumnLogicalName),
+            column => Assert.Equal("id_comparison_key", column.ColumnLogicalName));
     }
 
     [Fact]
@@ -433,6 +435,7 @@ public sealed class PhysicalStorageResolutionTests
             PhysicalNamePolicy.Identity,
             ProviderPhysicalNameNormalizer.Identity);
 
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
         var definition = Assert.Single(result.Definitions).Definition;
         var index = Assert.Single(definition.Indexes);
         Assert.Equal("by-customer-created", index.LogicalName);
@@ -520,11 +523,12 @@ public sealed class PhysicalStorageResolutionTests
             columns,
             column => Assert.Equal(PhysicalSortDirection.Ascending, column.Direction),
             column => Assert.Equal(PhysicalSortDirection.Ascending, column.Direction),
-            column => Assert.Equal(PhysicalSortDirection.Descending, column.Direction));
+            column => Assert.Equal(PhysicalSortDirection.Descending, column.Direction),
+            column => Assert.Equal(PhysicalSortDirection.Ascending, column.Direction));
     }
 
     [Fact]
-    public void CompatibleReverseSortDemandsResolveIndependentlyOfDeclarationOrder()
+    public void ReverseSortDemandsAreRejectedWhenTheRuntimeIdentityTieBreakRemainsAscending()
     {
         var logicalIndex = new LogicalIndexDeclaration(
             "by-customer-created",
@@ -544,12 +548,12 @@ public sealed class PhysicalStorageResolutionTests
         var first = Resolve([forward, reverse]);
         var second = Resolve([reverse, forward]);
 
-        Assert.True(first.IsValid, string.Join("; ", first.Diagnostics.Select(x => x.Message)));
-        Assert.True(second.IsValid, string.Join("; ", second.Diagnostics.Select(x => x.Message)));
-        Assert.Equal(Assert.Single(first.Definitions), Assert.Single(second.Definitions));
-        Assert.Equal(
-            Assert.Single(first.Definitions).Fingerprint,
-            Assert.Single(second.Definitions).Fingerprint);
+        Assert.False(first.IsValid);
+        Assert.False(second.IsValid);
+        Assert.Empty(first.Definitions);
+        Assert.Empty(second.Definitions);
+        Assert.Contains(first.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-025");
+        Assert.Contains(second.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-025");
 
         BoundedQueryDeclaration Query(
             string identity,
@@ -1188,7 +1192,8 @@ public sealed class PhysicalStorageResolutionTests
                     "by-category",
                     [
                         new PhysicalIndexColumnDefinition("storage_scope", 0),
-                        new PhysicalIndexColumnDefinition("category", 1)
+                        new PhysicalIndexColumnDefinition("category", 1),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 2)
                     ])
             ]);
         var ordinary = new BoundedQueryDeclaration(
@@ -1355,7 +1360,7 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
-    public void Explicitly_unfiltered_route_requires_the_identity_tie_break_in_its_index()
+    public void Default_unfiltered_offset_route_synthesizes_the_comparison_identity_tie_break()
     {
         var index = new LogicalIndexDeclaration(
             "by-category",
@@ -1394,12 +1399,11 @@ public sealed class PhysicalStorageResolutionTests
             PhysicalNamePolicy.Identity,
             ProviderPhysicalNameNormalizer.Identity);
 
-        Assert.False(result.IsValid);
-        Assert.Contains(
-            result.Diagnostics,
-            diagnostic =>
-                diagnostic.Code == "GW-PHYSICAL-027" &&
-                diagnostic.Target?.EndsWith(".sortFields", StringComparison.Ordinal) == true);
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var indexColumns = Assert.Single(Assert.Single(result.Definitions).Definition.Indexes).Columns;
+        Assert.Equal(
+            ["category", "id_comparison_key"],
+            indexColumns.Select(column => column.ColumnLogicalName));
     }
 
     [Fact]
@@ -1457,6 +1461,91 @@ public sealed class PhysicalStorageResolutionTests
         Assert.False(result.IsValid);
         Assert.Empty(result.Definitions);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-025");
+    }
+
+    [Fact]
+    public void Shared_scale_bearing_index_rejects_mixed_cursor_and_offset_identity_tie_breaks()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        BoundedQueryDeclaration Query(string identity, QueryPagingSupport paging) => new(
+            identity,
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            paging,
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields: [new BoundedQuerySortField("category", PhysicalSortDirection.Ascending)]);
+        var manifest = WithPhysicalStorage(
+            SampleManifests.MetadataManifest(),
+            new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Default(),
+                [index],
+                [
+                    Query("list-by-category-offset", QueryPagingSupport.Offset),
+                    Query("list-by-category-cursor", QueryPagingSupport.Cursor)
+                ]));
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-027" &&
+            diagnostic.Message.Contains(PhysicalDocumentIdentityFieldPaths.Comparison, StringComparison.Ordinal) &&
+            diagnostic.Message.Contains(PhysicalDocumentIdentityFieldPaths.Lookup, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Nonpaged_query_can_share_an_offset_query_comparison_tie_break()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var manifest = WithPhysicalStorage(
+            SampleManifests.MetadataManifest(),
+            new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Default(),
+                [index],
+                [
+                    new BoundedQueryDeclaration(
+                        "find-by-category",
+                        index.Identity,
+                        new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                        QuerySortSupport.None,
+                        QueryPagingSupport.None,
+                        BoundedQueryExecutionClass.ScaleBearing),
+                    new BoundedQueryDeclaration(
+                        "list-by-category",
+                        index.Identity,
+                        new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                        QuerySortSupport.Ascending,
+                        QueryPagingSupport.Offset,
+                        BoundedQueryExecutionClass.ScaleBearing)
+                ]));
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        Assert.Equal(
+            ["storage_scope", "category", "id_comparison_key"],
+            Assert.Single(Assert.Single(result.Definitions).Definition.Indexes)
+                .Columns.Select(column => column.ColumnLogicalName));
     }
 
     [Fact]
@@ -1722,9 +1811,14 @@ public sealed class PhysicalStorageResolutionTests
             "list-by-category",
             "by-category",
             new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-            QuerySortSupport.None,
+            QuerySortSupport.Both,
             QueryPagingSupport.Offset,
-            BoundedQueryExecutionClass.ScaleBearing);
+            BoundedQueryExecutionClass.ScaleBearing,
+            sortFields:
+            [
+                new BoundedQuerySortField("category", PhysicalSortDirection.Ascending),
+                new BoundedQuerySortField("createdAt", PhysicalSortDirection.Ascending)
+            ]);
         var definition = PhysicalTableDefinition.PhysicalEntityTable(
             "configurationDocument",
             [

@@ -1277,7 +1277,8 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             PostgreSqlGroundworkCapabilities.Provider,
             includePriority: true,
             dedicatedWithoutLinked: dedicatedWithoutLinked,
-            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames));
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            includeCategoryPriorityQuery: false));
 
     protected override async Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
     {
@@ -1333,7 +1334,8 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             PostgreSqlGroundworkCapabilities.Provider,
             includePriority: true,
             normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
-            stringCasePolicy: stringCasePolicy);
+            stringCasePolicy: stringCasePolicy,
+            categoryPaging: QueryPagingSupport.None);
         await PhysicalSchemaApplication.ApplyAsync(
             model.Target,
             new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString()));

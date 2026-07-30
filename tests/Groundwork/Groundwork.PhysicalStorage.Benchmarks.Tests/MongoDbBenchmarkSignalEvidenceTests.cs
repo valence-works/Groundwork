@@ -68,4 +68,31 @@ public sealed class MongoDbBenchmarkSignalEvidenceTests()
         Assert.DoesNotContain("mongodb://", raw, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("groundwork_bench_", raw, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Ordered_query_uses_the_declared_compound_index_without_a_blocking_sort_for_every_form()
+    {
+        var configuration = BenchmarkProfiles.Smoke with
+        {
+            DatasetSize = 25,
+            MigrationDatasetSize = 5,
+            MeasurementIterations = 5,
+            OperationsPerIteration = 1,
+            Providers = [BenchmarkProvider.MongoDb],
+            StorageForms = Enum.GetValues<PhysicalStorageForm>()
+        };
+        var result = await new BenchmarkRunner().RunAsync(
+            new BenchmarkRunRequest(
+                RepositoryRoot,
+                configuration,
+                [BenchmarkWorkload.MixedCompoundOrdering],
+                Output,
+                BaselineRun: null,
+                AllowContainers: true,
+                RegressionConfirmationRun: false),
+            CancellationToken.None);
+
+        Assert.Equal(Enum.GetValues<PhysicalStorageForm>(), result.Report.Cases.Select(resultCase => resultCase.Case.StorageForm));
+        Assert.All(result.Report.Cases, benchmarkCase => Assert.Equal(2, benchmarkCase.PlanArtifacts.Count));
+    }
 }

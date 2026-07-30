@@ -312,7 +312,7 @@ public static class ExecutableStorageRouteSerializer
                 writer.WriteString("declaredTarget", index.Definition.Target.ToString());
                 writer.WriteNumber("schemaVersion", index.Definition.SchemaVersion);
                 WriteEvolution(writer, index.Definition.Evolution);
-                WriteIndexColumns(writer, index.Columns);
+                WriteIndexColumns(writer, index.Columns, index.Definition.Columns);
                 writer.WriteEndObject();
             }
             writer.WriteEndArray();
@@ -416,13 +416,16 @@ public static class ExecutableStorageRouteSerializer
     private static ExecutablePhysicalIndexRoute ReadIndex(JsonElement element)
     {
         var columns = ReadIndexColumns(element).ToArray();
+        var definitionColumns = element.GetProperty("columns").EnumerateArray().Select(column =>
+            new PhysicalIndexColumnDefinition(
+                column.TryGetProperty("definitionLogicalName", out var definitionLogicalName)
+                    ? definitionLogicalName.GetString()!
+                    : column.GetProperty("column").GetProperty("logical").GetString()!,
+                column.GetProperty("order").GetInt32(),
+                ReadEnum<PhysicalSortDirection>(column, "direction"))).ToArray();
         var definition = new PhysicalIndexDefinition(
             element.GetProperty("identity").GetString()!,
-            columns.Select(column => new PhysicalIndexColumnDefinition(
-                    column.Column.LogicalName,
-                    column.Order,
-                    column.Direction))
-                .ToArray(),
+            definitionColumns,
             element.GetProperty("unique").GetBoolean(),
             element.GetProperty("schemaVersion").GetInt32(),
             ReadEvolution(element),
@@ -525,7 +528,10 @@ public static class ExecutableStorageRouteSerializer
         writer.WriteEndObject();
     }
 
-    private static void WriteIndexColumns(Utf8JsonWriter writer, IReadOnlyList<ExecutableIndexColumnRoute> columns)
+    private static void WriteIndexColumns(
+        Utf8JsonWriter writer,
+        IReadOnlyList<ExecutableIndexColumnRoute> columns,
+        IReadOnlyList<PhysicalIndexColumnDefinition>? definitionColumns = null)
     {
         writer.WritePropertyName("columns");
         writer.WriteStartArray();
@@ -533,6 +539,12 @@ public static class ExecutableStorageRouteSerializer
         {
             writer.WriteStartObject();
             WriteColumn(writer, "column", column.Column);
+            var definitionColumn = definitionColumns?.Single(candidate => candidate.Order == column.Order);
+            if (definitionColumn is not null &&
+                !StringComparer.Ordinal.Equals(definitionColumn.ColumnLogicalName, column.Column.LogicalName))
+            {
+                writer.WriteString("definitionLogicalName", definitionColumn.ColumnLogicalName);
+            }
             writer.WriteNumber("order", column.Order);
             writer.WriteString("direction", column.Direction.ToString());
             writer.WriteEndObject();

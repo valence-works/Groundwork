@@ -1761,7 +1761,8 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
             "by-schema-version",
             [
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
-                new PhysicalIndexColumnDefinition("schema_version", 1)
+                new PhysicalIndexColumnDefinition("schema_version", 1),
+                new PhysicalIndexColumnDefinition("id_comparison_key", 2)
             ],
             target: PhysicalIndexStorageTarget.PrimaryStorage);
         var table = PhysicalTableDefinition.DedicatedDocumentTable(

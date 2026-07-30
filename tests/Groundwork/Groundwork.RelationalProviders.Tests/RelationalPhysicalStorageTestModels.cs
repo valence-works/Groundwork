@@ -64,7 +64,7 @@ internal static class RelationalPhysicalStorageTestModels
         instance ??= Guid.NewGuid().ToString("N")[..8];
         var columns = new List<ProjectedColumnDefinition>
         {
-            new("category", "category", PortablePhysicalType.String, Length: 200, IsNullable: categoryNullable)
+            new("category", "category", PortablePhysicalType.String, Length: 32, IsNullable: categoryNullable)
         };
         if (includeCollection)
         {
@@ -82,10 +82,12 @@ internal static class RelationalPhysicalStorageTestModels
         if (scoped)
             categoryIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
         categoryIndexColumns.Add(new PhysicalIndexColumnDefinition("category", categoryIndexColumns.Count));
-        if (categoryPaging == QueryPagingSupport.Cursor)
+        if (!categoryUnique && categoryPaging is QueryPagingSupport.Offset or QueryPagingSupport.Cursor)
         {
             categoryIndexColumns.Add(new PhysicalIndexColumnDefinition(
-                new DocumentEnvelopeDefinition().IdLookupKeyColumn,
+                categoryPaging == QueryPagingSupport.Cursor
+                    ? new DocumentEnvelopeDefinition().IdLookupKeyColumn
+                    : new DocumentEnvelopeDefinition().IdComparisonKeyColumn,
                 categoryIndexColumns.Count));
         }
         var indexes = new List<PhysicalIndexDefinition>
@@ -116,6 +118,12 @@ internal static class RelationalPhysicalStorageTestModels
                     compoundColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
                 compoundColumns.Add(new PhysicalIndexColumnDefinition("category", compoundColumns.Count));
                 compoundColumns.Add(new PhysicalIndexColumnDefinition("priority", compoundColumns.Count));
+                if (includeLatestPerCategory)
+                {
+                    compoundColumns.Add(new PhysicalIndexColumnDefinition(
+                        new DocumentEnvelopeDefinition().IdComparisonKeyColumn,
+                        compoundColumns.Count));
+                }
                 indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns));
             }
         }

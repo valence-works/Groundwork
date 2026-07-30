@@ -38,6 +38,7 @@ internal sealed class MongoDbPhysicalQueryExplainer(
         var renderedBaseFilter = Render(lookup, basePredicate.Filter);
         var renderedPageFilter = Render(lookup, pagePredicate.Filter);
         var sort = MongoDbPhysicalQueryHandler.BuildSort(query, plan);
+        var indexHint = MongoDbPhysicalQueryHandler.PlanIndexHint(plan, route);
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical query explain",
@@ -63,7 +64,7 @@ internal sealed class MongoDbPhysicalQueryExplainer(
                 await AddAsync(
                     PhysicalDocumentQueryCommandKind.Count,
                     PhysicalDocumentQueryCommandIdentities.Count,
-                    CountCommand(plan.LookupObject.Identifier, renderedBaseFilter),
+                    CountCommand(plan.LookupObject.Identifier, renderedBaseFilter, indexHint),
                     basePredicate.FieldIdentifiers);
                 if (query.Take != 0)
                 {
@@ -71,12 +72,12 @@ internal sealed class MongoDbPhysicalQueryExplainer(
                     await AddAsync(
                         PhysicalDocumentQueryCommandKind.Page,
                         PhysicalDocumentQueryCommandIdentities.Page,
-                        FindCommand(lookup, query, renderedPageFilter, sort, pageLimit, includeSort: true, includeSkip: true),
+                        FindCommand(lookup, query, renderedPageFilter, sort, pageLimit, includeSort: true, includeSkip: true, indexHint),
                         pagePredicate.FieldIdentifiers);
                     if (plan.RequiresPrimaryLookup)
                     {
                         var found = await ExecuteBoundedFindAsync(
-                            lookup, query, pagePredicate.Filter, sort, pageLimit, cancellationToken);
+                            lookup, query, pagePredicate.Filter, sort, pageLimit, indexHint, cancellationToken);
                         if (query.Take is { } take && found.Count > take)
                             found = found.Take(take).ToArray();
                         await AddPrimaryHydrationAsync(found);
@@ -93,7 +94,7 @@ internal sealed class MongoDbPhysicalQueryExplainer(
                 await AddAsync(
                     PhysicalDocumentQueryCommandKind.Count,
                     PhysicalDocumentQueryCommandIdentities.Count,
-                    CountCommand(plan.LookupObject.Identifier, renderedBaseFilter),
+                    CountCommand(plan.LookupObject.Identifier, renderedBaseFilter, indexHint),
                     basePredicate.FieldIdentifiers);
                 break;
             case BoundedQueryResultOperation.First:
@@ -110,17 +111,17 @@ internal sealed class MongoDbPhysicalQueryExplainer(
                 await AddAsync(
                     PhysicalDocumentQueryCommandKind.Count,
                     PhysicalDocumentQueryCommandIdentities.Count,
-                    CountCommand(plan.LookupObject.Identifier, renderedBaseFilter),
+                    CountCommand(plan.LookupObject.Identifier, renderedBaseFilter, indexHint),
                     basePredicate.FieldIdentifiers);
                 await AddAsync(
                     PhysicalDocumentQueryCommandKind.First,
                     PhysicalDocumentQueryCommandIdentities.First,
-                    FindCommand(lookup, query, renderedPageFilter, sort, 1, includeSort: true, includeSkip: true),
+                    FindCommand(lookup, query, renderedPageFilter, sort, 1, includeSort: true, includeSkip: true, indexHint),
                     pagePredicate.FieldIdentifiers);
                 if (plan.RequiresPrimaryLookup)
                 {
                     var found = await ExecuteBoundedFindAsync(
-                        lookup, query, pagePredicate.Filter, sort, 1, cancellationToken);
+                        lookup, query, pagePredicate.Filter, sort, 1, indexHint, cancellationToken);
                     await AddPrimaryHydrationAsync(found);
                 }
                 break;
@@ -128,7 +129,7 @@ internal sealed class MongoDbPhysicalQueryExplainer(
                 await AddAsync(
                     PhysicalDocumentQueryCommandKind.Any,
                     PhysicalDocumentQueryCommandIdentities.Any,
-                    FindCommand(lookup, query, renderedBaseFilter, sort: null, limit: 1, includeSort: false, includeSkip: false),
+                    FindCommand(lookup, query, renderedBaseFilter, sort: null, limit: 1, includeSort: false, includeSkip: false, indexHint),
                     basePredicate.FieldIdentifiers);
                 break;
             default:
@@ -191,7 +192,7 @@ internal sealed class MongoDbPhysicalQueryExplainer(
             await AddAsync(
                 PhysicalDocumentQueryCommandKind.Count,
                 PhysicalDocumentQueryCommandIdentities.Count,
-                AggregateCommand(plan.LookupObject.Identifier, pipeline),
+                AggregateCommand(plan.LookupObject.Identifier, pipeline, indexHint),
                 LatestPerKeyFieldIdentifiers(basePredicate, query, plan));
         }
 
@@ -207,12 +208,12 @@ internal sealed class MongoDbPhysicalQueryExplainer(
             await AddAsync(
                 kind,
                 identity,
-                AggregateCommand(plan.LookupObject.Identifier, pipeline),
+                AggregateCommand(plan.LookupObject.Identifier, pipeline, indexHint),
                 LatestPerKeyFieldIdentifiers(basePredicate, executionQuery, plan));
             if (!plan.RequiresPrimaryLookup)
                 return;
 
-            var linked = await ExecuteAggregateAsync(lookup, pipeline, cancellationToken);
+            var linked = await ExecuteAggregateAsync(lookup, pipeline, indexHint, cancellationToken);
             await AddPrimaryHydrationAsync(linked);
         }
     }
@@ -250,7 +251,7 @@ internal sealed class MongoDbPhysicalQueryExplainer(
             _ => throw new NotSupportedException(
                 $"MongoDB collection membership explain does not support result operation '{query.ResultOperation}'.")
         };
-        var command = AggregateCommand(plan.LookupObject.Identifier, pipeline);
+        var command = AggregateCommand(plan.LookupObject.Identifier, pipeline, indexHint: null);
         var nativePlan = await ExplainCommandAsync(command, cancellationToken);
         var shape = DescribeCommand(command, plan);
         var explanation = new PhysicalDocumentQueryCommandExplanation(
@@ -283,8 +284,12 @@ internal sealed class MongoDbPhysicalQueryExplainer(
             },
             cancellationToken: cancellationToken);
 
-    private static BsonDocument CountCommand(string collection, BsonDocument renderedFilter) =>
-        new()
+    private static BsonDocument CountCommand(
+        string collection,
+        BsonDocument renderedFilter,
+        BsonValue? indexHint)
+    {
+        var command = new BsonDocument
         {
             ["aggregate"] = collection,
             ["pipeline"] = new BsonArray
@@ -298,16 +303,26 @@ internal sealed class MongoDbPhysicalQueryExplainer(
             },
             ["cursor"] = new BsonDocument()
         };
+        if (indexHint is not null)
+            command["hint"] = indexHint;
+        return command;
+    }
 
     private static BsonDocument AggregateCommand(
         string collection,
-        IReadOnlyList<BsonDocument> pipeline) =>
-        new()
+        IReadOnlyList<BsonDocument> pipeline,
+        BsonValue? indexHint)
+    {
+        var command = new BsonDocument
         {
             ["aggregate"] = collection,
             ["pipeline"] = new BsonArray(pipeline),
             ["cursor"] = new BsonDocument()
         };
+        if (indexHint is not null)
+            command["hint"] = indexHint;
+        return command;
+    }
 
     private static BsonDocument FindCommand(
         IMongoCollection<BsonDocument> collection,
@@ -316,7 +331,8 @@ internal sealed class MongoDbPhysicalQueryExplainer(
         SortDefinition<BsonDocument>? sort,
         int limit,
         bool includeSort,
-        bool includeSkip)
+        bool includeSkip,
+        BsonValue? indexHint)
     {
         var command = new BsonDocument
         {
@@ -327,6 +343,8 @@ internal sealed class MongoDbPhysicalQueryExplainer(
             command["sort"] = sort.Render(new RenderArgs<BsonDocument>(collection.DocumentSerializer, BsonSerializer.SerializerRegistry));
         if (includeSkip && query.Skip is { } skip)
             command["skip"] = skip;
+        if (indexHint is not null)
+            command["hint"] = indexHint;
         command["limit"] = limit;
         return command;
     }
@@ -337,9 +355,12 @@ internal sealed class MongoDbPhysicalQueryExplainer(
         FilterDefinition<BsonDocument> filter,
         SortDefinition<BsonDocument> sort,
         int limit,
+        BsonValue? indexHint,
         CancellationToken cancellationToken)
     {
-        var find = collection.Find(filter).Sort(sort).Skip(query.Skip ?? 0);
+        var find = collection.Find(filter, new FindOptions { Hint = indexHint })
+            .Sort(sort)
+            .Skip(query.Skip ?? 0);
         find = find.Limit(limit);
         return await find.ToListAsync(cancellationToken);
     }
@@ -405,8 +426,12 @@ internal sealed class MongoDbPhysicalQueryExplainer(
     private static async Task<IReadOnlyList<BsonDocument>> ExecuteAggregateAsync(
         IMongoCollection<BsonDocument> collection,
         IReadOnlyList<BsonDocument> pipeline,
+        BsonValue? indexHint,
         CancellationToken cancellationToken) =>
-        await collection.Aggregate<BsonDocument>(pipeline.ToArray()).ToListAsync(cancellationToken);
+        await collection.Aggregate<BsonDocument>(
+                pipeline.ToArray(),
+                new AggregateOptions { Hint = indexHint })
+            .ToListAsync(cancellationToken);
 
     private static IReadOnlyList<string> LatestPerKeyFieldIdentifiers(
         MongoDbPhysicalQueryPredicate predicate,
