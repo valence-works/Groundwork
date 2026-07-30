@@ -32,6 +32,85 @@ dotnet test Groundwork.slnx --no-restore
 
 Expected result: all Groundwork and host integration validation tests pass.
 
+## Validate Bounded SQLite Process-Failure Recovery
+
+```bash
+dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --filter ProcessFailureRecovery
+```
+
+Expected result: both declared process-failure cases and the strict retained-evidence contract pass.
+See the [benchmark recovery-proof contract and nonclaims](../../benchmarks/Groundwork.PhysicalStorage.Benchmarks/README.md#bounded-sqlite-process-failure-proof)
+for the detailed barrier, replay, source-binding, timing, and external-digest semantics.
+
+### Bounded recovery checkpoint verification
+
+Container-free candidate verification on 2026-07-29:
+
+- 50/50 focused recovery and schema tests passed.
+- 360/360 benchmark-project tests passed with the live MongoDB and relational-server integration
+  classes excluded; no database-server container or benchmark measurement ran.
+- The benchmark executable and its test project built with compiler warnings treated as errors.
+  The existing `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` audit advisory was retained as a
+  warning rather than hidden.
+- A deliberately concurrent review build/test attempt produced a transient source-snapshot
+  mismatch while build outputs changed. This is the intended fail-closed result; the recorded gates
+  build first and then execute tests sequentially against the stable assembly closure.
+- Targeted `dotnet format --verify-no-changes` passed for every changed C# file, and
+  `git diff --check` passed. Whole-project format verification still reports pre-existing
+  whitespace findings in untouched benchmark files.
+- Root review caught and remediated an unbounded failure-cleanup wait, a recovery reopen path that
+  could create or mutate a missing/corrupt database, incomplete retained-source validation, a
+  process-global SQLite pool reset that broke a parallel existing test, an instrumentation barrier
+  mislabeled as requester acknowledgement, self-authenticating checksum language, and omission of
+  default-valued required JSON members. Final correctness re-review also found and remediated a
+  deadline-exhaustion path that killed a child without waiting through a separate bounded cleanup
+  grace to confirm its exit.
+
+### Issue #50 bounded recovery checkpoint review
+
+The initial exact range
+`5772f7ee037cc246815a45a9a529b5292ece753c..25a457301fee0cc8b1ca27bd9466e632eef82d5a`
+failed adversarial review. The remediated source range
+`5772f7ee037cc246815a45a9a529b5292ece753c..519b4382f2278e37fd4fc37ed7e38091bcf13970`
+then received three read-only **PASS** verdicts:
+
+- **Correctness/mechanism:** the worker now separates instrumentation from the external requester
+  response, withholds that response at both failure points, uses inspect-only recovery admission,
+  replays the original mutation in recovery, and confirms forced child exit. A final medium finding
+  added an independent five-second failure-cleanup grace plus an exhausted-deadline regression.
+- **Evidence integrity/security:** retained verification now requires a caller-provided SHA-256 of
+  the exact evidence-file bytes; enums and required members fail closed; Git identity plus the
+  deterministic PE-metadata `Groundwork.*` assembly closure are recomputed in every process; and
+  evidence contains no path, connection, credential, or self-authenticating signature claim.
+- **Scope/test preservation:** Spec 019 T018–T025 match the implementation and tests; the schema is
+  cataloged under `schemas/v1`; no existing test, provider path, benchmark gate, or baseline guard
+  was removed or weakened; and issue #50 remains open.
+
+Confirmed findings and dispositions:
+
+- The original committed barrier was a coordinator receipt, not proof of a missing requester
+  acknowledgement. Disposition: introduce a distinct unreleased response gate and immutable
+  acknowledgement path, and assert acknowledgement absence before and after kill.
+- Recovery called schema apply before rejecting drift. Disposition: reopen only through the
+  production factory's non-mutating runtime admission; missing, empty, and corrupt files remain
+  unmodified when rejected.
+- A public checksum could be recomputed after forged process receipts. Disposition: remove the
+  embedded seal and require the expected exact-file digest from separately retained workflow
+  metadata before parsing and semantic validation.
+- Numeric enums, default-valued omitted members, unavailable Git identity, and stale dependency
+  binaries were not all bound. Disposition: strict recovery-local JSON options, conditional schema
+  constraints, canonical Git validation, and a deterministic referenced-assembly closure digest.
+- The first timing label included operations it did not measure, and deadline exhaustion could skip
+  exit confirmation. Disposition: record only the seed-through-recovery execution interval,
+  disclose persistence/deletion exclusions, and use a separate bounded cleanup grace on failures.
+- A process-global SQLite pool reset interfered with an existing parallel test. Disposition:
+  recovery-only connections disable pooling and cleanup has no global side effect.
+
+Final frozen-source verification: 50/50 focused recovery/schema tests and 360/360 container-free
+benchmark tests passed; warnings-as-errors builds, targeted format, and `git diff --check` passed.
+No database-server container or benchmark measurement ran. Reviewers used GPT-5.6 Terra High
+because the requested Luna reviewer model was unavailable.
+
 ## Issue #50 Execution-Evidence Checkpoint Review
 
 PR #147 is a bounded checkpoint for synchronized-contention and provider-native plan evidence. It
@@ -148,3 +227,126 @@ Confirmed findings and dispositions:
 This review record is the only change after the remediated source head. Before merge, the three
 reviewers re-verify the final record-only head so the durable account and PR candidate cannot
 diverge.
+
+## Issue #50 Complete Stable-Order Certification Checkpoint
+
+This checkpoint starts from Groundwork main
+`c48b5a1d04c2664211af1f14d403e3f0391846ca`. It closes the false-certification gap that allowed an
+ordered MongoDB benchmark query to pass core index admission while the provider selected
+`by-status` and performed a blocking `SORT`. The failure was reproduced on that exact base before
+timing began; no latency or throughput sample from the failed route was retained or trusted. The
+[redacted reproduction record](evidence/stable-order-reproduction.md) binds MongoDB 7.0.24, the
+shared form, exact canonical invocation, workload inputs, and winning/rejected plan shapes without
+retaining connection, container, database, host, or generated physical-name values.
+
+The certified mechanism is:
+
+- a nonunique scale-bearing offset query requires the order-preserving identity comparison key as
+  the final physical-index column;
+- a nonunique scale-bearing cursor query requires the identity lookup key instead;
+- an already-unique logical key remains the complete total order, so no appended identity column
+  weakens its business-key uniqueness;
+- nonpaged queries may share an index carrying the required tail, while offset and cursor queries
+  cannot share one index because their required identity representations differ;
+- MongoDB execution and explain bind the exact route-declared index, and the strict winning-plan
+  inspector independently rejects both `COLLSCAN` and `SORT`;
+- executable-route serialization preserves both the manifest definition name and the
+  provider-resolved executable name when a linked identity-tail column is renamed.
+
+Candidate verification:
+
+- 631/631 Groundwork core tests passed.
+- 556/556 MongoDB provider tests passed in 27m39s on the frozen production candidate; the focused
+  final-source check also passed all 121/121 `MongoDbPhysicalStorageConformanceTests` cases.
+- 590/590 SQLite provider tests passed.
+- The final PostgreSQL and SQL Server inventory passed as 801/801 suite cases plus the one
+  scheduler-sensitive diagnostic case in isolation. The unfiltered full invocation executed all
+  802 cases but raced that unrelated test's 20ms diagnostic deadline at suite startup; it passed
+  immediately in isolation in 5ms. The review-remediated ordered/identity subset passed 16/16 across
+  both providers and every physical form.
+- 361/361 container-free benchmark-harness tests passed with
+  `--filter "FullyQualifiedName!~MongoDbBenchmarkSignalEvidenceTests&FullyQualifiedName!~RelationalServerBenchmarkTargetTests"`.
+- The exact hosted harness-contract command
+  `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --configuration Release --no-restore`
+  passed 386/386 after the server-plan remediation. A separate evidence reviewer independently
+  reran the same command with the same 386/386 result in 1m02s.
+- The real MongoDB ordered-plan regression passed across all three physical storage forms and
+  emitted and validated two temporary strict plan artifacts per case; fixture disposal then removed
+  the temporary output.
+- `dotnet build Groundwork.slnx --no-restore` passed with zero errors. The existing
+  `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 `NU1903` advisory remains visible rather than suppressed.
+- Targeted `dotnet format --verify-no-changes` passed for every changed C# file, and
+  `git diff --check` passed.
+- All task-owned Testcontainers exited; the unrelated pre-existing `elsa-keycloak` container was
+  not touched.
+
+This checkpoint does **not** execute or approve the scheduled 1K/100K/1M four-provider matrix,
+promote an immutable baseline, select a final physical form, produce an Elsa performance verdict,
+or close issue #50. Those claims remain gated by the controlled matrix and baseline review.
+
+### Stable-order exact-range review
+
+Three independent adversarial reviewers inspected the complete source candidate
+`c48b5a1d04c2664211af1f14d403e3f0391846ca..8be79be8a183380518ed1ec79b9cae12c24ad261`
+read-only:
+
+- Correctness/mechanism: PASS. The reviewer traced compiler, resolver, serializer, provider
+  execution, native-plan inspection, and both rounds of relational remediation. The final
+  independently rerun subset passed 22/22 container-free model/showplan/inspector cases.
+- Evidence integrity/security: FAIL on the first final-source review, documentation only. The
+  reviewer found no mechanism defect, independently passed the exact Release gate 386/386, and
+  confirmed that the actual winning provider index is retained and revalidated. The stale
+  pre-remediation range and missing hosted-smoke disposition are corrected by this record-only
+  commit.
+- Scope/test preservation: PASS. The final range removes no tests and changes no package, project,
+  workflow, or Docker files. Selection remains exact-index; the alternative declared-index rule is
+  Count-only. PostgreSQL and SQL Server retain all-three-form server integration coverage.
+
+The required Luna reviewer model was unavailable; all three reviews used GPT-5.6 Terra High as the
+documented fallback.
+
+Confirmed findings and dispositions:
+
+- BLOCKER: hosted PR #154 smoke
+  [run 30563782458](https://github.com/valence-works/groundwork/actions/runs/30563782458),
+  job `90943106070`, executed 384 tests on source head
+  `cce8e67de0e285af86fbe2c55b91017c777002db` and failed 12 server cases before the narrow SQLite
+  smoke could run. All three PostgreSQL form cases allowed the optimizer to choose the declared
+  `by-status-rank` index for the order-insensitive `IndexedQuery/Count` command while the harness
+  incorrectly required `by-status`. All nine SQL Server form/test cases failed earlier because the
+  new comparison identity tail made `by-status` 1734 bytes and `by-status-rank` 1738 bytes, over
+  the 1700-byte key limit.
+- Disposition: for `Count` only, enumerate same-target declared indexes with the exact
+  `[scope,status]` predicate prefix and directions. PostgreSQL and SQL Server must select exactly
+  one actual winner on the bound relation/object, still reject indexed-relation or forbidden
+  server scans plus zero/multiple candidates, and persist that actual provider index identity so
+  retention and sidecar validation remain exact. Every selection, ordered or not, still requires
+  its request-declared index.
+- Disposition: bound the benchmark `status` projection at 45 characters. SQL Server's widest
+  ordered key is then exactly 1700 bytes: 256 scope + 90 status + 4 rank + 1350 comparison identity.
+  The required stable-order identity tail remains present, and the fixed workload values
+  `open`/`closed` are unchanged. This changes the physical schema and composition fingerprint;
+  earlier artifacts or baselines cannot be reused, and no performance-equivalence claim is made.
+  Two strict unit cases were added, producing the remediated 386-test Release inventory.
+- HIGH: the initial candidate removed the ordinary PostgreSQL and SQL Server compound-index
+  fixture and changed the Unicode identity fixture from offset paging to nonpaged. Disposition:
+  restore both fixture shapes, make the explain probe execute the ordered page, and drop dependent
+  route indexes before corrupting comparison evidence. The focused remediated server subset passed
+  16/16.
+- HIGH: T026 initially lacked durable provider/version/form/command/failure provenance.
+  Disposition: add `evidence/stable-order-reproduction.md` with the exact clean base reproduction,
+  redacted plan mechanism, and explicit pre-timing nonclaims.
+- HIGH: the quickstart initially called fixture-disposed plan artifacts retained evidence.
+  Disposition: state precisely that the tests emitted and validated temporary artifacts before
+  fixture disposal removed them.
+- MEDIUM: T029 initially called the storage set four-form. Disposition: correct it to the actual
+  three-form set.
+- WITHDRAWN: a re-review initially inferred that the documented benchmark filter selected 357
+  tests from `--list-tests`. Direct execution of that exact filter passed 361/361; the reviewer
+  reproduced the execution and withdrew the finding as a parameterized-discovery accounting
+  discrepancy.
+
+This updated review record and T030 evidence link are the only changes after the final source
+candidate `8be79be8a183380518ed1ec79b9cae12c24ad261`.
+Before merge, the same three axes re-verify the resulting record-only head so the durable account
+and PR candidate cannot diverge.

@@ -159,6 +159,23 @@ public sealed class SqlServerShowplanReaderTests
     }
 
     [Fact]
+    public void Selects_one_compatible_declared_Index_Seek()
+    {
+        const string plan = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+              <RelOp PhysicalOp="Index Seek"><Object Table="[expected_table]" Index="[compatible_index]" /></RelOp>
+            </ShowPlanXML>
+            """;
+
+        var selected = SqlServerShowplanReader.SelectScaleBearingIndex(
+            plan,
+            ["declared_index", "compatible_index"],
+            "expected_table");
+
+        Assert.Equal("compatible_index", selected);
+    }
+
+    [Fact]
     public void Rejects_a_scan_even_when_the_plan_also_seeks_the_declared_index()
     {
         const string plan = """

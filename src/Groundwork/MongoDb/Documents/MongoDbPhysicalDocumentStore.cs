@@ -1300,6 +1300,7 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         var basePredicate = BuildPredicate(query, plan, resolvedScope, storage, route);
         var pagePredicate = BuildPagePredicate(query, plan, resolvedScope, basePredicate);
         var sort = BuildSort(query, plan);
+        var indexHint = PlanIndexHint(plan, route);
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical snapshot query",
@@ -1322,6 +1323,7 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                         renderedFilter,
                         query,
                         plan,
+                        indexHint,
                         cancellationToken);
                     await hooks.QueryCountRead(session, attempt, cancellationToken);
                     if (latestTotal == 0 || query.Take == 0)
@@ -1332,7 +1334,8 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
 
                     var latestFound = await collection.Aggregate<BsonDocument>(
                             session,
-                            LatestPerKeyPagePipeline(renderedFilter, query, plan).ToArray())
+                            LatestPerKeyPagePipeline(renderedFilter, query, plan).ToArray(),
+                            new AggregateOptions { Hint = indexHint })
                         .ToListAsync(cancellationToken);
                     await hooks.QueryPageRead(session, attempt, cancellationToken);
                     var latestDocuments = plan.RequiresPrimaryLookup
@@ -1345,6 +1348,7 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                 var total = await collection.CountDocumentsAsync(
                     session,
                     basePredicate.Filter,
+                    new CountOptions { Hint = indexHint },
                     cancellationToken: cancellationToken);
                 await hooks.QueryCountRead(session, attempt, cancellationToken);
                 if (total == 0 || query.Take == 0)
@@ -1352,7 +1356,11 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                     await MongoDbPhysicalDocumentStore.AbortTransactionIgnoringFailureAsync(session);
                     return new DocumentQueryResult([], total);
                 }
-                var find = collection.Find(session, pagePredicate.Filter).Sort(sort)
+                var find = collection.Find(
+                        session,
+                        pagePredicate.Filter,
+                        new FindOptions { Hint = indexHint })
+                    .Sort(sort)
                     .Skip(plan.PagingSupport == QueryPagingSupport.Cursor ? 0 : query.Skip ?? 0);
                 find = find.Limit(PageReadLimit(query, plan));
                 var found = (await find.ToListAsync(cancellationToken)).ToList();
@@ -1590,18 +1598,23 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         }
         var collection = database.GetCollection<BsonDocument>(plan.LookupObject.Identifier);
         var filter = BuildFilter(query, plan, scope(), storage, route);
+        var indexHint = PlanIndexHint(plan, route);
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical count query",
             cancellationToken);
         return query.LatestPerKeyPath is null
-            ? await collection.CountDocumentsAsync(filter, cancellationToken: cancellationToken)
+            ? await collection.CountDocumentsAsync(
+                filter,
+                new CountOptions { Hint = indexHint },
+                cancellationToken)
             : await CountLatestPerKeyAsync(
                 collection,
                 session: null,
                 RenderFilter(collection, filter),
                 query,
                 plan,
+                indexHint,
                 cancellationToken);
     }
 
@@ -1643,12 +1656,15 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                 .AnyAsync(cancellationToken);
         }
         var filter = BuildFilter(query, plan, scope(), storage, route);
+        var indexHint = PlanIndexHint(plan, route);
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical existence query",
             cancellationToken);
         return await database.GetCollection<BsonDocument>(plan.LookupObject.Identifier)
-            .Find(filter).Limit(1).AnyAsync(cancellationToken);
+            .Find(filter, new FindOptions { Hint = indexHint })
+            .Limit(1)
+            .AnyAsync(cancellationToken);
     }
 
     public Task<PhysicalDocumentQueryExplanation> ExplainAsync(
@@ -1751,6 +1767,26 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                 : Builders<BsonDocument>.Sort.Descending(order.Field.Identifier)));
     }
 
+    internal static BsonString? PlanIndexHint(PhysicalQueryPlan plan, ExecutableStorageRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(route);
+
+        if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary || plan.IndexName is null)
+            return null;
+
+        var routeIndex = route.Indexes.SingleOrDefault(index =>
+            string.Equals(index.Identity, plan.LogicalIndexIdentity, StringComparison.Ordinal));
+        if (routeIndex is null || routeIndex.Name != plan.IndexName)
+        {
+            throw new InvalidOperationException(
+                $"MongoDB physical query '{plan.QueryIdentity}' cannot resolve declared index " +
+                $"'{plan.IndexName.Identifier}' for logical index '{plan.LogicalIndexIdentity}'.");
+        }
+
+        return new BsonString(routeIndex.Name.Identifier);
+    }
+
     internal static IReadOnlyList<BsonDocument> LatestPerKeyPagePipeline(
         BsonDocument renderedFilter,
         DocumentQuery query,
@@ -1826,12 +1862,14 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         BsonDocument renderedFilter,
         DocumentQuery query,
         PhysicalQueryPlan plan,
+        BsonValue? indexHint,
         CancellationToken cancellationToken)
     {
         var pipeline = LatestPerKeyCountPipeline(renderedFilter, query, plan);
+        var options = new AggregateOptions { Hint = indexHint };
         var documents = session is null
-            ? await collection.Aggregate<BsonDocument>(pipeline.ToArray()).ToListAsync(cancellationToken)
-            : await collection.Aggregate<BsonDocument>(session, pipeline.ToArray()).ToListAsync(cancellationToken);
+            ? await collection.Aggregate<BsonDocument>(pipeline.ToArray(), options).ToListAsync(cancellationToken)
+            : await collection.Aggregate<BsonDocument>(session, pipeline.ToArray(), options).ToListAsync(cancellationToken);
         return documents.FirstOrDefault()?["value"].ToInt64() ?? 0L;
     }
 

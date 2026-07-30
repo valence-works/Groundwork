@@ -397,6 +397,20 @@ public static class PhysicalStorageResolver
             if (!indexGroups.TryGetValue(queryGroup.Key, out var matching) || matching.Length != 1)
                 continue;
 
+            var tieBreakShapes = queryGroup
+                .Select(query => ResolveProviderAppliedIdentityTieBreakShape(matching[0], query))
+                .Where(shape => shape != "none")
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (tieBreakShapes.Length > 1)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-027",
+                    $"Scale-bearing queries sharing logical index '{queryGroup.Key}' require incompatible provider-applied identity tie-break shapes: {string.Join(", ", tieBreakShapes)}.",
+                    $"{target}.boundedQueries"));
+                valid = false;
+            }
+
             var directionShapes = queryGroup
                 .Select(query => CanonicalizeSortDirections(ResolveSortDirections(query, matching[0])))
                 .Select(DirectionShape)
@@ -669,11 +683,17 @@ public static class PhysicalStorageResolver
                     : projectedNames[field.Path],
                 firstFieldOrder + order,
                 sortDirections[order])));
-            if (queryGroup.Any(query => query.PagingSupport == QueryPagingSupport.Cursor) &&
-                logicalIndex.Fields.All(field => field.Path != PhysicalDocumentFieldPaths.Id))
+            var tieBreakQueries = queryGroup
+                .Where(query => PhysicalQueryOrderRequirements.RequiresProviderAppliedIdentityTieBreak(
+                    logicalIndex,
+                    query))
+                .ToArray();
+            if (tieBreakQueries.Length != 0)
             {
                 columns.Add(new PhysicalIndexColumnDefinition(
-                    envelope.IdLookupKeyColumn,
+                    tieBreakQueries.Any(query => query.PagingSupport == QueryPagingSupport.Cursor)
+                        ? envelope.IdLookupKeyColumn
+                        : envelope.IdComparisonKeyColumn,
                     columns.Count,
                     PhysicalSortDirection.Ascending));
             }
@@ -1028,12 +1048,18 @@ public static class PhysicalStorageResolver
             {
                 continue;
             }
+            var sharedIdentityTieBreakPaging = ResolveProviderAppliedIdentityTieBreakPaging(
+                logicalIndex,
+                unit.PhysicalStorage.BoundedQueries.Where(candidate =>
+                    candidate.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing &&
+                    candidate.IndexIdentity == indexIdentity));
             var expectedColumns = ResolveExpectedIndexColumns(
                 unit,
                 logicalIndex,
                 query,
                 definition,
-                sharedDefinition);
+                sharedDefinition,
+                sharedIdentityTieBreakPaging);
             var physicalIndex = definition.Indexes.SingleOrDefault(x => x.LogicalName == indexIdentity);
             if (expectedColumns is not null &&
                 physicalIndex is not null &&
@@ -1042,7 +1068,8 @@ public static class PhysicalStorageResolver
                 PhysicalIndexFulfills(
                     physicalIndex.Columns,
                     expectedColumns,
-                    RequiresStorageScope(unit, logicalIndex)))
+                    RequiresStorageScope(unit, logicalIndex),
+                    sharedIdentityTieBreakPaging is not null))
             {
                 continue;
             }
@@ -1469,7 +1496,9 @@ public static class PhysicalStorageResolver
         BoundedQueryDeclaration query,
         LogicalIndexDeclaration index)
     {
-        var indexPaths = index.Fields.Select(field => field.Path).ToArray();
+        var indexPaths = index.Fields.Select(field => field.Path).ToList();
+        if (PhysicalQueryOrderRequirements.RequiresProviderAppliedIdentityTieBreak(index, query))
+            indexPaths.Add(PhysicalDocumentFieldPaths.Id);
         var predicates = BoundedQueryPredicateResolver.Resolve(query, index).ToArray();
         var predicatePaths = predicates.Select(field => field.Path).ToArray();
         if (!indexPaths.Take(predicatePaths.Length).SequenceEqual(predicatePaths))
@@ -1494,27 +1523,21 @@ public static class PhysicalStorageResolver
         {
             return false;
         }
-
-        if (query.SortFields.Count == 0)
+        if (PhysicalQueryOrderRequirements.IsUniquePointLookup(index, predicates))
             return true;
-        if (query.SortSupport == QuerySortSupport.None)
-            return false;
 
-        var sortPaths = query.SortFields.Select(field => field.Path).ToList();
-        if (query.PredicateBindingMode == BoundedQueryPredicateBindingMode.DeclaredFields &&
-            predicates.Length == 0 &&
+        var sortPaths = query.SortFields.Count != 0
+            ? query.SortFields.Select(field => field.Path).ToList()
+            : query.SortSupport == QuerySortSupport.None
+                ? []
+                : index.Fields.Select(field => field.Path).ToList();
+        if (PhysicalQueryOrderRequirements.RequiresProviderAppliedIdentityTieBreak(index, query) &&
             !sortPaths.Contains(PhysicalDocumentFieldPaths.Id, StringComparer.Ordinal))
         {
-            if (query.PagingSupport == QueryPagingSupport.Cursor)
-            {
-                if (indexPaths.Contains(PhysicalDocumentFieldPaths.Id, StringComparer.Ordinal))
-                    return false;
-            }
-            else
-            {
-                sortPaths.Add(PhysicalDocumentFieldPaths.Id);
-            }
+            sortPaths.Add(PhysicalDocumentFieldPaths.Id);
         }
+        if (sortPaths.Count == 0)
+            return true;
         return CompoundIndexOrdering.TryResolveSortStart(
                    indexPaths,
                    predicatePaths,
@@ -1556,7 +1579,8 @@ public static class PhysicalStorageResolver
     private static bool PhysicalIndexFulfills(
         IReadOnlyList<PhysicalIndexColumnDefinition> actual,
         IReadOnlyList<PhysicalIndexColumnDefinition> expected,
-        bool hasScopePrefix)
+        bool hasScopePrefix,
+        bool requiresProviderAppliedIdentityTieBreak)
     {
         if (actual.Count != expected.Count ||
             !actual.Select(x => (x.ColumnLogicalName, x.Order))
@@ -1569,7 +1593,8 @@ public static class PhysicalStorageResolver
         var actualDirections = actual.Skip(offset).Select(x => x.Direction).ToArray();
         var expectedDirections = expected.Skip(offset).Select(x => x.Direction).ToArray();
         return actualDirections.SequenceEqual(expectedDirections) ||
-               actualDirections.SequenceEqual(expectedDirections.Select(Opposite));
+               (!requiresProviderAppliedIdentityTieBreak &&
+                actualDirections.SequenceEqual(expectedDirections.Select(Opposite)));
     }
 
     private static IReadOnlyList<PhysicalIndexColumnDefinition>? ResolveExpectedIndexColumns(
@@ -1577,7 +1602,8 @@ public static class PhysicalStorageResolver
         LogicalIndexDeclaration logicalIndex,
         BoundedQueryDeclaration query,
         PhysicalTableDefinition definition,
-        SharedDocumentStorageDefinition? sharedDefinition)
+        SharedDocumentStorageDefinition? sharedDefinition,
+        QueryPagingSupport? identityTieBreakPaging)
     {
         var envelope = definition.Envelope ?? sharedDefinition?.Envelope;
         if (envelope is null)
@@ -1628,16 +1654,40 @@ public static class PhysicalStorageResolver
                 result.Count,
                 sortDirections[fieldOrder]));
         }
-        if (query.PagingSupport == QueryPagingSupport.Cursor &&
-            logicalIndex.Fields.All(field => field.Path != PhysicalDocumentFieldPaths.Id))
+        if (identityTieBreakPaging is not null)
         {
             result.Add(new PhysicalIndexColumnDefinition(
-                envelope.IdLookupKeyColumn,
+                identityTieBreakPaging == QueryPagingSupport.Cursor
+                    ? envelope.IdLookupKeyColumn
+                    : envelope.IdComparisonKeyColumn,
                 result.Count,
                 PhysicalSortDirection.Ascending));
         }
 
         return result;
+    }
+
+    private static string ResolveProviderAppliedIdentityTieBreakShape(
+        LogicalIndexDeclaration logicalIndex,
+        BoundedQueryDeclaration query) =>
+        PhysicalQueryOrderRequirements.RequiresProviderAppliedIdentityTieBreak(logicalIndex, query)
+            ? query.PagingSupport == QueryPagingSupport.Cursor
+                ? PhysicalDocumentIdentityFieldPaths.Lookup
+                : PhysicalDocumentIdentityFieldPaths.Comparison
+            : "none";
+
+    private static QueryPagingSupport? ResolveProviderAppliedIdentityTieBreakPaging(
+        LogicalIndexDeclaration logicalIndex,
+        IEnumerable<BoundedQueryDeclaration> queries)
+    {
+        var required = queries
+            .Where(query => PhysicalQueryOrderRequirements.RequiresProviderAppliedIdentityTieBreak(
+                logicalIndex,
+                query))
+            .Select(query => query.PagingSupport)
+            .Distinct()
+            .ToArray();
+        return required.Length == 1 ? required[0] : null;
     }
 
     private static string EnvelopeColumnName(DocumentEnvelopeDefinition envelope, string path) => path switch

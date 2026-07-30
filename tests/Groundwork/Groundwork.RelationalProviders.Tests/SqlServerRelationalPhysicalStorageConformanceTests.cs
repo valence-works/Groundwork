@@ -1753,7 +1753,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             "configurationDocument",
             "list-by-category",
             [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "tools"))],
-            resultOperation: BoundedQueryResultOperation.Count);
+            [new DocumentQueryOrder("category")],
+            take: 1);
         await SeedPlanNoiseAsync(route);
         await ExecuteAdminAsync(route.LinkedIndexStorage is null
             ? $"UPDATE STATISTICS {Q(route.PrimaryStorage.Name.Identifier)};"
@@ -2135,7 +2136,16 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await using var connection = new SqlConnection(container.GetConnectionString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
+        var target = linked
+            ? ExecutableStorageObjectRole.LinkedIndexStorage
+            : ExecutableStorageObjectRole.PrimaryStorage;
+        var dependentIndexes = route.Indexes
+            .Where(index =>
+                index.Target == target &&
+                index.Columns.Any(column => column.Column.Identifier == comparison))
+            .Select(index => $"DROP INDEX {Q(index.Name.Identifier)} ON {Q(table)}; ");
         command.CommandText =
+            string.Concat(dependentIndexes) +
             $"ALTER TABLE {Q(table)} DROP COLUMN {Q(SqlServerPhysicalIdentity.HiddenColumn(comparison))}; " +
             $"ALTER TABLE {Q(table)} DROP COLUMN {Q(comparison)};";
         await command.ExecuteNonQueryAsync();

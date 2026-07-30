@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ValenceWorks/Groundwork/benchmarks/physical-storage/v1/recovery-evidence.schema.json",
+  "title": "Groundwork bounded SQLite recovery evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "source", "provider", "storageForm", "failurePoint", "coordinatorProcessId",
+    "workerProcessId", "workerTerminationMethod", "workerExitCode", "workerTerminated",
+    "requesterAcknowledgementObserved", "recoveryProcessId", "recoveredBeforeRetryVersion",
+    "recoveredBeforeRetryStateDigest", "retryOutcome", "recoveredAfterRetryVersion",
+    "recoveredAfterRetryStateDigest", "configuredRecoveryExecutionBoundMilliseconds",
+    "recoveryExecutionElapsedMilliseconds", "recoveryExecutionCompletedWithinBound", "promotable"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "groundwork.physical-storage.recovery-evidence/v1" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gitCommit", "gitDirty", "gitTreeDigest", "groundworkAssemblyClosureSha256",
+        "groundworkAssemblyClosureCount"
+      ],
+      "properties": {
+        "gitCommit": { "type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
+        "gitDirty": { "type": "boolean" },
+        "gitTreeDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "groundworkAssemblyClosureSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "groundworkAssemblyClosureCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "provider": { "const": "sqlite" },
+    "storageForm": { "enum": ["sharedDocuments", "dedicatedDocumentTable", "physicalEntityTable"] },
+    "failurePoint": { "enum": ["preCommit", "committedBeforeAcknowledgement"] },
+    "coordinatorProcessId": { "type": "integer", "minimum": 1 },
+    "workerProcessId": { "type": "integer", "minimum": 1 },
+    "workerTerminationMethod": { "const": "process.kill-tree" },
+    "workerExitCode": { "type": "integer", "not": { "const": 0 } },
+    "workerTerminated": { "const": true },
+    "requesterAcknowledgementObserved": { "const": false },
+    "recoveryProcessId": { "type": "integer", "minimum": 1 },
+    "recoveredBeforeRetryVersion": { "type": "integer", "enum": [1, 2] },
+    "recoveredBeforeRetryStateDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "retryOutcome": { "enum": ["saved", "concurrencyConflict"] },
+    "recoveredAfterRetryVersion": { "const": 2 },
+    "recoveredAfterRetryStateDigest": { "const": "8564fa0e7effa260d841d31d8bf7b31faa71ecb93c059fcbf316681b3d159aa8" },
+    "configuredRecoveryExecutionBoundMilliseconds": { "type": "integer", "minimum": 1 },
+    "recoveryExecutionElapsedMilliseconds": { "type": "integer", "minimum": 0 },
+    "recoveryExecutionCompletedWithinBound": { "const": true },
+    "promotable": { "const": false }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "failurePoint": { "const": "preCommit" } }, "required": ["failurePoint"] },
+      "then": {
+        "properties": {
+          "recoveredBeforeRetryVersion": { "const": 1 },
+          "recoveredBeforeRetryStateDigest": { "const": "c84d817e49ace35d68e7807ce59924e399f3c819ffc89be35e896c68f7a1329b" },
+          "retryOutcome": { "const": "saved" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "failurePoint": { "const": "committedBeforeAcknowledgement" } }, "required": ["failurePoint"] },
+      "then": {
+        "properties": {
+          "recoveredBeforeRetryVersion": { "const": 2 },
+          "recoveredBeforeRetryStateDigest": { "const": "8564fa0e7effa260d841d31d8bf7b31faa71ecb93c059fcbf316681b3d159aa8" },
+          "retryOutcome": { "const": "concurrencyConflict" }
+        }
+      }
+    }
+  ]
+}

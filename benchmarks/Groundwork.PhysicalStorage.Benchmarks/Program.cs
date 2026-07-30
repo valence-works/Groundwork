@@ -6,6 +6,14 @@ internal static class Program
     {
         if (args.Length > 0 && args[0].Equals("worker", StringComparison.OrdinalIgnoreCase))
             return await RunWorkerAsync(args);
+        if (args.Length > 0 && args[0].Equals("recovery-worker", StringComparison.OrdinalIgnoreCase))
+            return await RunRecoveryWorkerAsync(args, verify: false);
+        if (args.Length > 0 && args[0].Equals("recovery-verify", StringComparison.OrdinalIgnoreCase))
+            return await RunRecoveryWorkerAsync(args, verify: true);
+        if (args.Length > 0 && args[0].Equals("recovery-proof", StringComparison.OrdinalIgnoreCase))
+            return await RunRecoveryProofAsync(args);
+        if (args.Length > 0 && args[0].Equals("recovery-evidence-verify", StringComparison.OrdinalIgnoreCase))
+            return await RunRecoveryEvidenceVerifyAsync(args);
         try
         {
             if (args.Length > 0 && args[0].Equals("verify-scheduled-group", StringComparison.OrdinalIgnoreCase))
@@ -113,7 +121,74 @@ internal static class Program
             BenchmarkSubprocessCoordinator.DigestFile(requestPath));
     }
 
-    private static string FindRepositoryRoot(string start)
+    private static async Task<int> RunRecoveryWorkerAsync(IReadOnlyList<string> args, bool verify)
+    {
+        if (args.Count != 3 || args[1] != "--request" || string.IsNullOrWhiteSpace(args[2]))
+            return 1;
+        try
+        {
+            if (verify)
+            {
+                var request = await RecoveryProtocol.ReadAsync<RecoveryVerificationRequest>(args[2], CancellationToken.None);
+                await SqliteRecoveryWorker.VerifyAsync(request, CancellationToken.None);
+            }
+            else
+            {
+                var request = await RecoveryProtocol.ReadAsync<RecoveryWorkerRequest>(args[2], CancellationToken.None);
+                await SqliteRecoveryWorker.RunMutationAsync(request, CancellationToken.None);
+            }
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunRecoveryProofAsync(IReadOnlyList<string> args)
+    {
+        try
+        {
+            var command = RecoveryProofCommandLine.Parse(args);
+            var result = await SqliteProcessFailureRecovery.RunAsync(
+                command.StorageForm,
+                Path.Combine(Path.GetTempPath(), "groundwork-recovery-proof"),
+                command.FailurePoint,
+                CancellationToken.None,
+                command.Bound,
+                command.OutputPath);
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result.Evidence, BenchmarkJson.CompactOptions));
+            Console.WriteLine($"Recovery evidence file SHA-256: {result.EvidenceFileSha256}");
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunRecoveryEvidenceVerifyAsync(IReadOnlyList<string> args)
+    {
+        try
+        {
+            var command = RecoveryEvidenceVerifyCommandLine.Parse(args);
+            await RecoveryProtocol.VerifyRetainedAsync(
+                command.EvidencePath,
+                command.ExpectedEvidenceSha256,
+                CancellationToken.None);
+            Console.WriteLine("Recovery evidence verified against the caller-provided file SHA-256.");
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 1;
+        }
+    }
+
+    internal static string FindRepositoryRoot(string start)
     {
         for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
         {

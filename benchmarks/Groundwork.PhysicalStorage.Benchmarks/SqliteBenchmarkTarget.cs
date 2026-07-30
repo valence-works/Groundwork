@@ -47,6 +47,66 @@ public sealed class SqliteBenchmarkTarget(
     public override Task InitializeAsync(CancellationToken cancellationToken) =>
         InitializeAsync(beforeAdmission: null, cancellationToken);
 
+    /// <summary>
+    /// Opens an already materialized benchmark database for the bounded recovery proof.  This is
+    /// deliberately benchmark-internal: callers receive only the public document-store contract
+    /// and this path never creates or deletes a durable database.
+    /// </summary>
+    internal static async Task<IDocumentStore> OpenExistingRecoveryAsync(
+        PhysicalStorageForm storageForm,
+        string instance,
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(instance);
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        var model = BenchmarkModelFactory.CompileRelational(
+            storageForm,
+            instance,
+            SqliteGroundworkCapabilities.Provider,
+            SqliteGroundworkCapabilities.PhysicalNames);
+        if (!File.Exists(databasePath))
+            throw new FileNotFoundException("Recovery database does not exist.", databasePath);
+        var connectionString = RecoveryConnectionString(databasePath, SqliteOpenMode.ReadWrite);
+        var store = await SqliteDocumentStoreFactory.OpenPhysicalAsync(
+            connectionString,
+            model.Manifest,
+            SqliteGroundworkCapabilities.Provider,
+            DocumentStoreAccess.Scoped(new("tenant-a")),
+            BenchmarkModelFactory.NamePolicy(instance),
+            cancellationToken: cancellationToken);
+        return store;
+    }
+
+    internal static async Task<IDocumentStore> InitializeRecoveryAsync(
+        PhysicalStorageForm storageForm,
+        string instance,
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(instance);
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(databasePath))!);
+        var model = BenchmarkModelFactory.CompileRelational(
+            storageForm,
+            instance,
+            SqliteGroundworkCapabilities.Provider,
+            SqliteGroundworkCapabilities.PhysicalNames);
+        var connectionString = RecoveryConnectionString(databasePath, SqliteOpenMode.ReadWriteCreate);
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync(cancellationToken);
+            await ConfigureAsync(connection, cancellationToken);
+            var admission = await PhysicalSchemaApplication.ApplyAsync(
+                model.Target,
+                new SqlitePhysicalSchemaExecutor(connection),
+                cancellationToken: cancellationToken);
+            if (admission.Outcome is not (PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges))
+                throw new InvalidOperationException($"Recovery setup returned {admission.Outcome}.");
+        }
+        return await OpenExistingRecoveryAsync(storageForm, instance, databasePath, cancellationToken);
+    }
+
     internal async Task InitializeAsync(
         Func<string, BenchmarkPhysicalModel, CancellationToken, Task>? beforeAdmission,
         CancellationToken cancellationToken)
@@ -392,6 +452,14 @@ public sealed class SqliteBenchmarkTarget(
         command.CommandText = "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    private static string RecoveryConnectionString(string databasePath, SqliteOpenMode mode) => new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = mode,
+        Cache = SqliteCacheMode.Shared,
+        Pooling = false
+    }.ConnectionString;
 
     private static async Task<long> ScalarAsync(SqliteConnection connection, string sql, CancellationToken cancellationToken)
     {

@@ -65,7 +65,9 @@ public sealed class ExecutableStorageRouteCompilerTests
         var index = Assert.Single(route.Indexes);
         Assert.Equal("by-category", index.Name.Identifier);
         Assert.Equal(ExecutableStorageObjectRole.LinkedIndexStorage, index.Target);
-        Assert.Equal(new[] { "storage_scope", "category" }, index.Columns.Select(column => column.Column.LogicalName));
+        Assert.Equal(
+            new[] { "storage_scope", "category", "document_id_comparison_key" },
+            index.Columns.Select(column => column.Column.LogicalName));
         Assert.All(route.MaintenanceRoutes, maintenance =>
             Assert.Equal(
                 new[] { ExecutableStorageObjectRole.PrimaryStorage, ExecutableStorageObjectRole.LinkedIndexStorage },
@@ -119,7 +121,10 @@ public sealed class ExecutableStorageRouteCompilerTests
             unicode.AuxiliaryKey!.Columns.Select(column => column.LogicalName));
 
         var canonical = ExecutableStorageRouteSerializer.Serialize(unicode);
-        Assert.Equal(unicode, ExecutableStorageRouteSerializer.Deserialize(canonical));
+        var roundTrip = ExecutableStorageRouteSerializer.Deserialize(canonical);
+        Assert.Equal(unicode.Indexes.Single().Definition, roundTrip.Indexes.Single().Definition);
+        Assert.Equal(unicode, roundTrip);
+        Assert.Contains("\"definitionLogicalName\":\"id_comparison_key\"", canonical, StringComparison.Ordinal);
         Assert.Contains("\"stringCasePolicy\":\"UnicodeOrdinalIgnoreCase\"", canonical, StringComparison.Ordinal);
         Assert.Contains("\"comparisonKey\"", canonical, StringComparison.Ordinal);
         Assert.Contains("\"lookupKey\"", canonical, StringComparison.Ordinal);
@@ -327,7 +332,7 @@ public sealed class ExecutableStorageRouteCompilerTests
         Assert.Equal("DOC_LOOKUP_FK", route.AuxiliaryKey!.Columns.Last().Identifier);
         Assert.Equal("CATEGORY_LOOKUP", Assert.Single(route.ProjectedColumns).Column.Identifier);
         Assert.Equal("SCOPE_FK", Assert.Single(route.Indexes).Columns[0].Column.Identifier);
-        Assert.DoesNotContain(ExecutableStorageCapability.CompoundIndexLookup, route.CapabilityRequirements);
+        Assert.Contains(ExecutableStorageCapability.CompoundIndexLookup, route.CapabilityRequirements);
     }
 
     [Fact]
@@ -461,6 +466,11 @@ public sealed class ExecutableStorageRouteCompilerTests
             {
                 Assert.Equal("createdAt", column.Column.LogicalName);
                 Assert.Equal(PhysicalSortDirection.Descending, column.Direction);
+            },
+            column =>
+            {
+                Assert.Equal("id_comparison_key", column.Column.LogicalName);
+                Assert.Equal(PhysicalSortDirection.Ascending, column.Direction);
             });
         Assert.Contains(ExecutableStorageCapability.InPrimaryProjection, route.CapabilityRequirements);
         Assert.Contains(ExecutableStorageCapability.CompoundIndexLookup, route.CapabilityRequirements);
