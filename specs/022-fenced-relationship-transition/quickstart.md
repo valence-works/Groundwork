@@ -56,8 +56,9 @@ dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materia
 # Passed: 1, Failed: 0
 ```
 
-The SQLite suite uses file-backed temporary databases and distinct executor instances. It proves
-valid exact sidecar/fence backfill, opaque dangling diagnostics, durable bounded progress,
+Twenty-eight SQLite transition cases use file-backed temporary databases and distinct executor
+instances; the twenty-ninth is the in-memory closed-connection public-admission guard. Together they
+prove valid exact sidecar/fence backfill, opaque dangling diagnostics, durable bounded progress,
 validation/cutover acknowledgement loss, concurrent candidate competition, and the closed public
 admission gate. Pending candidates bind a keyed, collision-safe frame of every normalized source
 identity/scope/reference and target identity before any restart can skip progress, replay validation,

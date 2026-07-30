@@ -27,7 +27,7 @@
 
 ## Phase 5: Evidence
 
-- [x] T013 Add real durable SQLite tests for valid backfill, dangling failure, cutover competition, replay, cancellation, and restart — Evidence: `SqliteRelationshipTransitionTests` has twenty-nine file-backed SQLite cases, including authenticated failure replay, exact tuple/isolation assertions, exact pre-MAC schema upgrade, and missing/corrupt/hidden/duplicate-capable/case-insensitive/descending state/reference/fence/active evidence rejection.
+- [x] T013 Add real durable SQLite tests for valid backfill, dangling failure, cutover competition, replay, cancellation, and restart — Evidence: `SqliteRelationshipTransitionTests` has twenty-eight file-backed transition cases plus one in-memory closed-connection public-admission case, including authenticated failure replay, exact tuple/isolation assertions, exact pre-MAC schema upgrade, and missing/corrupt/hidden/duplicate-capable/case-insensitive/descending state/reference/fence/active evidence rejection.
 - [x] T014 Prove public `GW-RELATIONSHIP-012` admission remains fail-closed before provider I/O — Evidence: focused factory test observes `GW-RELATIONSHIP-012` while the supplied SQLite connection remains Closed.
 - [x] T015 Run focused/Core/materialization/provider gates and record exact evidence and nonclaims in the quickstart — Evidence: quickstart records the fifth remediation's 29 SQLite, 51 Core, and 1 materialization relationship test passing on the exact worktree diff over the identified source head.
 - [ ] T016 Run three adversarial exact-range reviews, remediate findings, and record dispositions
