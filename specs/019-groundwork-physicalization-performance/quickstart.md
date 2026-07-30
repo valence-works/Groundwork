@@ -266,6 +266,10 @@ Candidate verification:
   both providers and every physical form.
 - 361/361 container-free benchmark-harness tests passed with
   `--filter "FullyQualifiedName!~MongoDbBenchmarkSignalEvidenceTests&FullyQualifiedName!~RelationalServerBenchmarkTargetTests"`.
+- The exact hosted harness-contract command
+  `dotnet test tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj --configuration Release --no-restore`
+  passed 386/386 after the server-plan remediation. A separate evidence reviewer independently
+  reran the same command with the same 386/386 result in 1m02s.
 - The real MongoDB ordered-plan regression passed across all three physical storage forms and
   emitted and validated two temporary strict plan artifacts per case; fixture disposal then removed
   the temporary output.
@@ -283,25 +287,47 @@ or close issue #50. Those claims remain gated by the controlled matrix and basel
 ### Stable-order exact-range review
 
 Three independent adversarial reviewers inspected the complete source candidate
-`c48b5a1d04c2664211af1f14d403e3f0391846ca..dad91794279d2a08fad3251957e8bff84f7ea158`
+`c48b5a1d04c2664211af1f14d403e3f0391846ca..8be79be8a183380518ed1ec79b9cae12c24ad261`
 read-only:
 
 - Correctness/mechanism: PASS. The reviewer traced compiler, resolver, serializer, provider
-  execution, native-plan inspection, and the remediated relational fixtures; independently rerun
-  subsets passed 309/309 core cases and 12/12 container-free benchmark model/inspector cases.
-- Evidence integrity/security: PASS. The redacted base reproduction binds the exact provider,
-  version, form, command, pre-timing failure, and plan mechanism without connection or generated
-  physical names. The reviewer independently reran the documented benchmark filter: 361/361
-  passed.
+  execution, native-plan inspection, and both rounds of relational remediation. The final
+  independently rerun subset passed 22/22 container-free model/showplan/inspector cases.
+- Evidence integrity/security: FAIL on the first final-source review, documentation only. The
+  reviewer found no mechanism defect, independently passed the exact Release gate 386/386, and
+  confirmed that the actual winning provider index is retained and revalidated. The stale
+  pre-remediation range and missing hosted-smoke disposition are corrected by this record-only
+  commit.
 - Scope/test preservation: PASS. The final range removes no tests and changes no package, project,
-  workflow, or Docker files. Both server fixtures retain the compound ordered route and Unicode
-  offset identity coverage across all forms.
+  workflow, or Docker files. Selection remains exact-index; the alternative declared-index rule is
+  Count-only. PostgreSQL and SQL Server retain all-three-form server integration coverage.
 
 The required Luna reviewer model was unavailable; all three reviews used GPT-5.6 Terra High as the
 documented fallback.
 
 Confirmed findings and dispositions:
 
+- BLOCKER: hosted PR #154 smoke
+  [run 30563782458](https://github.com/valence-works/groundwork/actions/runs/30563782458),
+  job `90943106070`, executed 384 tests on source head
+  `cce8e67de0e285af86fbe2c55b91017c777002db` and failed 12 server cases before the narrow SQLite
+  smoke could run. All three PostgreSQL form cases allowed the optimizer to choose the declared
+  `by-status-rank` index for the order-insensitive `IndexedQuery/Count` command while the harness
+  incorrectly required `by-status`. All nine SQL Server form/test cases failed earlier because the
+  new comparison identity tail made `by-status` 1734 bytes and `by-status-rank` 1738 bytes, over
+  the 1700-byte key limit.
+- Disposition: for `Count` only, enumerate same-target declared indexes with the exact
+  `[scope,status]` predicate prefix and directions. PostgreSQL and SQL Server must select exactly
+  one actual winner on the bound relation/object, still reject indexed-relation or forbidden
+  server scans plus zero/multiple candidates, and persist that actual provider index identity so
+  retention and sidecar validation remain exact. Every selection, ordered or not, still requires
+  its request-declared index.
+- Disposition: bound the benchmark `status` projection at 45 characters. SQL Server's widest
+  ordered key is then exactly 1700 bytes: 256 scope + 90 status + 4 rank + 1350 comparison identity.
+  The required stable-order identity tail remains present, and the fixed workload values
+  `open`/`closed` are unchanged. This changes the physical schema and composition fingerprint;
+  earlier artifacts or baselines cannot be reused, and no performance-equivalence claim is made.
+  Two strict unit cases were added, producing the remediated 386-test Release inventory.
 - HIGH: the initial candidate removed the ordinary PostgreSQL and SQL Server compound-index
   fixture and changed the Unicode identity fixture from offset paging to nonpaged. Disposition:
   restore both fixture shapes, make the explain probe execute the ordered page, and drop dependent
@@ -320,6 +346,7 @@ Confirmed findings and dispositions:
   reproduced the execution and withdrew the finding as a parameterized-discovery accounting
   discrepancy.
 
-This review record and the T030 evidence link are the only changes after `dad91794279d2a08fad3251957e8bff84f7ea158`.
+This updated review record and T030 evidence link are the only changes after the final source
+candidate `8be79be8a183380518ed1ec79b9cae12c24ad261`.
 Before merge, the same three axes re-verify the resulting record-only head so the durable account
 and PR candidate cannot diverge.
