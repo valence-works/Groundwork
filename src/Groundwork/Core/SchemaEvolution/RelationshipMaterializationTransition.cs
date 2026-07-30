@@ -49,15 +49,43 @@ public sealed class RelationshipMaterializationGeneration : IEquatable<Relations
 /// authority. The executor that eventually consumes it must own durable revision checks and atomic
 /// compare-and-swap activation.
 /// </summary>
+public sealed class RelationshipMaterializationExpectedActive
+{
+    private RelationshipMaterializationExpectedActive(
+        RelationshipMaterializationGeneration? exactGeneration)
+    {
+        ExactGeneration = exactGeneration;
+    }
+
+    /// <summary>
+    /// Requires the provider to activate the candidate only if the relationship has no active
+    /// generation. This is the inaugural transition state; it is not a synthetic generation.
+    /// </summary>
+    public static RelationshipMaterializationExpectedActive Absent { get; } = new(null);
+
+    /// <summary>
+    /// Requires the provider to activate the candidate only if this exact generation remains
+    /// authoritative.
+    /// </summary>
+    public static RelationshipMaterializationExpectedActive Exact(
+        RelationshipMaterializationGeneration generation) =>
+        new(generation ?? throw new ArgumentNullException(nameof(generation)));
+
+    public bool IsAbsent => ExactGeneration is null;
+
+    public RelationshipMaterializationGeneration? ExactGeneration { get; }
+}
+
 public sealed class RelationshipMaterializationTransitionRequirement
 {
     public RelationshipMaterializationTransitionRequirement(
-        RelationshipMaterializationGeneration activeGeneration,
+        RelationshipMaterializationExpectedActive expectedActive,
         RelationshipMaterializationGeneration candidateGeneration)
     {
-        ActiveGeneration = activeGeneration ?? throw new ArgumentNullException(nameof(activeGeneration));
+        ExpectedActive = expectedActive ?? throw new ArgumentNullException(nameof(expectedActive));
         CandidateGeneration = candidateGeneration ?? throw new ArgumentNullException(nameof(candidateGeneration));
-        if (!string.Equals(
+        if (ExpectedActive.ExactGeneration is { } activeGeneration &&
+            !string.Equals(
                 activeGeneration.RelationshipIdentity,
                 candidateGeneration.RelationshipIdentity,
                 StringComparison.Ordinal))
@@ -66,8 +94,8 @@ public sealed class RelationshipMaterializationTransitionRequirement
                 "Relationship materialization transitions require the same relationship route.",
                 nameof(candidateGeneration));
         }
-        if (string.Equals(
-                activeGeneration.GenerationIdentity,
+        if (ExpectedActive.ExactGeneration is { } exactGeneration && string.Equals(
+                exactGeneration.GenerationIdentity,
                 candidateGeneration.GenerationIdentity,
                 StringComparison.Ordinal))
         {
@@ -77,7 +105,11 @@ public sealed class RelationshipMaterializationTransitionRequirement
         }
     }
 
-    public RelationshipMaterializationGeneration ActiveGeneration { get; }
+    /// <summary>
+    /// Closed expected-active union. Providers use <see cref="RelationshipMaterializationExpectedActive.Absent"/>
+    /// for the inaugural CAS, or <see cref="RelationshipMaterializationExpectedActive.Exact"/> for a rotation.
+    /// </summary>
+    public RelationshipMaterializationExpectedActive ExpectedActive { get; }
 
     public RelationshipMaterializationGeneration CandidateGeneration { get; }
 }

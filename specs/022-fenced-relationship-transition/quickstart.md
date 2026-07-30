@@ -6,8 +6,9 @@ This work unit proves internal SQLite candidate backfill, validation, atomic cut
 recovery for Groundwork #141. Public relationship admission remains closed until all four providers
 complete the full fencing and guarded-mutation gate.
 
-Implementation is paused until the program owner ratifies how an inaugural transition represents
-expected-absent active-generation state. A synthetic prior generation is not admissible.
+The ratified inaugural form is an explicit expected-absent state, not a synthetic prior generation.
+The internal SQLite executor uses an absent-only INSERT compare-and-swap; rotations remain bound to
+an exact active generation and materialization fingerprint.
 
 ## Focused Verification
 
@@ -37,4 +38,24 @@ complete Groundwork #141 / Elsa #643.
 
 ## Evidence
 
-Implementation and independent review evidence will be added here as tasks land.
+2026-07-30 candidate evidence:
+
+```bash
+dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj \
+  --filter RelationshipTransition --no-restore
+# Passed: 8, Failed: 0
+
+dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj \
+  --filter Relationship --no-restore
+# Passed: 50, Failed: 0
+
+dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj \
+  --filter Relationship --no-restore
+# Passed: 1, Failed: 0
+```
+
+The SQLite suite uses file-backed temporary databases and distinct executor instances. It proves
+valid exact sidecar/fence backfill, opaque dangling diagnostics, durable bounded progress,
+validation/cutover acknowledgement loss, concurrent candidate competition, and the closed public
+admission gate. It does not claim ordinary fence maintenance, guarded prunes, a non-SQLite provider,
+production HMAC custody, or public relationship capability.

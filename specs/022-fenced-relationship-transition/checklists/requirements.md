@@ -14,7 +14,7 @@
 
 ## Requirement Completeness
 
-- [ ] No clarification markers remain — Blocked on the inaugural expected-absent transition decision.
+- [x] No clarification markers remain — Evidence: ratified `Absent | ExactGeneration` expected-active contract is recorded in `spec.md` and encoded by `RelationshipMaterializationExpectedActive`.
 - [x] Requirements are testable and unambiguous
 - [x] Success criteria are measurable
 - [x] Acceptance scenarios and edge cases are defined
@@ -29,8 +29,7 @@
 
 ## Notes
 
-The guard/fence semantics were ratified on Groundwork #141 on 2026-07-25, but the Core contract
-cannot represent the first generation when no active record exists; implementation is paused for
-that narrow decision. Production diagnostic-key
-custody/rotation is intentionally not decided by this internal SQLite proof and must be escalated if
-a later public provider slice requires an operator-facing configuration surface.
+The guard/fence semantics and the expected-absent inaugural CAS were ratified on Groundwork #141.
+Production diagnostic-key custody/rotation is intentionally not decided by this internal SQLite
+proof and must be escalated if a later public provider slice requires an operator-facing
+configuration surface.

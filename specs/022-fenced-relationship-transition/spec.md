@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-29
 
-**Status**: Blocked on inaugural-transition ratification
+**Status**: In Progress
 
 **Input**: Groundwork #141 and its ratified 2026-07-25 relationship-transition decisions.
 
@@ -149,16 +149,14 @@ proof lands and verify it still rejects relationship declarations with `GW-RELAT
 - Ordinary reference write/delete/unit-of-work fence maintenance and guarded prune execution follow
   in later Model B slices.
 
-## Decision Needed
+## Ratified Inaugural Transition Semantics
 
-- **[NEEDS CLARIFICATION: How does the provider-neutral transition contract represent the first
-  relationship generation when durable active-generation state is absent? Recommended decision:
-  add an explicit expected-absent active state whose compare-and-swap succeeds only while no active
-  record exists; same-candidate replay converges and competing candidates cannot both win.]**
-
-The current `RelationshipMaterializationTransitionRequirement` requires non-null active and
-candidate generations with the same relationship identity and different generation identities.
-Fabricating a synthetic active generation would invent cross-provider semantics and is prohibited.
+`ExpectedActive` is a closed `Absent | ExactGeneration` union. `Absent` authorizes the inaugural
+compare-and-swap only while no active record exists; it never fabricates a synthetic predecessor.
+After the commit, a same-candidate replay (including acknowledgement loss) converges to the active
+candidate, while a different candidate cannot activate. Rotations require `ExactGeneration` and
+compare both generation identity and materialization fingerprint. `GW-RELATIONSHIP-013` remains
+candidate-bound; `GW-RELATIONSHIP-012` remains public and fail-closed.
 
 ## Out of Scope
 
