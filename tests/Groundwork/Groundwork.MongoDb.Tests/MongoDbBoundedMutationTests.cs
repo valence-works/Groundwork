@@ -72,6 +72,77 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
         Assert.Equal(1, await documents.CountAsync(Query("active").Select(BoundedQueryResultOperation.Count)));
     }
 
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task Fixed_value_mutations_preserve_runtime_admission_after_reopen(
+        PhysicalStorageForm form)
+    {
+        var database = new MongoClient(container.GetConnectionString())
+            .GetDatabase($"groundwork_{Guid.NewGuid():N}");
+        var transitionModel = Model(form);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(transitionModel);
+        var transitionDocuments = new MongoDbPhysicalDocumentStore(
+            database,
+            transitionModel,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await SaveAsync(transitionDocuments, "transition", "pending");
+        var transitionMutations = MongoDbPhysicalMutationRuntime.Create(
+            transitionDocuments,
+            transitionModel.Manifest,
+            Assert.Single(transitionModel.Routes),
+            transitionModel.Provider);
+
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await transitionMutations.ExecuteAsync(new DocumentMutation(
+                DocumentKind,
+                "revoke-pending",
+                $"{form}-transition-admission")));
+        Assert.Equal(
+            "revoked",
+            Status((await transitionDocuments.LoadAsync(DocumentKind, "transition"))!.ContentJson));
+        await AssertAdmittedAfterReopenAsync(
+            database,
+            transitionModel,
+            "transition",
+            "status",
+            "revoked");
+
+        var assignmentDatabase = new MongoClient(container.GetConnectionString())
+            .GetDatabase($"groundwork_{Guid.NewGuid():N}");
+        var assignmentModel = AssignmentModel(form, actionPath: "category", actionValue: "active");
+        await new MongoDbGroundworkMaterializer(assignmentDatabase).MaterializeAsync(assignmentModel);
+        var assignmentDocuments = new MongoDbPhysicalDocumentStore(
+            assignmentDatabase,
+            assignmentModel,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+        await SaveAssignmentAsync(
+            assignmentDocuments,
+            "assignment",
+            """{"category":"eligible","status":"pending"}""");
+        var assignmentMutations = MongoDbPhysicalMutationRuntime.Create(
+            assignmentDocuments,
+            assignmentModel.Manifest,
+            Assert.Single(assignmentModel.Routes),
+            assignmentModel.Provider);
+
+        Assert.Equal(
+            new BoundedMutationResult(BoundedMutationStatus.Completed, 1),
+            await assignmentMutations.ExecuteAsync(Assignment($"{form}-assignment-admission")));
+        Assert.Equal(
+            "active",
+            JsonDocument.Parse((await assignmentDocuments.LoadAsync(DocumentKind, "assignment"))!.ContentJson)
+                .RootElement.GetProperty("category").GetString());
+        await AssertAdmittedAfterReopenAsync(
+            assignmentDatabase,
+            assignmentModel,
+            "assignment",
+            "category",
+            "active");
+    }
+
     [Fact]
     public async Task Public_runtime_preserves_mongodb_native_plan_with_observed_selector_index()
     {
@@ -1550,7 +1621,10 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
         return MongoDbPhysicalStorageModel.Compile(manifest);
     }
 
-    private static MongoDbPhysicalStorageModel AssignmentModel(PhysicalStorageForm form)
+    private static MongoDbPhysicalStorageModel AssignmentModel(
+        PhysicalStorageForm form,
+        string actionPath = "status",
+        string actionValue = "active")
     {
         var binding = new SharedStorageBinding("runtime");
         var category = new ProjectedColumnDefinition(
@@ -1624,7 +1698,7 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
                     new BoundedMutationDeclaration(
                         "activate-eligible",
                         query.Identity,
-                        BoundedMutationAction.Assign("status", "active"))
+                        BoundedMutationAction.Assign(actionPath, actionValue))
                 ])
         };
         var manifest = new StorageManifest(
@@ -1640,6 +1714,26 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
                 : []
         };
         return MongoDbPhysicalStorageModel.Compile(manifest);
+    }
+
+    private static async Task AssertAdmittedAfterReopenAsync(
+        IMongoDatabase database,
+        MongoDbPhysicalStorageModel model,
+        string documentId,
+        string path,
+        string expectedValue)
+    {
+        await using var reopened = await MongoDbDocumentStoreFactory.OpenPhysicalAsync(
+            database,
+            model.Manifest,
+            model.Provider,
+            DocumentStoreAccess.Scoped(new("tenant-a")));
+
+        Assert.True(reopened.SchemaInspection.IsAppliedSchemaValid);
+        Assert.Equal(
+            expectedValue,
+            JsonDocument.Parse((await reopened.Store.LoadAsync(DocumentKind, documentId))!.ContentJson)
+                .RootElement.GetProperty(path).GetString());
     }
 
     private static MongoDbPhysicalStorageModel WithoutMutations(MongoDbPhysicalStorageModel mutationModel)

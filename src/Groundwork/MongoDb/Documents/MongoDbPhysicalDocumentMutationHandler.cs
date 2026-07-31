@@ -160,9 +160,9 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
         UpdateDefinition<BsonDocument>? linkedUpdate = null;
         if (plan.Action is IPhysicalValueMutationAction assignment)
         {
-            primaryUpdate = BuildPrimaryAssignmentUpdate(assignment);
+            primaryUpdate = BuildPrimaryAssignmentUpdate(binding, assignment);
             if (binding.Schema.Linked is not null)
-                linkedUpdate = BuildLinkedAssignmentUpdate(assignment);
+                linkedUpdate = BuildLinkedAssignmentUpdate(binding, assignment);
         }
         return new MongoDbPhysicalMutationInvocation(
             binding,
@@ -319,6 +319,7 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
     }
 
     private UpdateDefinition<BsonDocument> BuildPrimaryAssignmentUpdate(
+        MongoDbPhysicalMutationBinding binding,
         IPhysicalValueMutationAction assignment)
     {
         var nativeValue = NativeValue(assignment);
@@ -341,10 +342,21 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
             .Select(projection => Builders<BsonDocument>.Update.Set(
                 projection.Column.Identifier,
                 MongoDbPhysicalProjectionValues.ParseQueryValue(projection, assignment.TargetValue))));
+        if (binding.Schema.Primary.FieldByPath.TryGetValue(assignment.Path, out var mirror))
+        {
+            updates.Add(Builders<BsonDocument>.Update.Set(
+                mirror.Identifier,
+                MongoDbPhysicalMutationStorage.QueryValue(
+                    route,
+                    assignment.Path,
+                    assignment.Field.ValueKind,
+                    assignment.TargetValue)));
+        }
         return Builders<BsonDocument>.Update.Combine(updates);
     }
 
     private UpdateDefinition<BsonDocument> BuildLinkedAssignmentUpdate(
+        MongoDbPhysicalMutationBinding binding,
         IPhysicalValueMutationAction assignment)
     {
         var updates = new List<UpdateDefinition<BsonDocument>>
@@ -357,6 +369,16 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
             .Select(projection => Builders<BsonDocument>.Update.Set(
                 projection.Column.Identifier,
                 MongoDbPhysicalProjectionValues.ParseQueryValue(projection, assignment.TargetValue))));
+        if (binding.Schema.Linked!.FieldByPath.TryGetValue(assignment.Path, out var mirror))
+        {
+            updates.Add(Builders<BsonDocument>.Update.Set(
+                mirror.Identifier,
+                MongoDbPhysicalMutationStorage.QueryValue(
+                    route,
+                    assignment.Path,
+                    assignment.Field.ValueKind,
+                    assignment.TargetValue)));
+        }
         return Builders<BsonDocument>.Update.Combine(updates);
     }
 
