@@ -30,7 +30,7 @@
   "commands": [
     {
       "purpose": "Three-form public reopen admission plus existing fixed-assignment and nested-transition regressions",
-      "command": "dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName~Fixed_value_mutations_preserve_runtime_admission_after_reopen|FullyQualifiedName~Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes|FullyQualifiedName~Nested_transition_updates_addressable_canonical_json_and_survives_a_later_save' --logger 'trx;LogFileName=focused-8831705.trx' --results-directory /tmp/groundwork-50-mongo-mirror-8831705/focused --logger 'console;verbosity=minimal'",
+      "command": "dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName~Fixed_value_mutations_preserve_runtime_admission_after_reopen|FullyQualifiedName~Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes|FullyQualifiedName~Nested_transition_updates_addressable_canonical_json_and_survives_a_later_save' --logger 'trx;LogFileName=focused-8831705.trx' --results-directory <ephemeral-results-root>/focused --logger 'console;verbosity=minimal'",
       "passed": 7,
       "failed": 0,
       "skipped": 0,
@@ -41,7 +41,7 @@
     },
     {
       "purpose": "Complete MongoDB bounded-mutation regression class",
-      "command": "dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName~MongoDbBoundedMutationTests' --logger 'trx;LogFileName=class-8831705.trx' --results-directory /tmp/groundwork-50-mongo-mirror-8831705/class --logger 'console;verbosity=minimal'",
+      "command": "dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName~MongoDbBoundedMutationTests' --logger 'trx;LogFileName=class-8831705.trx' --results-directory <ephemeral-results-root>/class --logger 'console;verbosity=minimal'",
       "passed": 62,
       "failed": 0,
       "skipped": 0,
@@ -58,6 +58,7 @@
     }
   ],
   "mechanism": "Fixed-value assignments now update the provider-owned MongoDB bounded-mutation selector mirror whenever the action path participates in the primary or linked selector. Canonical JSON, projections, selector mirrors, and version advance together. The regression executes both transition and assignment actions across shared documents, dedicated document table, and physical entity table forms, then reopens through MongoDbDocumentStoreFactory.OpenPhysicalAsync and reloads the durable result.",
+  "commandPathSubstitution": "The command receipts preserve every argument except the machine-local results-directory root, which is replaced by <ephemeral-results-root>. Artifact file names, filters, configuration, and all other arguments are unchanged.",
   "artifactBoundary": "The retained result artifacts preserve every test name, outcome, duration, and summary counter while deliberately removing host names, local paths, timestamps, run/test identifiers, stdout, container identifiers, and provider bootstrap output.",
   "evidenceBoundary": "This checkpoint repairs MongoDB fixed-assignment restart admission and unblocks downstream exact-family certification. It does not execute the controlled four-provider performance matrix, populate or activate a baseline, select a physical form, produce an Elsa performance verdict, or complete T036-T038."
 }

@@ -440,7 +440,9 @@ and physical entity table forms. Root verification passed 7/7 focused cases and 
 head/tree, source and configuration hashes, provider topology, commands, counts, durations, and
 nonclaims. Content-addressed sanitized result artifacts retain every test name, outcome, duration,
 and summary counter while excluding host names, local paths, timestamps, run/test identifiers,
-stdout, container identifiers, and provider bootstrap output.
+stdout, container identifiers, and provider bootstrap output. Command receipts preserve every
+argument except the machine-local results-directory root, which is explicitly represented as
+`<ephemeral-results-root>`.
 
 This prerequisite checkpoint does not execute the controlled four-provider matrix, populate or
 activate a baseline generation, select a physical form, produce an Elsa performance verdict, or
