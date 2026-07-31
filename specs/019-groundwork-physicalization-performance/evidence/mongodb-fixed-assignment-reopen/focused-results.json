@@ -1,0 +1,65 @@
+{
+  "artifactKind": "sanitized-vstest-results",
+  "results": [
+    {
+      "duration": "00:00:01.7068662",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Fixed_value_mutations_preserve_runtime_admission_after_reopen(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.4379230",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Fixed_value_mutations_preserve_runtime_admission_after_reopen(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.7664963",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Fixed_value_mutations_preserve_runtime_admission_after_reopen(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.3463965",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.2284833",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.2995153",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.2850035",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Nested_transition_updates_addressable_canonical_json_and_survives_a_later_save"
+    }
+  ],
+  "run": {
+    "counters": {
+      "aborted": 0,
+      "completed": 0,
+      "disconnected": 0,
+      "error": 0,
+      "executed": 7,
+      "failed": 0,
+      "inProgress": 0,
+      "inconclusive": 0,
+      "notExecuted": 0,
+      "notRunnable": 0,
+      "passed": 7,
+      "passedButRunAborted": 0,
+      "pending": 0,
+      "timeout": 0,
+      "total": 7,
+      "warning": 0
+    },
+    "elapsed": null,
+    "outcome": "Completed"
+  },
+  "sanitization": "Retains every test name, outcome, duration, run counters, outcome, and elapsed interval; removes run/test identifiers, host names, local paths, timestamps, stdout, container identifiers, and provider bootstrap output.",
+  "schemaVersion": 1,
+  "sourceTrxSha256": "0ab2051fffe44983fbcfff8c6151edc8070f8c9c5756876b458712c80f33678f"
+}

@@ -1,0 +1,340 @@
+{
+  "artifactKind": "sanitized-vstest-results",
+  "results": [
+    {
+      "duration": "00:00:00.5841754",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Adding_mutations_backfills_preexisting_primary_and_linked_documents(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.3651961",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Adding_mutations_backfills_preexisting_primary_and_linked_documents(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.5764757",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Adding_mutations_backfills_preexisting_primary_and_linked_documents(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.3124295",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.All_physical_forms_execute_set_based_transition_and_delete(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.2406208",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.All_physical_forms_execute_set_based_transition_and_delete(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.3548332",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.All_physical_forms_execute_set_based_transition_and_delete(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.3544238",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Assignment_cancellation_before_commit_rolls_back_primary_projection_and_ledger"
+    },
+    {
+      "duration": "00:00:00.2509488",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Assignment_restart_after_acknowledgement_loss_replays_the_durable_matched_count"
+    },
+    {
+      "duration": "00:00:00.0090220",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Assignment_schema_binding_round_trips_its_fixed_action_and_fingerprint"
+    },
+    {
+      "duration": "00:00:00.2800284",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Cancellation_before_commit_rolls_back_primary_linked_and_ledger"
+    },
+    {
+      "duration": "00:00:00.2770241",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Canonical_json_roundtrips_numbers_outside_the_bson_numeric_envelope"
+    },
+    {
+      "duration": "00:00:00.0134380",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Compound_mutation_selector_certifies_a_non_predicate_identity_tail_for_primary_and_linked_storage"
+    },
+    {
+      "duration": "00:00:00.5940927",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Concurrent_assignments_preserve_matched_counts_for_same_and_distinct_operations"
+    },
+    {
+      "duration": "00:00:00.3135131",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Concurrent_revoke_and_prune_retries_converge_on_one_durable_outcome_each"
+    },
+    {
+      "duration": "00:00:00.2844255",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Concurrent_save_and_mutation_retry_without_splitting_primary_and_linked_state"
+    },
+    {
+      "duration": "00:00:00.2294503",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Conflicting_mutation_index_fails_without_publishing_applied_state"
+    },
+    {
+      "duration": "00:00:00.2880496",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Delete_is_exact_idempotent_and_rejects_operation_reuse"
+    },
+    {
+      "duration": "00:00:00.2732871",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Explicit_null_matches_a_mutation_while_an_omitted_excluded_value_does_not"
+    },
+    {
+      "duration": "00:00:00.3810280",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Failure_before_commit_rolls_back_document_projection_and_ledger"
+    },
+    {
+      "duration": "00:00:01.0474893",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Failure_before_publication_replays_schema_work_and_backfill_on_restart(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.3985564",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Failure_before_publication_replays_schema_work_and_backfill_on_restart(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.7013696",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Failure_before_publication_replays_schema_work_and_backfill_on_restart(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.5437952",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Fixed_value_mutations_preserve_runtime_admission_after_reopen(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.6531109",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Fixed_value_mutations_preserve_runtime_admission_after_reopen(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.5744395",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Fixed_value_mutations_preserve_runtime_admission_after_reopen(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:01.5061059",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Identity_mutation_explain_and_replay_use_projected_evidence_for_primary_and_linked_storage"
+    },
+    {
+      "duration": "00:00:00.2669314",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Identity_prefix_mutation_uses_indexed_comparison_ranges_for_primary_and_linked_storage"
+    },
+    {
+      "duration": "00:00:00.6202575",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Interrupted_backfill_is_restart_safe_across_document_reincarnation(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.3621305",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Interrupted_backfill_is_restart_safe_across_document_reincarnation(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.5807962",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Interrupted_backfill_is_restart_safe_across_document_reincarnation(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.4069596",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Linked_form_mirrors_primary_schema_version_for_exact_set_based_deletes"
+    },
+    {
+      "duration": "00:00:00.3263673",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Linked_identity_collision_fails_closed_during_public_schema_validation"
+    },
+    {
+      "duration": "00:00:00.2915408",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.2486540",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.3142209",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.2749146",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Mutation_explain_proves_the_exact_primary_and_linked_executable_selectors(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.2274064",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Mutation_explain_proves_the_exact_primary_and_linked_executable_selectors(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.2679193",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Mutation_explain_proves_the_exact_primary_and_linked_executable_selectors(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.0116066",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Mutation_mirror_fields_are_partitioned_by_storage_unit"
+    },
+    {
+      "duration": "00:00:00.3309737",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Mutation_schema_work_is_published_in_the_durable_physical_schema_plan"
+    },
+    {
+      "duration": "00:00:00.2565180",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Mutation_scope_is_inherited_from_the_store_session"
+    },
+    {
+      "duration": "00:00:00.5909069",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Mutation_write_fences_compose_and_live_validation_proves_their_presence"
+    },
+    {
+      "duration": "00:00:00.2857124",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Nested_transition_updates_addressable_canonical_json_and_survives_a_later_save"
+    },
+    {
+      "duration": "00:00:00.5231317",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Orphan_linked_mutation_rows_prevent_schema_publication"
+    },
+    {
+      "duration": "00:00:00.2979280",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Provider_upgrade_revalidates_without_replacing_identical_mutation_schema_definitions"
+    },
+    {
+      "duration": "00:00:00.2586238",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Public_runtime_preserves_mongodb_native_plan_with_observed_selector_index"
+    },
+    {
+      "duration": "00:00:00.2970577",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Published_mutation_schema_rejects_rolling_stale_writers(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.4135336",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Published_mutation_schema_rejects_rolling_stale_writers(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.3758739",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Published_mutation_schema_rejects_rolling_stale_writers(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.3865776",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Relationship_and_expiry_range_predicates_execute_server_side"
+    },
+    {
+      "duration": "00:00:00.2783151",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Restart_and_provider_upgrade_after_acknowledgement_loss_replay_durable_outcome"
+    },
+    {
+      "duration": "00:00:00.4228605",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Retry_after_acknowledgement_loss_replays_the_durable_exact_outcome"
+    },
+    {
+      "duration": "00:00:00.2782090",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Runtime_rejects_a_manifest_that_does_not_match_the_compiled_store"
+    },
+    {
+      "duration": "00:00:00.2519346",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Runtime_rejects_a_provider_that_does_not_match_the_compiled_store"
+    },
+    {
+      "duration": "00:00:00.2647432",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Runtime_rejects_a_route_that_does_not_match_the_compiled_store"
+    },
+    {
+      "duration": "00:00:00.2648087",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Runtime_rejects_altered_declarations_under_the_same_manifest_identity_and_version"
+    },
+    {
+      "duration": "00:00:00.3189578",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Runtime_rejects_unrelated_unit_changes_under_the_same_manifest_identity_and_version"
+    },
+    {
+      "duration": "00:00:00.2745065",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Stale_writer_is_fenced_between_final_validation_and_publication(form: DedicatedDocumentTable)"
+    },
+    {
+      "duration": "00:00:00.2562486",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Stale_writer_is_fenced_between_final_validation_and_publication(form: PhysicalEntityTable)"
+    },
+    {
+      "duration": "00:00:00.3871836",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Stale_writer_is_fenced_between_final_validation_and_publication(form: SharedDocuments)"
+    },
+    {
+      "duration": "00:00:00.3328941",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Transition_and_delete_use_set_based_multi_writes_without_reading_physical_documents"
+    },
+    {
+      "duration": "00:00:00.2764635",
+      "outcome": "Passed",
+      "testName": "Groundwork.MongoDb.Tests.MongoDbBoundedMutationTests.Transition_updates_canonical_document_and_linked_projection"
+    }
+  ],
+  "run": {
+    "counters": {
+      "aborted": 0,
+      "completed": 0,
+      "disconnected": 0,
+      "error": 0,
+      "executed": 62,
+      "failed": 0,
+      "inProgress": 0,
+      "inconclusive": 0,
+      "notExecuted": 0,
+      "notRunnable": 0,
+      "passed": 62,
+      "passedButRunAborted": 0,
+      "pending": 0,
+      "timeout": 0,
+      "total": 62,
+      "warning": 0
+    },
+    "elapsed": null,
+    "outcome": "Completed"
+  },
+  "sanitization": "Retains every test name, outcome, duration, run counters, outcome, and elapsed interval; removes run/test identifiers, host names, local paths, timestamps, stdout, container identifiers, and provider bootstrap output.",
+  "schemaVersion": 1,
+  "sourceTrxSha256": "7b4b41e1c5401fe70a57369631198b90ffef1fe0bce94792f825dc30c9f26d8a"
+}

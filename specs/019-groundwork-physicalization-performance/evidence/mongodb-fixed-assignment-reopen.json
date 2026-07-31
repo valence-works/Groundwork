@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "workUnit": "019-groundwork-physicalization-performance",
+  "scope": "mongodb-fixed-assignment-mirror-reopen",
+  "outcome": "pass",
+  "evidenceClassification": "hash-bound-focused-exact-implementation-head",
+  "recordedAtUtc": "2026-07-31T08:37:02Z",
+  "gitImplementationHeadAtRun": "8831705216d89f399995bfb9dd3028ff65e77686",
+  "gitImplementationTreeAtRun": "70a93fa0c92cda9a7a9b098265d492bf697fe0e1",
+  "originMainAtRun": "68e7c344163c199024aed00ccdcaa2deb51ef5bb",
+  "testedSourceState": "The two changed source files exactly matched implementation head 8831705216d89f399995bfb9dd3028ff65e77686; only this retained evidence and its quickstart/task citations were added after the runs.",
+  "machine": {
+    "operatingSystem": "macOS 26.5.2",
+    "architecture": "arm64",
+    "dotnetSdk": "10.0.300"
+  },
+  "provider": {
+    "identity": "groundwork-mongodb",
+    "image": "mongo:7.0.24",
+    "topology": "transaction-capable replica set"
+  },
+  "hashAlgorithm": "SHA-256",
+  "configurationSha256": {
+    "Directory.Packages.props": "215998e731c930c107154006803e864f91439dc0bdba38193cffe03a1a21bf42"
+  },
+  "sourceSha256": {
+    "src/Groundwork/MongoDb/Documents/MongoDbPhysicalDocumentMutationHandler.cs": "874670d32d9828cc355429880f2986dddbbb2bf6b569630525f5b5e48f320fe8",
+    "tests/Groundwork/Groundwork.MongoDb.Tests/MongoDbBoundedMutationTests.cs": "4b2b0f22f350b28d3d69bbcd8731ef9c2a21647f3192a27bc2db6837fb93840b"
+  },
+  "commands": [
+    {
+      "purpose": "Three-form public reopen admission plus existing fixed-assignment and nested-transition regressions",
+      "command": "dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName~Fixed_value_mutations_preserve_runtime_admission_after_reopen|FullyQualifiedName~Manifest_fixed_assignment_updates_every_route_selected_value_with_set_based_multi_writes|FullyQualifiedName~Nested_transition_updates_addressable_canonical_json_and_survives_a_later_save' --logger 'trx;LogFileName=focused-8831705.trx' --results-directory /tmp/groundwork-50-mongo-mirror-8831705/focused --logger 'console;verbosity=minimal'",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0,
+      "total": 7,
+      "durationSeconds": 35,
+      "retainedResultArtifact": "mongodb-fixed-assignment-reopen/focused-results.json",
+      "retainedResultArtifactSha256": "0034e630cd3a7042864ab38c68083122be3f3724485713f286a56fc9c43b6d27"
+    },
+    {
+      "purpose": "Complete MongoDB bounded-mutation regression class",
+      "command": "dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-build --no-restore --filter 'FullyQualifiedName~MongoDbBoundedMutationTests' --logger 'trx;LogFileName=class-8831705.trx' --results-directory /tmp/groundwork-50-mongo-mirror-8831705/class --logger 'console;verbosity=minimal'",
+      "passed": 62,
+      "failed": 0,
+      "skipped": 0,
+      "total": 62,
+      "durationSeconds": 356,
+      "retainedResultArtifact": "mongodb-fixed-assignment-reopen/class-results.json",
+      "retainedResultArtifactSha256": "269d0a24e26edc3fd5c1c4361ec81e959db1fb3af3c90c2f3f4b87ff66e21a57"
+    },
+    {
+      "purpose": "Targeted formatting and diff gates",
+      "command": "dotnet format Groundwork.slnx --no-restore --verify-no-changes --include src/Groundwork/MongoDb/Documents/MongoDbPhysicalDocumentMutationHandler.cs tests/Groundwork/Groundwork.MongoDb.Tests/MongoDbBoundedMutationTests.cs; git diff --check",
+      "outcome": "pass",
+      "note": "dotnet format reported workspace-load warnings but exited successfully with no formatting changes; git diff --check passed."
+    }
+  ],
+  "mechanism": "Fixed-value assignments now update the provider-owned MongoDB bounded-mutation selector mirror whenever the action path participates in the primary or linked selector. Canonical JSON, projections, selector mirrors, and version advance together. The regression executes both transition and assignment actions across shared documents, dedicated document table, and physical entity table forms, then reopens through MongoDbDocumentStoreFactory.OpenPhysicalAsync and reloads the durable result.",
+  "artifactBoundary": "The retained result artifacts preserve every test name, outcome, duration, and summary counter while deliberately removing host names, local paths, timestamps, run/test identifiers, stdout, container identifiers, and provider bootstrap output.",
+  "evidenceBoundary": "This checkpoint repairs MongoDB fixed-assignment restart admission and unblocks downstream exact-family certification. It does not execute the controlled four-provider performance matrix, populate or activate a baseline, select a physical form, produce an Elsa performance verdict, or complete T036-T038."
+}

@@ -423,3 +423,26 @@ assume the checkpoint had green-washed its control-plane evidence. Final disposi
 
 Every confirmed blocker was returned to and passed by its originating reviewer. The checkpoint
 remains container-free and non-decisional.
+
+## MongoDB fixed-assignment reopen checkpoint
+
+Downstream preview.102 certification exposed an upstream MongoDB restart-admission regression:
+fixed assignments changed canonical content and projections but left the provider-owned bounded-
+mutation selector mirror at its old value. Runtime schema admission correctly rejected the
+contradictory persisted state after reopen. The provider now updates the primary or linked selector
+mirror in the same mutation update whenever the assignment path participates in that selector.
+
+Implementation head `8831705216d89f399995bfb9dd3028ff65e77686` adds a public-factory reopen
+regression for transitions and fixed assignments across shared documents, dedicated document table,
+and physical entity table forms. Root verification passed 7/7 focused cases and the complete
+`MongoDbBoundedMutationTests` class 62/62. Targeted format and `git diff --check` passed. The
+[hash-bound receipt](evidence/mongodb-fixed-assignment-reopen.json) retains the exact implementation
+head/tree, source and configuration hashes, provider topology, commands, counts, durations, and
+nonclaims. Content-addressed sanitized result artifacts retain every test name, outcome, duration,
+and summary counter while excluding host names, local paths, timestamps, run/test identifiers,
+stdout, container identifiers, and provider bootstrap output.
+
+This prerequisite checkpoint does not execute the controlled four-provider matrix, populate or
+activate a baseline generation, select a physical form, produce an Elsa performance verdict, or
+complete T036-T038. Three adversarial exact-range reviews and hosted checks remain required before
+merge and preview publication.
