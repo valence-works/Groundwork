@@ -552,12 +552,11 @@ public abstract class DiagnosticRecordContractTests
     }
 
     [Fact]
-    public void Diagnostic_record_contract_does_not_depend_on_document_or_operational_contracts()
+    public void Diagnostic_record_contract_does_not_depend_on_document_contracts()
     {
         var references = typeof(IDiagnosticRecordStore).Assembly.GetReferencedAssemblies().Select(x => x.Name).ToArray();
 
         Assert.DoesNotContain("Groundwork.Documents", references);
-        Assert.DoesNotContain("Groundwork.Operational", references);
     }
 
     [Fact]

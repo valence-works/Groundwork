@@ -16,9 +16,7 @@ public sealed class GroundworkDependencyBoundaryTests
         { "src/Groundwork/Documents/Groundwork.Documents.csproj", ["src/Groundwork/Core/Groundwork.Core.csproj", "src/Groundwork/Materialization/Groundwork.Materialization.csproj"] },
         { "src/Groundwork/DiagnosticRecords/Groundwork.DiagnosticRecords.csproj", ["src/Groundwork/Core/Groundwork.Core.csproj"] },
         { "src/Groundwork/DiagnosticRecords.Relational/Groundwork.DiagnosticRecords.Relational.csproj", ["src/Groundwork/DiagnosticRecords/Groundwork.DiagnosticRecords.csproj", "src/Groundwork/Provider.Relational/Groundwork.Provider.Relational.csproj"] },
-        { "src/Groundwork/Operational/Groundwork.Operational.csproj", ["src/Groundwork/Core/Groundwork.Core.csproj"] },
-        { "src/Groundwork/Provider.Relational/Groundwork.Provider.Relational.csproj", [] },
-        { "src/Groundwork/Operational.Relational/Groundwork.Operational.Relational.csproj", ["src/Groundwork/Core/Groundwork.Core.csproj", "src/Groundwork/Operational/Groundwork.Operational.csproj", "src/Groundwork/Provider.Relational/Groundwork.Provider.Relational.csproj"] }
+        { "src/Groundwork/Provider.Relational/Groundwork.Provider.Relational.csproj", [] }
     };
 
     [Theory]

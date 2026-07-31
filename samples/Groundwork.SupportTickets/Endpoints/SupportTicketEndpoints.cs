@@ -2,7 +2,6 @@ using Groundwork.Core.Capabilities;
 using Groundwork.Modules.Inbox;
 using Groundwork.SupportTickets;
 using Groundwork.SupportTickets.ExternalModules;
-using Groundwork.SupportTickets.Operations;
 
 internal static class SupportTicketEndpoints
 {
@@ -16,13 +15,11 @@ internal static class SupportTicketEndpoints
             physicalizedIndexes = storageOptions.EffectivePhysicalizedIndexes.Order()
         }));
 
-        app.MapPost("/tickets", async (CreateTicketRequest request, SupportTicketRepository tickets, SupportTicketOperations operations, CancellationToken cancellationToken) =>
+        app.MapPost("/tickets", async (CreateTicketRequest request, SupportTicketRepository tickets, CancellationToken cancellationToken) =>
         {
             try
             {
                 var opened = await tickets.CreateAsync(request.ToTicket(), cancellationToken);
-                // Operational hot path: queue the new ticket for FIFO triage in its priority lane.
-                await operations.QueueForTriageAsync(opened.Ticket.TicketNumber, opened.Ticket.Priority, cancellationToken);
                 return Results.Created($"/tickets/{UrlSegment(opened.Ticket.TicketNumber)}", ToTicketResponse(opened));
             }
             catch (SupportTicketConflictException exception)
@@ -89,14 +86,11 @@ internal static class SupportTicketEndpoints
             string ticketNumber,
             VersionedTicketRequest request,
             SupportTicketRepository tickets,
-            SupportTicketOperations operations,
             CancellationToken cancellationToken) =>
         {
             try
             {
                 var escalated = await tickets.EscalateAsync(ticketNumber, request.ExpectedVersion, DateTimeOffset.UtcNow, cancellationToken);
-                // Atomic cross-unit commit: supervisor triage + manager notification land together or not at all.
-                await operations.EscalateAsync(ticketNumber, "Escalated to supervisor review.", cancellationToken);
                 return Results.Ok(ToTicketResponse(escalated));
             }
             catch (KeyNotFoundException)
@@ -157,16 +151,6 @@ internal static class SupportTicketEndpoints
             return Results.Ok(comments.Select(ToCommentResponse));
         });
 
-        // ---- Operational hot path ---------------------------------------------------------------------
-
-        // Capability-derived fit: the same operational requirements are Supported on an operational provider
-        // and Unsupported on a portable document-only provider — the verdict is computed, not declared.
-        app.MapGet("/operational/fit", (OperationalFitReport fit) => Results.Ok(new
-        {
-            operationalProvider = DescribeFit(fit.OperationalProvider),
-            documentOnlyProvider = DescribeFit(fit.DocumentOnlyProvider)
-        }));
-
         // ---- External module capability extension ----------------------------------------------------
 
         // Open/closed capability proof: the Inbox module contributes a custom capability that the host
@@ -185,55 +169,6 @@ internal static class SupportTicketEndpoints
         {
             var admission = await inbox.TryAdmitAsync(request.Consumer, request.MessageKey, cancellationToken);
             return Results.Ok(new AdmitInboxMessageResponse(request.Consumer, request.MessageKey, admission.ToString()));
-        });
-
-        // Triage work queue: claim the next ticket (FIFO, exclusive, lease-protected).
-        app.MapPost("/triage/claim", async (ClaimTriageRequest request, SupportTicketOperations operations, CancellationToken cancellationToken) =>
-        {
-            var assignment = await operations.ClaimNextTriageAsync(
-                request.AgentId,
-                TimeSpan.FromSeconds(request.LeaseSeconds <= 0 ? 30 : request.LeaseSeconds),
-                request.Priority,
-                cancellationToken);
-            return assignment is null ? Results.NoContent() : Results.Ok(assignment);
-        });
-
-        // Triage work queue: finish a claimed item (ack, fenced by lease token).
-        app.MapPost("/triage/{messageId}/complete", async (string messageId, CompleteTriageRequest request, SupportTicketOperations operations, CancellationToken cancellationToken) =>
-        {
-            var completed = await operations.CompleteTriageAsync(messageId, request.LeaseToken, cancellationToken);
-            return completed ? Results.Ok(new { messageId, completed }) : Results.Conflict(new { error = "Lease lost; triage item was reclaimed." });
-        });
-
-        // Ownership lease: acquire exclusive edit ownership of a ticket with a fencing token.
-        app.MapPost("/tickets/{ticketNumber}/lock", async (string ticketNumber, LockTicketRequest request, SupportTicketOperations operations, CancellationToken cancellationToken) =>
-        {
-            var ownership = await operations.AcquireOwnershipAsync(
-                ticketNumber,
-                request.AgentId,
-                TimeSpan.FromSeconds(request.LeaseSeconds <= 0 ? 60 : request.LeaseSeconds),
-                cancellationToken);
-            return ownership.Granted ? Results.Ok(ownership) : Results.Conflict(ownership);
-        });
-
-        // Ownership lease: release ownership (requires the matching fencing token).
-        app.MapPost("/tickets/{ticketNumber}/unlock", async (string ticketNumber, UnlockTicketRequest request, SupportTicketOperations operations, CancellationToken cancellationToken) =>
-        {
-            var released = await operations.ReleaseOwnershipAsync(ticketNumber, request.AgentId, request.FencingToken, cancellationToken);
-            return released ? Results.Ok(new { ticketNumber, released }) : Results.Conflict(new { error = "Not the current owner." });
-        });
-
-        app.MapGet("/tickets/{ticketNumber}/lock", async (string ticketNumber, SupportTicketOperations operations, CancellationToken cancellationToken) =>
-        {
-            var state = await operations.ReadOwnershipAsync(ticketNumber, cancellationToken);
-            return state is null ? Results.NoContent() : Results.Ok(state);
-        });
-
-        // Notification outbox: dispatch pending notifications in order (at-least-once).
-        app.MapPost("/notifications/dispatch", async (SupportTicketOperations operations, CancellationToken cancellationToken) =>
-        {
-            var dispatched = await operations.DispatchNotificationsAsync(cancellationToken: cancellationToken);
-            return Results.Ok(dispatched);
         });
 
         app.MapFallbackToFile("index.html");
@@ -286,14 +221,6 @@ public sealed record AssignTicketRequest(string AssigneeId, long ExpectedVersion
 public sealed record VersionedTicketRequest(long ExpectedVersion);
 
 public sealed record AddCommentRequest(string AuthorId, string Body, long ExpectedTicketVersion);
-
-public sealed record ClaimTriageRequest(string AgentId, int LeaseSeconds = 30, string? Priority = null);
-
-public sealed record CompleteTriageRequest(string LeaseToken);
-
-public sealed record LockTicketRequest(string AgentId, int LeaseSeconds = 60);
-
-public sealed record UnlockTicketRequest(string AgentId, long FencingToken);
 
 public sealed record AdmitInboxMessageRequest(string Consumer, string MessageKey);
 

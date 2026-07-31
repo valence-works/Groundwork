@@ -3,10 +3,8 @@ using System.Collections.ObjectModel;
 namespace Groundwork.Documents.UnitOfWork;
 
 /// <summary>
-/// The set of document-kind identities that must commit as one logical transaction. Mirrors the
-/// operational <c>OperationalCommitScope</c> so the document write lane and the operational write lane
-/// share the same unit-of-work shape. Rejects null, empty, blank, or duplicate kind lists at
-/// construction so providers receive a well-formed scope.
+/// The set of document-kind identities that must commit as one logical transaction. Rejects null,
+/// empty, blank, or duplicate kind lists at construction so providers receive a well-formed scope.
 /// </summary>
 public sealed record DocumentCommitScope
 {
