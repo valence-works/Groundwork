@@ -448,3 +448,29 @@ This prerequisite checkpoint does not execute the controlled four-provider matri
 activate a baseline generation, select a physical form, produce an Elsa performance verdict, or
 complete T036-T038. Three adversarial exact-range reviews and hosted checks remain required before
 merge and preview publication.
+
+### MongoDB fixed-assignment checkpoint review
+
+Three independent read-only reviewers adversarially inspected
+`68e7c344163c199024aed00ccdcaa2deb51ef5bb..488877b3c2a01187b50c9dddc1f2e977fa4c4e5b`
+on correctness/mechanism, evidence integrity, and scope/test preservation:
+
+- Correctness/mechanism passed the primary/linked assignment updates, canonical content,
+  projections, selector mirrors, versions, all three physical forms, and public-factory reopen
+  admission.
+- Scope/test preservation passed the internal provider boundary, complete retained test inventory,
+  and explicit T036-T038 nonclaims.
+- Evidence integrity blocked one contradiction: the receipt said local paths were excluded while
+  its two command strings still retained literal `/tmp` result roots.
+
+Remediation commit `6407df4ce4c8669c2ad7c592a39317ac665a76b5` replaces only those
+machine-local roots with `<ephemeral-results-root>` and explicitly records the substitution; every
+filter, logger, artifact name, and other argument remains unchanged. The originating evidence
+reviewer re-verified the implementation head/tree, source/configuration and artifact hashes, 7/7
+and 62/62 inventories, topology, open-task state, and nonclaims as **PASS**. Correctness and scope
+reviewers re-inspected the complete remediated range and also returned **PASS**.
+
+The required Luna reviewer model was unavailable; all three reviews used GPT-5.6 Terra High as the
+documented delegate fallback. The next commit records only these dispositions. Before merge, the
+same reviewers re-verify that record-only head so the durable account cannot diverge from the
+candidate.
