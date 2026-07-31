@@ -8,6 +8,7 @@ using Groundwork.Documents.Planning;
 using Groundwork.Materialization;
 using Groundwork.Relational.Planning;
 using Xunit;
+using Groundwork.TestInfrastructure;
 
 namespace Groundwork.Tests;
 
@@ -103,7 +104,7 @@ public sealed class PlannerContractTests
             Intent = StorageIntent.Operational(
                 "Requires atomic claim semantics.",
                 WorkloadIntent.OperationalStream,
-                WellKnownCapabilities.AtomicClaim)
+                TestCapabilities.Primary)
         };
 
         return manifest with { StorageUnits = [operationalUnit] };

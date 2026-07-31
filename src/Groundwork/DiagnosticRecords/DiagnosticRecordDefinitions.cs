@@ -53,7 +53,6 @@ public sealed record DiagnosticRecordLimits(
     int MaxRecordIdBytes = 256,
     int MaxFieldsPerRecord = 64,
     int MaxQueryLimit = 1_000,
-    int MaxGroupedQueryInputRecords = 100_000,
     int MaxPredicateNodes = 64,
     int MaxPredicateValues = 256,
     int MaxJsonDepth = 64);
@@ -67,8 +66,7 @@ public sealed record DiagnosticRecordStreamDefinition(
     TimeSpan MaxOperationClockSkew,
     TimeSpan AppendIdempotencyWindow,
     TimeSpan TrimIdempotencyWindow,
-    string? LogicalHighWaterField = null,
-    IReadOnlyList<DiagnosticGroupReductionProfile>? GroupReductionProfiles = null);
+    string? LogicalHighWaterField = null);
 
 public static class DiagnosticRecordFieldNames
 {
@@ -108,20 +106,7 @@ public static class DiagnosticRecordStreamDefinitionSnapshot
         {
             SupportedPredicates = field.SupportedPredicates?.ToFrozenSet()!
         }).ToArray();
-        var profiles = definition.GroupReductionProfiles?.Select(profile => profile with
-        {
-            Reducers = Array.AsReadOnly((profile.Reducers ?? []).ToArray()),
-            AllowedPredicates = Array.AsReadOnly((profile.AllowedPredicates ?? []).Select(allowance => allowance with
-            {
-                SupportedPredicates = allowance.SupportedPredicates?.ToFrozenSet()!
-            }).ToArray()),
-            OrderableAliases = profile.OrderableAliases?.ToFrozenSet(StringComparer.Ordinal)!
-        }).ToArray();
-        return definition with
-        {
-            Fields = Array.AsReadOnly(fields),
-            GroupReductionProfiles = profiles is null ? null : Array.AsReadOnly(profiles)
-        };
+        return definition with { Fields = Array.AsReadOnly(fields) };
     }
 }
 
@@ -147,7 +132,7 @@ public static class DiagnosticRecordStreamDefinitionValidator
             errors.Add(new("definition.limits.required", "Record-store limits are required.", "limits"));
         else if (definition.Limits.MaxBatchRecords <= 0 || definition.Limits.MaxPayloadBytes <= 0 ||
                  definition.Limits.MaxRecordIdBytes <= 0 || definition.Limits.MaxFieldsPerRecord <= 0 ||
-                 definition.Limits.MaxQueryLimit <= 0 || definition.Limits.MaxGroupedQueryInputRecords <= 0 ||
+                 definition.Limits.MaxQueryLimit <= 0 ||
                  definition.Limits.MaxPredicateNodes <= 0 ||
                  definition.Limits.MaxPredicateValues <= 0 ||
                  definition.Limits.MaxJsonDepth <= 0)
@@ -193,7 +178,6 @@ public static class DiagnosticRecordStreamDefinitionValidator
                 errors.Add(new("definition.high_water.invalid", "The logical high-water field must be a declared scalar Int64 field.", "logicalHighWaterField"));
         }
 
-        DiagnosticGroupReductionProfileValidator.Validate(definition, errors);
 
         DiagnosticStringProjectionBudget.AddDefinitionErrors(definition, errors);
 

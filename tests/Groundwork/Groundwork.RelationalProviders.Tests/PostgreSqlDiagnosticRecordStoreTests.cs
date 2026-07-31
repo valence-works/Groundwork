@@ -33,64 +33,6 @@ public sealed class PostgreSqlDiagnosticRecordStoreTests(PostgreSqlDiagnosticCon
         fixture ?? throw new InvalidOperationException("The PostgreSQL diagnostic fixture has not been initialized.");
 
     [Fact]
-    public async Task Grouped_sum_overflow_reaches_exact_int64_materialization()
-    {
-        var relationalFixture = CreateServerFixture();
-        var store = relationalFixture.OpenStore(TestDefinition);
-        var scope = new DiagnosticStorageScope("tenant-a", "shell-a");
-        var occurredAt = DateTimeOffset.Parse("2026-07-12T12:00:01Z");
-        static DiagnosticRecordInput Record(string id, DateTimeOffset at, long sequence) =>
-            new(
-                id,
-                at,
-                "{}",
-                new Dictionary<string, IReadOnlyList<DiagnosticFieldValue>>(StringComparer.Ordinal)
-                {
-                    ["service"] = [DiagnosticFieldValue.String("api")],
-                    ["sequence"] = [DiagnosticFieldValue.Int64(sequence)]
-                });
-        await store.AppendAsync(DiagnosticRecordBatch.Create(
-            scope,
-            TestDefinition.Stream,
-            new(relationalFixture.GetUtcNow(), "postgresql-grouped-sum-overflow"),
-            [
-                Record("max", occurredAt, long.MaxValue),
-                Record("one", occurredAt.AddTicks(1), 1)
-            ]));
-
-        await Assert.ThrowsAsync<OverflowException>(() =>
-            store.QueryGroupsAsync(new(
-                scope,
-                TestDefinition.Stream,
-                "service-summary",
-                10,
-                new("start"),
-                InputRecordLimit: 100)).AsTask());
-    }
-
-    [Fact]
-    public void Grouped_query_command_selects_the_newest_scoped_records_before_reduction()
-    {
-        var fixture = (PostgreSqlDiagnosticRecordStoreFixture)CreateServerFixture();
-        var store = Assert.IsType<PostgreSqlDiagnosticRecordStore>(fixture.OpenStore(TestDefinition));
-        var command = store.Inner.BuildGroupQueryCommand(
-            new(
-                new("tenant-a", "shell-a"),
-                TestDefinition.Stream,
-                "service-summary",
-                10,
-                new("start"),
-                InputRecordLimit: 2),
-            snapshotHighWater: 42);
-
-        Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
-        Assert.Contains("r.cursor <= @snapshot", command.CommandText, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY r.cursor DESC", command.CommandText, StringComparison.Ordinal);
-        Assert.Contains("LIMIT @inputLimit", command.CommandText, StringComparison.Ordinal);
-        Assert.Equal(2, command.Parameters["inputLimit"]);
-    }
-
-    [Fact]
     public async Task Materializer_uses_native_binary_text_and_all_durable_tables()
     {
         var fixture = (PostgreSqlDiagnosticRecordStoreFixture)CreateServerFixture();
@@ -187,20 +129,6 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
     public void AdvanceTime(TimeSpan duration) => timeProvider.Advance(duration);
     public void SetWallClock(DateTimeOffset utcNow) => timeProvider.Set(utcNow);
 
-    public async ValueTask<DiagnosticRecordNativePlan> ExplainGroupedQueryAsync(
-        DiagnosticRecordStreamDefinition definition,
-        DiagnosticRecordGroupQuery query,
-        CancellationToken cancellationToken = default)
-    {
-        await EnsurePlanSeedAsync(definition, cancellationToken);
-        return await PostgreSqlDiagnosticRecordStoreFactory
-            .CreatePlanInspector(ConnectionString)
-            .InspectGroupedQueryAsync(
-                DiagnosticRecordConformanceDeployment.Create(definition),
-                query,
-                cancellationToken);
-    }
-
     public async ValueTask<IReadOnlyList<string>> ExplainQueryAsync(
         DiagnosticRecordStreamDefinition definition,
         DiagnosticRecordQuery query,
@@ -236,28 +164,6 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
                 return true;
             }
         }
-        return false;
-    }
-
-    public bool HasNativeScopedGroupedReduction(DiagnosticRecordNativePlan plan) =>
-        HasNativeScopedGroupedReductionPlan(plan);
-
-    internal static bool HasNativeScopedGroupedReductionPlan(DiagnosticRecordNativePlan plan)
-    {
-        if (plan.Provider != "postgresql" ||
-            plan.Operation != DiagnosticRecordPlanOperation.GroupedQuery ||
-            plan.Format != DiagnosticRecordNativePlanFormats.PostgreSqlExplainJson)
-        {
-            return false;
-        }
-
-        foreach (var json in plan.RawPlans)
-        {
-            using var document = JsonDocument.Parse(json);
-            if (FindScopedAggregate(document.RootElement, document.RootElement))
-                return true;
-        }
-
         return false;
     }
 
@@ -881,211 +787,6 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
             Constraints));
     }
 
-    [Fact]
-    public void Grouped_reduction_recognizer_accepts_scoped_inputs_inside_aggregate_subtree()
-    {
-        var plan = GroupedPlan(
-            $$"""
-              {
-                "Node Type": "Sort",
-                "Plans": [
-                  {
-                    "Node Type": "Limit",
-                    "Subplan Name": "CTE input_window",
-                    "Plans": [{{NewestRecordSeek()}}]
-                  },
-                  {
-                    "Node Type": "Nested Loop",
-                    "Subplan Name": "CTE base_records",
-                    "Plans": [
-                      {"Node Type": "CTE Scan", "CTE Name": "input_window"},
-                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
-                    ]
-                  },
-                  {
-                    "Node Type": "Aggregate",
-                    "Plans": [{"Node Type": "CTE Scan", "CTE Name": "base_records"}]
-                  }
-                ]
-              }
-              """);
-
-        Assert.True(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_resolves_only_the_cte_producer_consumed_by_the_aggregate()
-    {
-        var plan = GroupedPlan(
-            $$"""
-              {
-                "Node Type": "Sort",
-                "Plans": [
-                  {
-                    "Node Type": "Limit",
-                    "Subplan Name": "CTE input_window",
-                    "Plans": [{{NewestRecordSeek()}}]
-                  },
-                  {
-                    "Node Type": "Nested Loop",
-                    "Subplan Name": "CTE base_records",
-                    "Plans": [
-                      {"Node Type": "CTE Scan", "CTE Name": "input_window"},
-                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
-                    ]
-                  },
-                  {
-                    "Node Type": "Aggregate",
-                    "Plans": [
-                      {"Node Type": "CTE Scan", "CTE Name": "base_records"}
-                    ]
-                  }
-                ]
-              }
-              """);
-
-        Assert.True(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_disconnected_evidence()
-    {
-        var plan = GroupedPlan(
-            $$"""
-              {
-                "Node Type": "Append",
-                "Plans": [
-                  {"Node Type": "Aggregate", "Plans": [{"Node Type": "Result"}]},
-                  {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
-                  {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "f")}}
-                ]
-              }
-              """);
-
-        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_an_unreferenced_scoped_cte_producer()
-    {
-        var plan = GroupedPlan(
-            $$"""
-              {
-                "Node Type": "Sort",
-                "Plans": [
-                  {
-                    "Node Type": "Nested Loop",
-                    "Subplan Name": "CTE unrelated",
-                    "Plans": [
-                      {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
-                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
-                    ]
-                  },
-                  {
-                    "Node Type": "Limit",
-                    "Subplan Name": "CTE input_window",
-                    "Plans": [{{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}}]
-                  },
-                  {
-                    "Node Type": "Aggregate",
-                    "Plans": [
-                      {"Node Type": "CTE Scan", "CTE Name": "base_records"}
-                    ]
-                  }
-                ]
-              }
-              """);
-
-        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_all_required_fragments_when_the_bounded_input_does_not_feed_the_field_join()
-    {
-        var plan = GroupedPlan(
-            $$"""
-              {
-                "Node Type": "Sort",
-                "Plans": [
-                  {
-                    "Node Type": "Limit",
-                    "Subplan Name": "CTE input_window",
-                    "Plans": [{{NewestRecordSeek()}}]
-                  },
-                  {
-                    "Node Type": "Append",
-                    "Subplan Name": "CTE base_records",
-                    "Plans": [
-                      {"Node Type": "CTE Scan", "CTE Name": "input_window"},
-                      {
-                        "Node Type": "Nested Loop",
-                        "Plans": [
-                          {{RelationSeek(RelationalDiagnosticRecordSchema.RecordsTable, "r")}},
-                          {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "Node Type": "Aggregate",
-                    "Plans": [{"Node Type": "CTE Scan", "CTE Name": "base_records"}]
-                  }
-                ]
-              }
-              """);
-
-        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_a_forward_input_scan_even_with_disconnected_backward_evidence()
-    {
-        var plan = GroupedPlan(
-            $$"""
-              {
-                "Node Type": "Sort",
-                "Plans": [
-                  {
-                    "Node Type": "Nested Loop",
-                    "Subplan Name": "CTE base_records",
-                    "Plans": [
-                      {
-                        "Node Type": "Limit",
-                        "Plans": [{{NewestRecordSeek("Forward")}}]
-                      },
-                      {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "g")}}
-                    ]
-                  },
-                  {{NewestRecordSeek()}},
-                  {
-                    "Node Type": "Aggregate",
-                    "Plans": [{"Node Type": "CTE Scan", "CTE Name": "base_records"}]
-                  }
-                ]
-              }
-              """);
-
-        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_scope_predicates_disconnected_from_a_relation_access()
-    {
-        var plan = GroupedPlan(
-            $$"""
-              {
-                "Node Type": "Aggregate",
-                "Plans": [
-                  {"Node Type":"Seq Scan","Relation Name":"{{RelationalDiagnosticRecordSchema.RecordsTable}}","Alias":"r"},
-                  {{RelationSeek(RelationalDiagnosticRecordSchema.FieldsTable, "f")}},
-                  {"Node Type":"Result","Filter":"tenant_id = 'tenant-a' AND scope_id = 'shell-a' AND stream_id = 'logs'"}
-                ]
-              }
-              """);
-
-        Assert.False(PostgreSqlDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
     [Theory]
     [MemberData(nameof(AdversarialMergePlans))]
     public void Cursor_merge_rejects_uncorrelated_or_inexact_evidence(string json)
@@ -1156,13 +857,6 @@ public sealed class PostgreSqlDiagnosticPlanRecognizerTests
             "Index Cond": "({{tenant}} = 'tenant-a' AND {{scope}} = 'shell-a' AND {{stream}} = 'logs' AND {{field}} = 'unicode')"
           }
           """;
-
-    private static DiagnosticRecordNativePlan GroupedPlan(string root) =>
-        new(
-            "postgresql",
-            DiagnosticRecordPlanOperation.GroupedQuery,
-            DiagnosticRecordNativePlanFormats.PostgreSqlExplainJson,
-            [$$"""[{"Plan":{{root}}}]"""]);
 
     private static string RelationSeek(string relation, string alias) =>
         $$"""

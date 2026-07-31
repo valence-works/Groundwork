@@ -14,7 +14,6 @@ public sealed class RelationalDiagnosticRecordStore :
     IDiagnosticRecordStore,
     IDiagnosticAppendHandler,
     IDiagnosticQueryHandler,
-    IDiagnosticGroupedQueryHandler,
     IDiagnosticInspectHandler,
     IDiagnosticTrimHandler
 {
@@ -58,7 +57,7 @@ public sealed class RelationalDiagnosticRecordStore :
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.interceptAsync = interceptAsync ?? ((_, _) => ValueTask.CompletedTask);
         admission = admitAsync is null ? null : new(admitAsync);
-        Handlers = new(this, this, this, this) { GroupedQuery = this };
+        Handlers = new(this, this, this, this);
     }
 
     public DiagnosticRecordStoreHandlers Handlers { get; }
@@ -70,12 +69,6 @@ public sealed class RelationalDiagnosticRecordStore :
         SupportsSnapshotContinuation: true,
         SupportsExactCount: true,
         SupportsLatestPerKey: true);
-
-    DiagnosticGroupedQueryHandlerCapabilities IDiagnosticGroupedQueryHandler.Capabilities { get; } = new(
-        true,
-        Enum.GetValues<DiagnosticGroupReducerKind>().ToHashSet(),
-        Enum.GetValues<DiagnosticPredicateOperator>().ToHashSet(),
-        true);
 
     public async ValueTask<DiagnosticAppendResult> AppendAsync(
         DiagnosticRecordBatch batch,
@@ -180,50 +173,6 @@ public sealed class RelationalDiagnosticRecordStore :
             cancellationToken);
     }
 
-    public async ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
-        DiagnosticRecordGroupQuery query,
-        CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        query = DiagnosticRecordGroupQuerySnapshot.Capture(query, definition.Limits.MaxPredicateNodes);
-        DiagnosticRecordGroupQueryValidator.Validate(query, definition, this);
-        await EnsureAdmissionAsync(cancellationToken);
-        return await readSessions.AutonomousExecutor.ExecuteAsync(
-            async (connection, transaction, ct) =>
-            {
-                var profile = DiagnosticGroupReductionProfileResolver.Resolve(definition, query.Profile)!;
-                var snapshot = query.Continuation is null
-                    ? await ReadCursorHighWaterAsync(connection, transaction, query.Scope, query.Stream, ct)
-                    : ParseCursor(query.Continuation.SnapshotHighWater);
-                var command = new RelationalDiagnosticGroupQueryBuilder(definition, dialect)
-                    .Build(query, profile, snapshot);
-                var rows = await ReadGroupRowsAsync(
-                    connection,
-                    transaction,
-                    command,
-                    DiagnosticGroupReductionProfileValidator.OutputType(
-                        definition,
-                        profile,
-                        query.Order.Alias),
-                    ct);
-                var pageRows = rows.Take(query.Take).ToArray();
-                var groups = pageRows.Select(row => row.ToContract(profile)).ToArray();
-                DiagnosticRecordGroupContinuation? continuation = null;
-                if (rows.Count > query.Take)
-                {
-                    var last = pageRows[^1];
-                    continuation = new(
-                        new(snapshot.ToString(CultureInfo.InvariantCulture)),
-                        last.OrderValue,
-                        last.GroupKey,
-                        DiagnosticRequestFingerprint.ForGroupQuery(query with { Continuation = null }, definition),
-                        query.InputRecordLimit);
-                }
-                return new DiagnosticRecordGroupPage(Array.AsReadOnly(groups), continuation);
-            },
-            cancellationToken);
-    }
-
     public async ValueTask<DiagnosticStreamStatistics> InspectAsync(
         DiagnosticStreamInspectionRequest request,
         CancellationToken cancellationToken = default)
@@ -291,17 +240,6 @@ public sealed class RelationalDiagnosticRecordStore :
     internal RelationalDiagnosticCommand BuildQueryCommand(DiagnosticRecordQuery query, long snapshotHighWater)
     {
         var command = new RelationalDiagnosticQueryBuilder(definition, dialect).Build(query, snapshotHighWater);
-        return command with { CommandText = dialect.PrepareCommandText(command.CommandText) };
-    }
-
-    internal RelationalDiagnosticCommand BuildGroupQueryCommand(
-        DiagnosticRecordGroupQuery query,
-        long snapshotHighWater)
-    {
-        var profile = DiagnosticGroupReductionProfileResolver.Resolve(definition, query.Profile)
-            ?? throw new InvalidOperationException($"Grouped-reduction profile '{query.Profile}' is not declared.");
-        var command = new RelationalDiagnosticGroupQueryBuilder(definition, dialect)
-            .Build(query, profile, snapshotHighWater);
         return command with { CommandText = dialect.PrepareCommandText(command.CommandText) };
     }
 
@@ -877,66 +815,6 @@ public sealed class RelationalDiagnosticRecordStore :
         return rows;
     }
 
-    private async Task<IReadOnlyList<GroupRow>> ReadGroupRowsAsync(
-        DbConnection connection,
-        DbTransaction transaction,
-        RelationalDiagnosticCommand sql,
-        DiagnosticFieldType orderType,
-        CancellationToken cancellationToken)
-    {
-        await using var command = CreateCommand(connection, transaction, sql);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var rows = new SortedDictionary<long, GroupRowBuilder>();
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var rowKind = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
-            if (rowKind == 0)
-            {
-                if (Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture) != 0)
-                    throw new DiagnosticRecordValidationException([
-                        new(
-                            "group_query.union.too_large",
-                            "A grouped set-union exceeded the profile's declared value bound.",
-                            "profile.maxUnionValues")
-                    ]);
-                continue;
-            }
-
-            var ordinal = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
-            if (rowKind == 1)
-            {
-                var groupKey = DiagnosticStoredFieldKeys.DecodeCanonical(
-                    DiagnosticFieldType.String,
-                    reader.GetString(2));
-                rows.Add(ordinal, new(groupKey, ParseGroupValue(orderType, reader.GetString(6))));
-                continue;
-            }
-
-            var target = rows[ordinal];
-            var alias = reader.GetString(3);
-            var type = (DiagnosticFieldType)Convert.ToInt32(reader.GetValue(4), CultureInfo.InvariantCulture);
-            target.Add(alias, ParseGroupValue(type, reader.GetString(5)));
-        }
-
-        return rows.Values.Select(row => row.Build()).ToArray();
-    }
-
-    private static DiagnosticFieldValue ParseGroupValue(
-        DiagnosticFieldType type,
-        string storedCanonical)
-    {
-        if (type == DiagnosticFieldType.String)
-            return DiagnosticFieldValue.String(
-                DiagnosticStoredFieldKeys.DecodeCanonical(type, storedCanonical));
-        if (type == DiagnosticFieldType.Int64)
-            return DiagnosticFieldValue.Int64(
-                long.Parse(storedCanonical, NumberStyles.Integer, CultureInfo.InvariantCulture));
-        if (type == DiagnosticFieldType.Timestamp &&
-            long.TryParse(storedCanonical, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ticks))
-            return DiagnosticFieldValue.Timestamp(new DateTimeOffset(ticks, TimeSpan.Zero));
-        return new(type, storedCanonical);
-    }
-
     private async Task<IReadOnlyList<DiagnosticRecord>> HydrateRecordsAsync(DbConnection connection, DbTransaction transaction, IReadOnlyList<RecordRow> rows, CancellationToken cancellationToken)
     {
         if (rows.Count == 0)
@@ -1079,48 +957,6 @@ public sealed class RelationalDiagnosticRecordStore :
         long OccurredAtTicks,
         string Payload,
         string? OrderValue);
-
-    private sealed record GroupRow(
-        string GroupKey,
-        DiagnosticFieldValue OrderValue,
-        IReadOnlyDictionary<string, IReadOnlyList<DiagnosticFieldValue>> Fields)
-    {
-        public DiagnosticRecordGroup ToContract(DiagnosticGroupReductionProfile profile)
-        {
-            var values = profile.Reducers.ToDictionary(
-                reducer => reducer.Alias,
-                reducer => Fields.TryGetValue(reducer.Alias, out var reduced)
-                    ? reduced
-                    : (IReadOnlyList<DiagnosticFieldValue>)Array.Empty<DiagnosticFieldValue>(),
-                StringComparer.Ordinal);
-            return new(
-                GroupKey,
-                new System.Collections.ObjectModel.ReadOnlyDictionary<string, IReadOnlyList<DiagnosticFieldValue>>(values));
-        }
-    }
-
-    private sealed class GroupRowBuilder(
-        string groupKey,
-        DiagnosticFieldValue orderValue)
-    {
-        private readonly Dictionary<string, List<DiagnosticFieldValue>> fields = new(StringComparer.Ordinal);
-
-        public void Add(string alias, DiagnosticFieldValue value)
-        {
-            if (!fields.TryGetValue(alias, out var values))
-                fields.Add(alias, values = []);
-            values.Add(value);
-        }
-
-        public GroupRow Build() => new(
-            groupKey,
-            orderValue,
-            new System.Collections.ObjectModel.ReadOnlyDictionary<string, IReadOnlyList<DiagnosticFieldValue>>(
-                fields.ToDictionary(
-                    pair => pair.Key,
-                    pair => (IReadOnlyList<DiagnosticFieldValue>)Array.AsReadOnly(pair.Value.ToArray()),
-                    StringComparer.Ordinal)));
-    }
 
     private sealed record OperationExecution<T>(T? Value, Exception? Exception)
     {

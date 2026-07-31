@@ -91,7 +91,6 @@ public static class MongoDbDiagnosticRecordStoreFactory
         return new DelegatingDiagnosticRecordPlanInspector(
             new MongoDbDiagnosticRecordDeploymentInspector(connectionString, databaseName),
             (definition, query, cancellationToken) => InspectQueryPlanAsync(connectionString, databaseName, definition, query, cancellationToken),
-            (definition, query, cancellationToken) => InspectGroupedQueryPlanAsync(connectionString, databaseName, definition, query, cancellationToken),
             (definition, request, cancellationToken) => InspectStatisticsPlanAsync(connectionString, databaseName, definition, request, cancellationToken),
             (definition, request, cancellationToken) => InspectTrimPlanAsync(connectionString, databaseName, definition, request, cancellationToken));
     }
@@ -154,22 +153,6 @@ public static class MongoDbDiagnosticRecordStoreFactory
         await using var handle = OpenExisting(connectionString, databaseName, definition);
         var plan = await handle.Store.ExplainQueryAsync(query, cancellationToken);
         return new("mongodb", DiagnosticRecordPlanOperation.Query, DiagnosticRecordNativePlanFormats.MongoDbExplainJson, [plan.ToString()]);
-    }
-
-    private static async ValueTask<DiagnosticRecordNativePlan> InspectGroupedQueryPlanAsync(
-        string connectionString,
-        string databaseName,
-        DiagnosticRecordStreamDefinition definition,
-        DiagnosticRecordGroupQuery query,
-        CancellationToken cancellationToken)
-    {
-        await using var handle = OpenExisting(connectionString, databaseName, definition);
-        var plan = await handle.Store.ExplainGroupedQueryAsync(query, cancellationToken);
-        return new(
-            "mongodb",
-            DiagnosticRecordPlanOperation.GroupedQuery,
-            DiagnosticRecordNativePlanFormats.MongoDbExplainJson,
-            [plan.ToString()]);
     }
 
     private static async ValueTask<DiagnosticRecordNativePlan> InspectTrimPlanAsync(

@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <Compile Include="..\TestInfrastructure\RepositoryRootLocator.cs" Link="TestInfrastructure\RepositoryRootLocator.cs" />
+    <Compile Include="..\TestInfrastructure\TestCapabilities.cs" Link="TestInfrastructure\TestCapabilities.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -33,23 +33,6 @@ internal static class SqlServerDiagnosticRecordValidator
             (long)definition.Limits.MaxPredicateNodes * FieldParametersPerPredicateNode +
             FixedQueryParameterBudget > 2_100)
             errors.Add(new("provider.sql_server.parameter_budget.exceeded", "The declared predicate node and value bounds can exceed SQL Server's 2,100-parameter command limit.", "limits"));
-        foreach (var profile in definition.GroupReductionProfiles ?? [])
-        {
-            var firstByParameters = profile.Reducers.Count(reducer =>
-                reducer.Kind == DiagnosticGroupReducerKind.FirstBy) * 2L;
-            var groupedBudget =
-                FixedQueryParameterBudget +
-                profile.Reducers.Count * 4L +
-                firstByParameters +
-                definition.Limits.MaxPredicateValues;
-            if (groupedBudget > 2_100)
-            {
-                errors.Add(new(
-                    "provider.sql_server.parameter_budget.exceeded",
-                    $"Grouped-reduction profile '{profile.Name}' can exceed SQL Server's 2,100-parameter command limit.",
-                    $"groupReductionProfiles.{profile.Name}"));
-            }
-        }
         foreach (var field in definition.Fields ?? [])
         {
             ValidateBound(field.Name, MaxIdentifierBytes, "provider.sql_server.field_name.too_large", $"fields.{field.Name}.name", errors);

@@ -4,12 +4,13 @@ using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Validation;
 using Xunit;
+using Groundwork.TestInfrastructure;
 
 namespace Groundwork.Tests;
 
 public sealed class ProviderCapabilityTests
 {
-    private readonly ProviderCapabilityValidator _validator = new();
+    private readonly ProviderCapabilityValidator _validator = new(TestCapabilities.Registry);
 
     [Fact]
     public void CompatibleCapabilityReportAllowsPlanning()
@@ -84,7 +85,7 @@ public sealed class ProviderCapabilityTests
         var manifest = WithSingleUnitIntent(StorageIntent.Operational(
             "Requires atomic task claiming.",
             WorkloadIntent.OperationalStream,
-            WellKnownCapabilities.AtomicClaim));
+            TestCapabilities.Primary));
 
         var result = _validator.Validate(manifest, SampleManifests.PortableCapabilities());
 
@@ -98,12 +99,12 @@ public sealed class ProviderCapabilityTests
         var manifest = WithSingleUnitIntent(StorageIntent.Operational(
             "Requires task claiming and abandoned claim recovery.",
             WorkloadIntent.OperationalStream,
-            WellKnownCapabilities.AtomicClaim,
-            WellKnownCapabilities.LeaseRecovery));
+            TestCapabilities.Primary,
+            TestCapabilities.Secondary));
         var capabilities = SampleManifests.PortableCapabilities() with
         {
-            SupportedCapabilities = new HashSet<CapabilityId> { WellKnownCapabilities.AtomicClaim },
-            EvidencedCapabilities = new HashSet<CapabilityId> { WellKnownCapabilities.AtomicClaim }
+            SupportedCapabilities = new HashSet<CapabilityId> { TestCapabilities.Primary },
+            EvidencedCapabilities = new HashSet<CapabilityId> { TestCapabilities.Primary }
         };
 
         var result = _validator.Validate(manifest, capabilities);
@@ -118,19 +119,19 @@ public sealed class ProviderCapabilityTests
         var manifest = WithSingleUnitIntent(StorageIntent.Operational(
             "Requires task claiming and abandoned claim recovery.",
             WorkloadIntent.OperationalStream,
-            WellKnownCapabilities.AtomicClaim,
-            WellKnownCapabilities.LeaseRecovery));
+            TestCapabilities.Primary,
+            TestCapabilities.Secondary));
         var capabilities = SampleManifests.PortableCapabilities() with
         {
             SupportedCapabilities = new HashSet<CapabilityId>
             {
-                WellKnownCapabilities.AtomicClaim,
-                WellKnownCapabilities.LeaseRecovery
+                TestCapabilities.Primary,
+                TestCapabilities.Secondary
             },
             EvidencedCapabilities = new HashSet<CapabilityId>
             {
-                WellKnownCapabilities.AtomicClaim,
-                WellKnownCapabilities.LeaseRecovery
+                TestCapabilities.Primary,
+                TestCapabilities.Secondary
             }
         };
 
@@ -143,12 +144,12 @@ public sealed class ProviderCapabilityTests
     public void SupportedButUnevidencedRequirementRequiresEvidence()
     {
         var manifest = WithSingleUnitIntent(StorageIntent.Operational(
-            "Requires task claiming.",
+            "Requires cross-unit atomic commit.",
             WorkloadIntent.OperationalStream,
-            WellKnownCapabilities.AtomicClaim));
+            WellKnownCapabilities.AtomicCommit));
         var capabilities = SampleManifests.PortableCapabilities() with
         {
-            SupportedCapabilities = new HashSet<CapabilityId> { WellKnownCapabilities.AtomicClaim },
+            SupportedCapabilities = new HashSet<CapabilityId> { WellKnownCapabilities.AtomicCommit },
             EvidencedCapabilities = new HashSet<CapabilityId>()
         };
 
@@ -164,16 +165,16 @@ public sealed class ProviderCapabilityTests
     public void EvaluateDerivesSupportedUnsupportedAndRequiresEvidence()
     {
         var manifest = WithSingleUnitIntent(StorageIntent.Operational(
-            "Requires task claiming.",
+            "Requires cross-unit atomic commit.",
             WorkloadIntent.OperationalStream,
-            WellKnownCapabilities.AtomicClaim));
+            WellKnownCapabilities.AtomicCommit));
 
         Assert.IsType<ProviderFit.Unsupported>(
             _validator.Evaluate(manifest, SampleManifests.PortableCapabilities()));
 
         var supportedNoEvidence = SampleManifests.PortableCapabilities() with
         {
-            SupportedCapabilities = new HashSet<CapabilityId> { WellKnownCapabilities.AtomicClaim }
+            SupportedCapabilities = new HashSet<CapabilityId> { WellKnownCapabilities.AtomicCommit }
         };
         Assert.IsType<ProviderFit.RequiresEvidence>(_validator.Evaluate(manifest, supportedNoEvidence));
 

@@ -34,34 +34,6 @@ public sealed class SqlServerDiagnosticRecordStoreTests(SqlServerDiagnosticConta
         fixture ?? throw new InvalidOperationException("The SQL Server diagnostic fixture has not been initialized.");
 
     [Fact]
-    public async Task Grouped_sum_overflow_reaches_exact_int64_materialization()
-    {
-        await Assert.ThrowsAsync<OverflowException>(QueryGroupedInt64SumOverflowAsync);
-    }
-
-    [Fact]
-    public void Grouped_query_command_selects_the_newest_scoped_records_before_reduction()
-    {
-        var fixture = (SqlServerDiagnosticRecordStoreFixture)CreateServerFixture();
-        var store = Assert.IsType<SqlServerDiagnosticRecordStore>(fixture.OpenStore(TestDefinition));
-        var command = store.Inner.BuildGroupQueryCommand(
-            new(
-                new("tenant-a", "shell-a"),
-                TestDefinition.Stream,
-                "service-summary",
-                10,
-                new("start"),
-                InputRecordLimit: 2),
-            snapshotHighWater: 42);
-
-        Assert.Contains("input_window AS", command.CommandText, StringComparison.Ordinal);
-        Assert.Contains("SELECT TOP (@inputLimit)", command.CommandText, StringComparison.Ordinal);
-        Assert.Contains("r.[cursor] <= @snapshot", command.CommandText, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY r.[cursor] DESC", command.CommandText, StringComparison.Ordinal);
-        Assert.Equal(2, command.Parameters["inputLimit"]);
-    }
-
-    [Fact]
     public async Task Materializer_uses_native_binary_utf8_text_and_all_durable_tables()
     {
         var fixture = (SqlServerDiagnosticRecordStoreFixture)CreateServerFixture();
@@ -240,20 +212,6 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
     public void AdvanceTime(TimeSpan duration) => timeProvider.Advance(duration);
     public void SetWallClock(DateTimeOffset utcNow) => timeProvider.Set(utcNow);
 
-    public async ValueTask<DiagnosticRecordNativePlan> ExplainGroupedQueryAsync(
-        DiagnosticRecordStreamDefinition definition,
-        DiagnosticRecordGroupQuery query,
-        CancellationToken cancellationToken = default)
-    {
-        await EnsurePlanSeedAsync(definition, cancellationToken);
-        return await SqlServerDiagnosticRecordStoreFactory
-            .CreatePlanInspector(ConnectionString)
-            .InspectGroupedQueryAsync(
-                DiagnosticRecordConformanceDeployment.Create(definition),
-                query,
-                cancellationToken);
-    }
-
     public async ValueTask<IReadOnlyList<string>> ExplainQueryAsync(
         DiagnosticRecordStreamDefinition definition,
         DiagnosticRecordQuery query,
@@ -306,38 +264,6 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
                     return true;
             }
         }
-        return false;
-    }
-
-    public bool HasNativeScopedGroupedReduction(DiagnosticRecordNativePlan plan) =>
-        HasNativeScopedGroupedReductionPlan(plan);
-
-    internal static bool HasNativeScopedGroupedReductionPlan(DiagnosticRecordNativePlan plan)
-    {
-        if (plan.Provider != "sqlserver" ||
-            plan.Operation != DiagnosticRecordPlanOperation.GroupedQuery ||
-            plan.Format != DiagnosticRecordNativePlanFormats.SqlServerShowplanXml)
-        {
-            return false;
-        }
-
-        foreach (var xml in plan.RawPlans)
-        {
-            var document = XDocument.Parse(xml);
-            var ns = document.Root!.Name.Namespace;
-            foreach (var aggregate in document.Descendants(ns + "RelOp").Where(operation =>
-                operation.Attribute("LogicalOp")?.Value == "Aggregate" ||
-                operation.Attribute("PhysicalOp")?.Value.Contains(
-                    "Aggregate",
-                    StringComparison.Ordinal) == true))
-            {
-                if (HasConnectedBoundedReduction(aggregate, ns))
-                {
-                    return true;
-                }
-            }
-        }
-
         return false;
     }
 
@@ -587,146 +513,6 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
 
 public sealed class SqlServerDiagnosticPlanRecognizerTests
 {
-    [Fact]
-    public void Grouped_reduction_recognizer_accepts_scoped_inputs_inside_aggregate_subtree()
-    {
-        var plan = GroupedPlan(
-            $"""
-             <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
-               <StreamAggregate>
-                 {ScopedInputs()}
-               </StreamAggregate>
-             </RelOp>
-             """);
-
-        Assert.True(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_disconnected_evidence()
-    {
-        var plan = GroupedPlan(
-            $"""
-             <RelOp LogicalOp="Concatenation" PhysicalOp="Concatenation">
-               <Concat>
-                 <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
-                   <StreamAggregate />
-                 </RelOp>
-                 <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
-                   <NestedLoops>
-                     {ScopedInputs()}
-                   </NestedLoops>
-                 </RelOp>
-               </Concat>
-             </RelOp>
-             """);
-
-        Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_scope_predicates_disconnected_from_a_table_access()
-    {
-        var plan = GroupedPlan(
-            $"""
-             <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
-               <StreamAggregate>
-                 <RelOp LogicalOp="Table Scan" PhysicalOp="Table Scan">
-                   <TableScan><Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" /></TableScan>
-                 </RelOp>
-                 <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
-                   <IndexScan>
-                     <Object Table="[{RelationalDiagnosticRecordSchema.FieldsTable}]" />
-                     <SeekPredicates>{ScopeColumns()}</SeekPredicates>
-                   </IndexScan>
-                 </RelOp>
-                 <Predicate>{ScopeColumns()}</Predicate>
-               </StreamAggregate>
-             </RelOp>
-             """);
-
-        Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_all_required_fragments_when_the_top_does_not_feed_the_field_join()
-    {
-        var plan = GroupedPlan(
-            $"""
-             <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
-               <StreamAggregate>
-                 <RelOp LogicalOp="Concatenation" PhysicalOp="Concatenation">
-                   <Concat>
-                     <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
-                       <NestedLoops>
-                         {BoundedRecordInput()}
-                         <RelOp LogicalOp="Constant Scan" PhysicalOp="Constant Scan" />
-                       </NestedLoops>
-                     </RelOp>
-                     <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
-                       <NestedLoops>
-                         <RelOp LogicalOp="Index Scan" PhysicalOp="Index Seek">
-                           <IndexScan>
-                             <Object Table="[{RelationalDiagnosticRecordSchema.RecordsTable}]" />
-                             <SeekPredicates>{RecordScopeColumns()}</SeekPredicates>
-                           </IndexScan>
-                         </RelOp>
-                         {ScopedFieldInput()}
-                       </NestedLoops>
-                     </RelOp>
-                   </Concat>
-                 </RelOp>
-               </StreamAggregate>
-             </RelOp>
-             """);
-
-        Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-    }
-
-    [Fact]
-    public void Grouped_reduction_recognizer_rejects_forward_or_snapshot_free_input_with_disconnected_valid_fragments()
-    {
-        foreach (var invalidInput in new[]
-                 {
-                     BoundedRecordInput(scanDirection: "FORWARD"),
-                     BoundedRecordInput(includeSnapshot: false)
-                 })
-        {
-            var plan = GroupedPlan(
-                $"""
-                 <RelOp LogicalOp="Aggregate" PhysicalOp="Stream Aggregate">
-                   <StreamAggregate>
-                     <RelOp LogicalOp="Concatenation" PhysicalOp="Concatenation">
-                       <Concat>
-                         <RelOp LogicalOp="Inner Join" PhysicalOp="Nested Loops">
-                           <NestedLoops>
-                             {invalidInput}
-                             {ScopedFieldInput()}
-                           </NestedLoops>
-                         </RelOp>
-                         {BoundedRecordInput()}
-                       </Concat>
-                     </RelOp>
-                   </StreamAggregate>
-                 </RelOp>
-                 """);
-
-            Assert.False(SqlServerDiagnosticRecordStoreFixture.HasNativeScopedGroupedReductionPlan(plan));
-        }
-    }
-
-    private static DiagnosticRecordNativePlan GroupedPlan(string operation) =>
-        new(
-            "sqlserver",
-            DiagnosticRecordPlanOperation.GroupedQuery,
-            DiagnosticRecordNativePlanFormats.SqlServerShowplanXml,
-            [
-                $"""
-                 <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
-                   <BatchSequence><Batch><Statements><StmtSimple><QueryPlan>{operation}</QueryPlan></StmtSimple></Statements></Batch></BatchSequence>
-                 </ShowPlanXML>
-                 """
-            ]);
 
     private static string ScopedInputs() =>
         $"""

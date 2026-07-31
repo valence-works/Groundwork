@@ -1,19 +1,16 @@
 # Diagnostic-records grouped reduction: scope review
 
-Status: open question. Requires a consumer-side answer before any removal.
+Status: closed — removed 2026-07-31. This note records the evidence and the conditions under which
+the capability should return.
 
-Related: [ADR 0004](../adr/0004-retire-groundwork-operational.md),
-[Groundwork runtime evaluation](groundwork-runtime-evaluation.md).
+Related: [ADR 0004](../adr/0004-retire-groundwork-operational.md).
 
-## The question
+## Decision
 
-**Which consumer call site executes `IDiagnosticRecordStore.QueryGroupsAsync`?**
+The grouped-reduction contract and its four provider executors have been removed. Groundwork's
+diagnostic-record store now exposes four bounded operations — append, query, inspect, trim.
 
-If the answer is a real endpoint, this note closes as "keep" and the consumer workload report should
-be updated to record the requirement. If the answer is "none", the grouped-reduction contract and its
-four provider executors are the largest single removable feature in the repository.
-
-## Why the question is open
+## Evidence
 
 `Groundwork.DiagnosticRecords` exists to serve Elsa Foundation's structured-log and OpenTelemetry
 stores. That workload is specified in the consumer's `docs/reports/diagnostics-storage-workload.md`,
@@ -22,49 +19,52 @@ dated 2026-07-12, which enumerates the required predicate set and then states:
 > "No current Elsa caller requires numeric rollups, grouping, generic reduce, or map/reduce."
 
 Grouped reduction was added to Groundwork on 2026-07-24 (`feat(diagnostics): define grouped reduction
-contract`, commit `774085e`), twelve days after that statement. No corresponding update to the
-consumer workload report has been observed, and the consumer's Groundwork diagnostics adapter
-(`src/Elsa/Diagnostics/Persistence/Groundwork`) declares no grouped-reduction profiles at the
-manifest level — although the concrete stream definitions live in
-`GroundworkOpenTelemetryPersistenceFeature` and `GroundworkStructuredLogsPersistenceFeature`, which
-were not inspected.
+contract`, commit `774085e`) — twelve days after that statement, with no corresponding update to the
+consumer workload report.
 
-This is suggestive, not conclusive. Two readings are consistent with the evidence:
+Consumer-side inspection found no grouped-reduction profile declared in the Groundwork diagnostics
+adapter (`src/Elsa/Diagnostics/Persistence/Groundwork`) or in the OpenTelemetry Groundwork persistence
+project, whose files are binding, schema, store, codec, and feature registration. No call site for
+`QueryGroupsAsync` was located.
 
-1. **A requirement emerged after 2026-07-12.** The most plausible candidate is an OpenTelemetry
-   trace-list endpoint: grouping spans by trace id and reducing to first/last timestamp, span count,
-   and a bounded service-name set is very close to what the shipped reducers compute (`FirstBy`,
-   timestamp min/max, `Int64` sum, bounded string-set union). If so, keep the feature and correct the
-   workload report.
-2. **The feature was built ahead of demand.** If so, it is speculative generality of the same kind
-   ADR 0004 records for `Groundwork.Operational`, and it should be removed while the removal is still
-   cheap.
+This is strong but not conclusive: the concrete stream definitions live in
+`GroundworkOpenTelemetryPersistenceFeature` and `GroundworkStructuredLogsPersistenceFeature`, whose
+bodies were not read. The most plausible future requirement remains an OpenTelemetry trace-list
+endpoint — grouping spans by trace id and reducing to first/last timestamp, span count, and a bounded
+service-name set is close to what the removed reducers computed.
 
-## What is in scope if the answer is "none"
+The removal was made on the principle that a specialized contract is justified by a named workload,
+which is the same principle this package's README uses to justify its own existence. Grouped
+reduction did not have one on record.
 
-Dedicated files:
+## What was removed
 
-| File | Lines |
-|---|---|
-| `src/Groundwork/DiagnosticRecords/DiagnosticGroupedReduction.cs` | 563 |
-| `src/Groundwork/DiagnosticRecords.Relational/RelationalDiagnosticGroupQueryBuilder.cs` | 539 |
+- `DiagnosticGroupedReduction.cs` (563 lines) and `RelationalDiagnosticGroupQueryBuilder.cs` (539).
+- `IDiagnosticRecordStore.QueryGroupsAsync`, `IDiagnosticGroupedQueryHandler`,
+  `DiagnosticGroupedQueryHandlerCapabilities`, and the grouped slot on `DiagnosticRecordStoreHandlers`.
+- `DiagnosticRecordStreamDefinition.GroupReductionProfiles` and
+  `DiagnosticRecordLimits.MaxGroupedQueryInputRecords`.
+- `IDiagnosticRecordPlanInspector.InspectGroupedQueryAsync` and the `GroupedQuery` plan operation.
+- The `query_groups` activity, its three tags, and its operation constant.
+- Native grouped executors in all four providers, including MongoDB's typed aggregation pipeline with
+  its overflow facet and the relational grouped SQL builder.
+- `DiagnosticGroupedReductionContractTests` (348 lines) and the grouped sections of the conformance
+  suite and the four provider diagnostic suites.
 
-Plus the grouped paths inside `DiagnosticRecordStore`, `RelationalDiagnosticRecordStore`,
-`MongoDbDiagnosticRecordStore` (typed aggregation pipeline with an overflow facet),
-`DiagnosticRecordTelemetry` (the `query_groups` activity and its instruments),
-`DiagnosticRecordDeploymentManifest` (profile declarations), grouped continuations, and the
-per-provider grouped conformance coverage — including the dedicated
-`DiagnosticGroupedReductionContractTests` (348 lines) and grouped sections of the four provider
-diagnostic suites.
+## Breaking change: stream-definition fingerprints
 
-Estimated total: roughly 1,500–2,000 lines of `src` and a comparable amount of test code.
+`DiagnosticRecordPhysicalSchemaState` wrote a `groupReductionProfiles` array into every stream's
+canonical definition, so it contributed to the definition fingerprint even when no profiles were
+declared. Removing it changes the canonical JSON and therefore the fingerprint for **every** stream,
+not only streams that used grouping.
 
-## Recommended disposition
+An already-deployed stream will fail its persisted-definition compatibility check after this change
+and must be resolved through explicit schema evolution. This is acceptable at `0.0.1-preview` while
+the only consumer is mid-adoption, but it is a real migration and must not be treated as inert.
 
-Treat "keep" as requiring positive evidence. The feature is well-built — named profiles rather than
-generic map/reduce, closed reducers, overflow detection instead of truncation, and native execution
-on all four providers — but its own package README's design principle is that a specialized contract
-is justified by a named workload. Grouped reduction currently does not have one on record.
+## Conditions for return
 
-Do not remove it as part of the ADR 0004 change set. It is a surgical removal across four provider
-implementations and should land as its own reviewed change, after the question above is answered.
+Reintroduce grouped reduction only with a named consumer requirement recorded in the consumer's
+workload document — for example a concrete OpenTelemetry trace-list endpoint with its declared
+reducers, ordering, and page size. The removed implementation is recoverable from git history at the
+commit preceding this change.

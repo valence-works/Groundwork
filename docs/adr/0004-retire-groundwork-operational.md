@@ -80,15 +80,29 @@ program goal exists to avoid.
 materializer are removed, together with their tests and the support-ticket sample's operational
 showcase. `Groundwork.Sqlite` no longer references them, so no consumer receives them transitively.
 
-### 2. Keep the operational capability vocabulary
+### 2. Keep the capability machinery; declare only capabilities providers advertise
 
-`WellKnownCapabilities` retains `AtomicClaim`, `LeaseRecovery`, `FencedOwnership`,
-`OrderedConsumption`, `RetryRecovery`, `Idempotency`, `RetentionPolicy`, `AtomicCommit`,
-`ConcurrencyEvidence`, and `OperationalDiagnostics`, and `StorageIntent.Operational` remains. This is
-the durable half of the original design: a consumer can still declare operational demand in its
-manifest, and `ProviderCapabilityValidator` remains the single compatibility authority that computes
-fit from declared requirements rather than author self-declaration. Removing the implementations does
-not remove the ability to describe the workload.
+The open/closed capability seam is the durable half of the original design and is kept in full:
+`CapabilityId`, `CapabilityRegistry`, `CapabilityDescriptor`, `IGroundworkModule`,
+`WorkloadEvidencePolicy`, `ProviderCapabilityValidator`, `ProviderFit`, and
+`StorageIntent.Operational`. A consumer can still declare operational demand in its manifest and have
+fit computed from declared requirements rather than author self-declaration.
+
+`WellKnownCapabilities` is trimmed to `AtomicCommit` alone — the one built-in every shipped provider
+actually advertises, for `IDocumentUnitOfWork`. `AtomicClaim`, `LeaseRecovery`, `FencedOwnership`,
+`OrderedConsumption`, `RetryRecovery`, `Idempotency`, `RetentionPolicy`, `ConcurrencyEvidence`,
+`OperationalDiagnostics`, and `RangeQuery` are removed: with the implementations gone, no provider
+advertises them and nothing outside test fixtures referenced them. Core declaring capabilities no
+Groundwork provider can serve is the same speculative posture this ADR is correcting.
+
+A module that needs those concepts contributes its own descriptors in its own vendor namespace —
+exactly the path `Groundwork.Modules.Inbox` already demonstrates, and the path the test suite now
+uses via `TestCapabilities`. An unregistered requirement remains a `GW-CAP-014` error, so this is a
+declaration change, not a loosening.
+
+`AtomicCommit` keeps its existing id string `groundwork.operational.atomic-commit` despite the now
+odd `operational` segment: capability ids reach executable-route fingerprints, so renaming one would
+read as physical schema drift for no functional gain.
 
 ### 3. Groundwork owns primitives; consumers own protocols
 
@@ -108,10 +122,20 @@ have in common. Until then, a shared implementation is speculative generality.
 - Roughly 1,700 lines of `src`, plus tests and the sample showcase, are removed. No capability that
   any known consumer uses is lost.
 - Every `Groundwork.Sqlite` consumer stops shipping two unused assemblies.
-- The capability vocabulary, `StorageIntent.Operational`, and `ProviderCapabilityValidator` are
-  unchanged, so manifests that declare operational demand continue to validate.
+- `StorageIntent.Operational` and `ProviderCapabilityValidator` are unchanged, so manifests that
+  declare operational demand continue to validate — but a manifest that referenced one of the removed
+  `WellKnownCapabilities` ids must now declare that capability through its own module descriptor.
+  This is a source-breaking change for such a manifest, caught at compile time.
 - `docs/reports/groundwork-operational-persistence-design.md` is retained as the historical design
   record, marked superseded.
 - The runtime evaluation's `NoGo` rows stand. They correctly said the portable document contract
   cannot serve those workloads; this ADR only records that Groundwork is not the right place to
   implement the protocols that do.
+
+### Applied in the same change
+
+The same principle — a contract is justified by a named workload — was applied to the diagnostic
+record store's grouped-reduction capability, which shipped without a consumer requirement on record.
+It is removed, with the evidence and the conditions for its return in
+[diagnostic-records-grouped-reduction-scope](../reports/diagnostic-records-grouped-reduction-scope.md).
+That removal carries a stream-definition fingerprint break documented in the same note.

@@ -8,13 +8,14 @@ using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Queries;
 using Groundwork.Core.Validation;
 using Xunit;
+using Groundwork.TestInfrastructure;
 
 namespace Groundwork.Materialization.Tests;
 
 public sealed class MaterializationPlannerTests
 {
     private readonly ProviderIdentity provider = new("materialization-test-provider", "1.0.0");
-    private readonly MaterializationPlanner planner = new(new StorageManifestValidator(), new ProviderCapabilityValidator());
+    private readonly MaterializationPlanner planner = new(new StorageManifestValidator(), new ProviderCapabilityValidator(TestCapabilities.Registry));
 
     [Fact]
     public void PlanCreatesTypedOperationsAndSchemaHistoryForPlannableManifest()
@@ -205,7 +206,7 @@ public sealed class MaterializationPlannerTests
             StorageIntent.Operational(
                 "Needs an atomic claim provider for worker coordination.",
                 WorkloadIntent.OperationalStream,
-                WellKnownCapabilities.AtomicClaim));
+                TestCapabilities.Primary));
         var runtimeCapabilities = RuntimeCapabilities();
 
         var plan = planner.Plan(manifest, runtimeCapabilities, CreateCapabilities());

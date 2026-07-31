@@ -46,7 +46,6 @@ public static class SqliteDiagnosticRecordStoreFactory
         return new DelegatingDiagnosticRecordPlanInspector(
             new SqliteDiagnosticRecordDeploymentInspector(connectionString),
             (definition, query, cancellationToken) => InspectQueryPlanAsync(connectionString, definition, query, cancellationToken),
-            (definition, query, cancellationToken) => InspectGroupedQueryPlanAsync(connectionString, definition, query, cancellationToken),
             (definition, request, cancellationToken) => InspectStatisticsPlanAsync(connectionString, definition, request, cancellationToken),
             (definition, request, cancellationToken) => InspectTrimPlanAsync(connectionString, definition, request, cancellationToken));
     }
@@ -110,23 +109,6 @@ public static class SqliteDiagnosticRecordStoreFactory
             ? await ReadCursorHighWaterAsync(connectionString, query.Scope, query.Stream, cancellationToken)
             : long.Parse(query.Continuation.SnapshotHighWater.Value);
         return await ExplainAsync(connectionString, store.Inner.BuildQueryCommand(query, snapshot), cancellationToken);
-    }
-
-    internal static async ValueTask<IReadOnlyList<string>> ExplainGroupedQueryAsync(
-        string connectionString,
-        DiagnosticRecordStreamDefinition definition,
-        DiagnosticRecordGroupQuery query,
-        CancellationToken cancellationToken = default)
-    {
-        var store = new SqliteDiagnosticRecordStore(connectionString, definition);
-        DiagnosticRecordGroupQueryValidator.Validate(query, definition, store.Inner);
-        var snapshot = query.Continuation is null
-            ? await ReadCursorHighWaterAsync(connectionString, query.Scope, query.Stream, cancellationToken)
-            : long.Parse(query.Continuation.SnapshotHighWater.Value, System.Globalization.CultureInfo.InvariantCulture);
-        return await ExplainAsync(
-            connectionString,
-            store.Inner.BuildGroupQueryCommand(query, snapshot),
-            cancellationToken);
     }
 
     internal static async ValueTask<IReadOnlyList<string>> ExplainTrimAsync(
@@ -216,17 +198,6 @@ public static class SqliteDiagnosticRecordStoreFactory
         CancellationToken cancellationToken) =>
         new("sqlite", DiagnosticRecordPlanOperation.Query, DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
             await ExplainQueryAsync(connectionString, definition, query, cancellationToken));
-
-    private static async ValueTask<DiagnosticRecordNativePlan> InspectGroupedQueryPlanAsync(
-        string connectionString,
-        DiagnosticRecordStreamDefinition definition,
-        DiagnosticRecordGroupQuery query,
-        CancellationToken cancellationToken) =>
-        new(
-            "sqlite",
-            DiagnosticRecordPlanOperation.GroupedQuery,
-            DiagnosticRecordNativePlanFormats.SqliteExplainQueryPlan,
-            await ExplainGroupedQueryAsync(connectionString, definition, query, cancellationToken));
 
     private static async ValueTask<DiagnosticRecordNativePlan> InspectTrimPlanAsync(
         string connectionString,
