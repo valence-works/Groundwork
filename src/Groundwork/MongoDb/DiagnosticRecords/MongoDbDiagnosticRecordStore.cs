@@ -30,6 +30,7 @@ public sealed class MongoDbDiagnosticRecordStore :
     IDiagnosticRecordStore,
     IDiagnosticAppendHandler,
     IDiagnosticQueryHandler,
+    IDiagnosticGroupedQueryHandler,
     IDiagnosticInspectHandler,
     IDiagnosticTrimHandler
 {
@@ -54,7 +55,7 @@ public sealed class MongoDbDiagnosticRecordStore :
         _interceptAsync = interceptor ?? ((_, _) => ValueTask.CompletedTask);
         var core = new CoreHandlers(this);
         _instrumented = new(
-            new DiagnosticRecordStoreHandlers(core, core, core, core),
+            new DiagnosticRecordStoreHandlers(core, core, core, core) { GroupedQuery = core },
             new("mongodb", "diagnostic-records"));
         Handlers = _instrumented.Handlers;
     }
@@ -63,6 +64,11 @@ public sealed class MongoDbDiagnosticRecordStore :
     public DiagnosticRecordStoreHandlers Handlers { get; }
     public DiagnosticQueryHandlerCapabilities Capabilities { get; } = new(
         Enum.GetValues<DiagnosticPredicateOperator>().ToFrozenSet(), true, true, true, true, true);
+    DiagnosticGroupedQueryHandlerCapabilities IDiagnosticGroupedQueryHandler.Capabilities { get; } = new(
+        true,
+        Enum.GetValues<DiagnosticGroupReducerKind>().ToFrozenSet(),
+        Enum.GetValues<DiagnosticPredicateOperator>().ToFrozenSet(),
+        true);
 
     public ValueTask<DiagnosticAppendResult> AppendAsync(
         DiagnosticRecordBatch batch,
@@ -73,6 +79,11 @@ public sealed class MongoDbDiagnosticRecordStore :
         DiagnosticRecordQuery query,
         CancellationToken cancellationToken = default) =>
         _instrumented.QueryAsync(query, cancellationToken);
+
+    public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default) =>
+        _instrumented.QueryGroupsAsync(query, cancellationToken);
 
     public ValueTask<DiagnosticStreamStatistics> InspectAsync(
         DiagnosticStreamInspectionRequest request,
@@ -97,10 +108,13 @@ public sealed class MongoDbDiagnosticRecordStore :
     private sealed class CoreHandlers(MongoDbDiagnosticRecordStore owner) :
         IDiagnosticAppendHandler,
         IDiagnosticQueryHandler,
-            IDiagnosticInspectHandler,
+        IDiagnosticGroupedQueryHandler,
+        IDiagnosticInspectHandler,
         IDiagnosticTrimHandler
     {
         public DiagnosticQueryHandlerCapabilities Capabilities => owner.Capabilities;
+        DiagnosticGroupedQueryHandlerCapabilities IDiagnosticGroupedQueryHandler.Capabilities =>
+            ((IDiagnosticGroupedQueryHandler)owner).Capabilities;
 
         public ValueTask<DiagnosticAppendResult> AppendAsync(
             DiagnosticRecordBatch batch,
@@ -111,6 +125,11 @@ public sealed class MongoDbDiagnosticRecordStore :
             DiagnosticRecordQuery query,
             CancellationToken cancellationToken = default) =>
             owner.QueryCoreAsync(query, cancellationToken);
+
+        public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+            DiagnosticRecordGroupQuery query,
+            CancellationToken cancellationToken = default) =>
+            owner.QueryGroupsCoreAsync(query, cancellationToken);
 
         public ValueTask<DiagnosticStreamStatistics> InspectAsync(
             DiagnosticStreamInspectionRequest request,
@@ -247,6 +266,60 @@ public sealed class MongoDbDiagnosticRecordStore :
         }, cancellationToken);
     }
 
+    private async ValueTask<DiagnosticRecordGroupPage> QueryGroupsCoreAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        query = DiagnosticRecordGroupQuerySnapshot.Capture(query, _definition.Limits.MaxPredicateNodes);
+        DiagnosticRecordGroupQueryValidator.Validate(query, _definition, this);
+        var profile = DiagnosticGroupReductionProfileResolver.Resolve(_definition, query.Profile)!;
+        using var session = await _database.Client.StartSessionAsync(cancellationToken: cancellationToken);
+        return await ExecuteSnapshotReadAsync(session, async (transaction, token) =>
+        {
+            var stream = await Streams
+                .Find(transaction, Builders<BsonDocument>.Filter.Eq("_id", StreamKey(query.Scope, query.Stream)))
+                .FirstOrDefaultAsync(token);
+            var snapshot = query.Continuation?.SnapshotHighWater ??
+                           new((stream?.GetValue("next_cursor", 0).ToInt64() ?? 0)
+                               .ToString(CultureInfo.InvariantCulture));
+            await _interceptAsync(MongoDbDiagnosticRecordExecutionPoint.QueryAfterHighWaterRead, token);
+            var facet = await AggregateSingleAsync(
+                transaction,
+                BuildGroupQueryPipeline(query, profile, ParseCursor(snapshot)),
+                token);
+            if (facet["overflow"].AsBsonArray.Count > 0)
+            {
+                throw new DiagnosticRecordValidationException([
+                    new(
+                        "group_query.union.too_large",
+                        "A grouped set-union exceeded the profile's declared value bound.",
+                        "profile.maxUnionValues")
+                ]);
+            }
+
+            var documents = facet["page"].AsBsonArray
+                .Select(item => item.AsBsonDocument)
+                .ToList();
+            var hasMore = documents.Count > query.Take;
+            if (hasMore)
+                documents.RemoveAt(documents.Count - 1);
+            var groups = documents.Select(document => ReadGroup(document, profile)).ToArray();
+            DiagnosticRecordGroupContinuation? continuation = null;
+            if (hasMore && groups.Length > 0)
+            {
+                var last = groups[^1];
+                continuation = new(
+                    snapshot,
+                    AssertSingleReducedValue(last, query.Order.Alias),
+                    last.GroupKey,
+                    DiagnosticRequestFingerprint.ForGroupQuery(query with { Continuation = null }, _definition),
+                    query.InputRecordLimit);
+            }
+            return new DiagnosticRecordGroupPage(Array.AsReadOnly(groups), continuation);
+        }, cancellationToken);
+    }
+
     /// <summary>Returns MongoDB's native query-planner evidence for the executable bounded query shape.</summary>
     internal async ValueTask<BsonDocument> ExplainQueryAsync(
         DiagnosticRecordQuery query,
@@ -266,6 +339,34 @@ public sealed class MongoDbDiagnosticRecordStore :
         };
         if (QueryIndexHint(query) is { } hint)
             aggregate.Add("hint", hint);
+        return await _database.RunCommandAsync<BsonDocument>(
+            new BsonDocument { { "explain", aggregate }, { "verbosity", "queryPlanner" } },
+            cancellationToken: cancellationToken);
+    }
+
+    internal async ValueTask<BsonDocument> ExplainGroupedQueryAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        query = DiagnosticRecordGroupQuerySnapshot.Capture(query, _definition.Limits.MaxPredicateNodes);
+        DiagnosticRecordGroupQueryValidator.Validate(query, _definition, this);
+        var profile = DiagnosticGroupReductionProfileResolver.Resolve(_definition, query.Profile)!;
+        var stream = await Streams
+            .Find(Builders<BsonDocument>.Filter.Eq("_id", StreamKey(query.Scope, query.Stream)))
+            .FirstOrDefaultAsync(cancellationToken);
+        var snapshot = query.Continuation?.SnapshotHighWater ??
+                       new((stream?.GetValue("next_cursor", 0).ToInt64() ?? 0)
+                           .ToString(CultureInfo.InvariantCulture));
+        var aggregate = new BsonDocument
+        {
+            { "aggregate", MongoDbDiagnosticRecordNames.Records },
+            {
+                "pipeline",
+                new BsonArray(BuildGroupQueryPipeline(query, profile, ParseCursor(snapshot)))
+            },
+            { "cursor", new BsonDocument() },
+            { "collation", new BsonDocument("locale", "simple") }
+        };
         return await _database.RunCommandAsync<BsonDocument>(
             new BsonDocument { { "explain", aggregate }, { "verbosity", "queryPlanner" } },
             cancellationToken: cancellationToken);
@@ -646,6 +747,233 @@ public sealed class MongoDbDiagnosticRecordStore :
             state is not null && state.Contains("logical_high_water") ? ReadFieldValue(state["logical_high_water"].AsBsonDocument) : null);
     }
 
+    private IReadOnlyList<BsonDocument> BuildGroupQueryPipeline(
+        DiagnosticRecordGroupQuery query,
+        DiagnosticGroupReductionProfile profile,
+        long snapshotCursor)
+    {
+        var pipeline = new List<BsonDocument>
+        {
+            new("$match", Render(
+                ScopeFilter(query.Scope, query.Stream) &
+                Builders<BsonDocument>.Filter.Lte("cursor", snapshotCursor))),
+            new("$sort", new BsonDocument("cursor", -1)),
+            new("$limit", query.InputRecordLimit),
+            new("$sort", new BsonDocument("cursor", 1))
+        };
+        var projected = new BsonDocument
+        {
+            { "_group", QueryValueExpression(profile.GroupKeyField) }
+        };
+        var grouped = new BsonDocument
+        {
+            { "_id", "$_group.comparison_key" },
+            { "group_key", new BsonDocument("$first", "$_group.native") }
+        };
+        var unionPredicateBindings = ResolveUnionPredicateBindings(query.Predicate, profile);
+        for (var index = 0; index < profile.Reducers.Count; index++)
+        {
+            var reducer = profile.Reducers[index];
+            var source = $"_source_{index}";
+            projected[source] = StringComparer.Ordinal.Equals(
+                reducer.Field,
+                DiagnosticRecordFieldNames.OccurredAt)
+                ? reducer.Kind == DiagnosticGroupReducerKind.FirstBy
+                    ? new BsonDocument("native", "$occurred_at_ticks")
+                    : "$occurred_at_ticks"
+                : reducer.Kind == DiagnosticGroupReducerKind.SetUnionString
+                    ? QueryValuesExpression(reducer.Field)
+                    : QueryValueExpression(reducer.Field);
+            switch (reducer.Kind)
+            {
+                case DiagnosticGroupReducerKind.MinTimestamp:
+                    grouped[$"r{index}"] = new BsonDocument(
+                        "$min",
+                        SourceNativeExpression(reducer, source));
+                    break;
+                case DiagnosticGroupReducerKind.MaxTimestamp:
+                case DiagnosticGroupReducerKind.MaxInt64:
+                    grouped[$"r{index}"] = new BsonDocument(
+                        "$max",
+                        SourceNativeExpression(reducer, source));
+                    break;
+                case DiagnosticGroupReducerKind.SumInt64:
+                    grouped[$"r{index}"] = new BsonDocument(
+                        "$sum",
+                        new BsonDocument("$convert", new BsonDocument
+                        {
+                            { "input", $"${source}.native" },
+                            { "to", "decimal" },
+                            { "onError", BsonNull.Value },
+                            { "onNull", BsonNull.Value }
+                        }));
+                    grouped[$"r{index}_present"] = new BsonDocument(
+                        "$sum",
+                        new BsonDocument("$cond", new BsonArray
+                        {
+                            new BsonDocument("$ne", new BsonArray { $"${source}.native", BsonNull.Value }),
+                            1,
+                            0
+                        }));
+                    break;
+                case DiagnosticGroupReducerKind.SetUnionString:
+                    break;
+                case DiagnosticGroupReducerKind.FirstBy:
+                    {
+                        var orderSource = $"_order_{index}";
+                        var orderField = StringComparer.Ordinal.Equals(
+                            reducer.OrderField,
+                            DiagnosticRecordFieldNames.OccurredAt)
+                            ? null
+                            : DiagnosticRecordFieldResolver.Resolve(_definition, reducer.OrderField!);
+                        projected[orderSource] = StringComparer.Ordinal.Equals(
+                            reducer.OrderField,
+                            DiagnosticRecordFieldNames.OccurredAt)
+                            ? "$occurred_at_ticks"
+                            : QueryValueExpression(reducer.OrderField!);
+                        var firstOrderPath = StringComparer.Ordinal.Equals(
+                            reducer.OrderField,
+                            DiagnosticRecordFieldNames.OccurredAt)
+                            ? orderSource
+                            : $"{orderSource}.{(orderField!.Type == DiagnosticFieldType.String ? "comparison_key" : "native")}";
+                        var orderPresent = $"_order_present_{index}";
+                        projected[orderPresent] = new BsonDocument(
+                            "$ne",
+                            new BsonArray { $"${firstOrderPath}", BsonNull.Value });
+                        grouped[$"r{index}"] = new BsonDocument("$top", new BsonDocument
+                            {
+                                {
+                                    "sortBy",
+                                    new BsonDocument
+                                    {
+                                        { orderPresent, -1 },
+                                        { firstOrderPath, reducer.OrderDirection == DiagnosticSortDirection.Ascending ? 1 : -1 },
+                                        { "cursor", 1 }
+                                    }
+                                },
+                                {
+                                    "output",
+                                    new BsonDocument("$cond", new BsonArray
+                                    {
+                                        $"${orderPresent}",
+                                        new BsonDocument("$ifNull", new BsonArray { $"${source}", BsonNull.Value }),
+                                        BsonNull.Value
+                                    })
+                                }
+                            });
+                        break;
+                    }
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(reducer.Kind));
+            }
+
+            foreach (var binding in unionPredicateBindings.Where(binding => binding.ReducerIndex == index))
+            {
+                var output = DiagnosticRecordFieldResolver.Resolve(_definition, reducer.Field)!;
+                grouped[binding.ResultField] = new BsonDocument(
+                    "$max",
+                    UnionPredicateMatchExpression($"${source}", binding.Predicate, output));
+            }
+        }
+        pipeline.Add(new("$set", projected));
+        pipeline.Add(new("$match", new BsonDocument("_group.native", new BsonDocument("$ne", BsonNull.Value))));
+        pipeline.Add(new("$group", grouped));
+
+        var normalize = new BsonDocument();
+        for (var index = 0; index < profile.Reducers.Count; index++)
+        {
+            if (profile.Reducers[index].Kind == DiagnosticGroupReducerKind.SumInt64)
+            {
+                normalize[$"r{index}"] = new BsonDocument("$cond", new BsonArray
+                {
+                    new BsonDocument("$gt", new BsonArray { $"$r{index}_present", 0 }),
+                    $"$r{index}",
+                    BsonNull.Value
+                });
+            }
+        }
+        if (normalize.ElementCount > 0)
+            pipeline.Add(new("$set", normalize));
+
+        var overflowConditions = profile.Reducers
+            .Select((reducer, index) => (reducer, index))
+            .Where(item => item.reducer.Kind == DiagnosticGroupReducerKind.SetUnionString)
+            .Select(item => (BsonValue)new BsonDocument(
+                "$gt",
+                new BsonArray
+                {
+                    new BsonDocument("$size", $"$r{item.index}"),
+                    profile.MaxUnionValues
+                }))
+            .ToArray();
+        var overflowMatch = overflowConditions.Length switch
+        {
+            0 => (BsonValue)false,
+            1 => overflowConditions[0],
+            _ => new BsonDocument("$or", new BsonArray(overflowConditions))
+        };
+
+        var orderIndex = profile.Reducers
+            .Select((reducer, index) => (reducer, index))
+            .Single(item => StringComparer.Ordinal.Equals(item.reducer.Alias, query.Order.Alias));
+        var orderOutput = DiagnosticRecordFieldResolver.Resolve(_definition, orderIndex.reducer.Field)!;
+        var orderPath = GroupReducerOrderPath(orderIndex.reducer, orderIndex.index, orderOutput);
+        var pageSelection = new List<BsonDocument>
+        {
+            new BsonDocument("$match", new BsonDocument(
+                orderPath,
+                new BsonDocument("$ne", BsonNull.Value)))
+        };
+        if (query.Predicate is not null)
+            pageSelection.Add(new BsonDocument(
+                "$match",
+                GroupPredicateDocument(query.Predicate, profile, unionPredicateBindings)));
+        if (query.Continuation is not null)
+            pageSelection.Add(new BsonDocument("$match", GroupContinuationDocument(
+                query.Continuation,
+                query.Order,
+                orderIndex.reducer,
+                orderPath,
+                DiagnosticRecordFieldResolver.Resolve(_definition, profile.GroupKeyField)!)));
+        pageSelection.Add(new BsonDocument("$sort", new BsonDocument
+        {
+            { orderPath, query.Order.Direction == DiagnosticSortDirection.Ascending ? 1 : -1 },
+            { "_id", 1 }
+        }));
+
+        pipeline.AddRange(pageSelection);
+        pipeline.Add(new("$limit", query.Take + 1));
+        for (var index = 0; index < profile.Reducers.Count; index++)
+        {
+            if (profile.Reducers[index].Kind == DiagnosticGroupReducerKind.SetUnionString)
+            {
+                AddBoundedUnionLookup(
+                    pipeline,
+                    query,
+                    profile,
+                    profile.Reducers[index],
+                    index,
+                    snapshotCursor);
+            }
+        }
+
+        var overflow = new BsonArray();
+        overflow.Add(new BsonDocument("$limit", query.Take));
+        overflow.Add(new BsonDocument("$match", new BsonDocument("$expr", overflowMatch)));
+        overflow.Add(new BsonDocument("$limit", 1));
+        overflow.Add(new BsonDocument("$project", new BsonDocument { { "_id", 0 }, { "value", 1 } }));
+
+        var page = new BsonArray();
+        page.Add(new BsonDocument("$limit", query.Take + 1));
+
+        pipeline.Add(new("$facet", new BsonDocument
+        {
+            { "overflow", overflow },
+            { "page", page }
+        }));
+        return pipeline;
+    }
+
     private static BsonValue QueryValueExpression(string field) =>
         new BsonDocument("$arrayElemAt", new BsonArray
         {
@@ -663,6 +991,324 @@ public sealed class MongoDbDiagnosticRecordStore :
                 new BsonDocument("$eq", new BsonArray { "$$queryValue.name", field })
             }
         });
+
+    private static BsonValue SourceNativeExpression(
+        DiagnosticGroupReducerDefinition reducer,
+        string source) =>
+        StringComparer.Ordinal.Equals(reducer.Field, DiagnosticRecordFieldNames.OccurredAt)
+            ? $"${source}"
+            : $"${source}.native";
+
+    private static IReadOnlyList<UnionPredicateBinding> ResolveUnionPredicateBindings(
+        DiagnosticRecordGroupPredicate? predicate,
+        DiagnosticGroupReductionProfile profile)
+    {
+        if (predicate is null)
+            return [];
+
+        var bindings = new List<UnionPredicateBinding>();
+        var pending = new Stack<DiagnosticRecordGroupPredicate>();
+        pending.Push(predicate);
+        while (pending.TryPop(out var current))
+        {
+            switch (current)
+            {
+                case DiagnosticRecordGroupPredicate.All all:
+                    foreach (var child in all.Predicates.Reverse())
+                        pending.Push(child);
+                    break;
+                case DiagnosticRecordGroupPredicate.Any any:
+                    foreach (var child in any.Predicates.Reverse())
+                        pending.Push(child);
+                    break;
+                case DiagnosticRecordGroupPredicate.Comparison comparison:
+                {
+                    var reducer = profile.Reducers
+                        .Select((definition, index) => (definition, index))
+                        .Single(item => StringComparer.Ordinal.Equals(
+                            item.definition.Alias,
+                            comparison.Alias));
+                    if (reducer.definition.Kind == DiagnosticGroupReducerKind.SetUnionString)
+                    {
+                        bindings.Add(new(
+                            comparison,
+                            reducer.index,
+                            $"_union_predicate_{bindings.Count}"));
+                    }
+                    break;
+                }
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(predicate));
+            }
+        }
+        return bindings;
+    }
+
+    private static BsonValue UnionPredicateMatchExpression(
+        string input,
+        DiagnosticRecordGroupPredicate.Comparison comparison,
+        DiagnosticFieldDefinition field)
+    {
+        var values = comparison.Values
+            .Select(value => GroupQueryValue(value, field, comparison.Operator))
+            .ToArray();
+        var candidatePath = comparison.Operator == DiagnosticPredicateOperator.Contains
+            ? "$$candidate.search_key"
+            : "$$candidate.comparison_key";
+        BsonValue condition = comparison.Operator switch
+        {
+            DiagnosticPredicateOperator.Equal =>
+                new BsonDocument("$eq", new BsonArray { candidatePath, values[0] }),
+            DiagnosticPredicateOperator.In =>
+                new BsonDocument("$in", new BsonArray { candidatePath, new BsonArray(values) }),
+            DiagnosticPredicateOperator.RangeInclusive =>
+                new BsonDocument("$and", new BsonArray
+                {
+                    new BsonDocument("$gte", new BsonArray { candidatePath, values[0] }),
+                    new BsonDocument("$lte", new BsonArray { candidatePath, values[1] })
+                }),
+            DiagnosticPredicateOperator.Contains when comparison.Values[0].CanonicalValue.Length == 0 =>
+                true,
+            DiagnosticPredicateOperator.Contains =>
+                new BsonDocument("$regexMatch", new BsonDocument
+                {
+                    { "input", candidatePath },
+                    { "regex", new BsonRegularExpression(Regex.Escape(values[0].AsString), "") }
+                }),
+            _ => throw new ArgumentOutOfRangeException(nameof(comparison.Operator))
+        };
+        return new BsonDocument("$anyElementTrue", new BsonDocument("$map", new BsonDocument
+        {
+            {
+                "input",
+                new BsonDocument("$ifNull", new BsonArray { input, new BsonArray() })
+            },
+            { "as", "candidate" },
+            { "in", condition }
+        }));
+    }
+
+    private void AddBoundedUnionLookup(
+        ICollection<BsonDocument> pipeline,
+        DiagnosticRecordGroupQuery query,
+        DiagnosticGroupReductionProfile profile,
+        DiagnosticGroupReducerDefinition reducer,
+        int index,
+        long snapshotCursor)
+    {
+        var lookupName = $"_union_{index}";
+        var unionValue = "_union_value";
+        var unionField = DiagnosticRecordFieldResolver.Resolve(_definition, reducer.Field)!;
+        var lookupPipeline = new BsonArray
+        {
+            new BsonDocument("$match", new BsonDocument
+            {
+                { "tenant_id", query.Scope.TenantId },
+                { "scope_id", query.Scope.ScopeId },
+                { "stream_id", query.Stream.Value },
+                { "cursor", new BsonDocument("$lte", snapshotCursor) }
+            }),
+            new BsonDocument("$sort", new BsonDocument("cursor", -1)),
+            new BsonDocument("$limit", query.InputRecordLimit),
+            new BsonDocument("$set", new BsonDocument
+            {
+                { "_lookup_group", QueryValueExpression(profile.GroupKeyField) },
+                { unionValue, QueryValuesExpression(reducer.Field) }
+            }),
+            new BsonDocument("$match", new BsonDocument(
+                "$expr",
+                new BsonDocument(
+                    "$eq",
+                    new BsonArray { "$_lookup_group.comparison_key", "$$groupKey" }))),
+            new BsonDocument("$unwind", new BsonDocument
+            {
+                { "path", $"${unionValue}" },
+                { "includeArrayIndex", "_union_ordinal" }
+            }),
+            new BsonDocument("$set", new BsonDocument(
+                "_representative_order",
+                new BsonDocument("$add", new BsonArray
+                {
+                    new BsonDocument("$multiply", new BsonArray
+                    {
+                        new BsonDocument("$toDecimal", "$cursor"),
+                        unionField.MaxValues
+                    }),
+                    new BsonDocument("$toDecimal", "$_union_ordinal")
+                }))),
+            new BsonDocument("$setWindowFields", new BsonDocument
+            {
+                { "partitionBy", $"${unionValue}.comparison_key" },
+                {
+                    "sortBy",
+                    new BsonDocument("_representative_order", 1)
+                },
+                {
+                    "output",
+                    new BsonDocument(
+                        "_identity_rank",
+                        new BsonDocument("$documentNumber", new BsonDocument()))
+                }
+            }),
+            new BsonDocument("$match", new BsonDocument("_identity_rank", 1)),
+            new BsonDocument("$sort", new BsonDocument
+            {
+                { $"{unionValue}.comparison_key", 1 },
+                { $"{unionValue}.native", 1 }
+            }),
+            new BsonDocument("$limit", profile.MaxUnionValues + 1),
+            new BsonDocument("$project", new BsonDocument
+            {
+                { "_id", 0 },
+                { "value", $"${unionValue}" }
+            })
+        };
+        pipeline.Add(new BsonDocument("$lookup", new BsonDocument
+        {
+            { "from", MongoDbDiagnosticRecordNames.Records },
+            { "let", new BsonDocument("groupKey", "$_id") },
+            { "pipeline", lookupPipeline },
+            { "as", lookupName }
+        }));
+        pipeline.Add(new BsonDocument("$set", new BsonDocument(
+            $"r{index}",
+            new BsonDocument("$map", new BsonDocument
+            {
+                { "input", $"${lookupName}" },
+                { "as", "boundedUnion" },
+                { "in", "$$boundedUnion.value" }
+            }))));
+        pipeline.Add(new BsonDocument("$unset", lookupName));
+    }
+
+    private BsonDocument GroupPredicateDocument(
+        DiagnosticRecordGroupPredicate predicate,
+        DiagnosticGroupReductionProfile profile,
+        IReadOnlyList<UnionPredicateBinding> unionPredicateBindings) => predicate switch
+        {
+            DiagnosticRecordGroupPredicate.All all =>
+                new("$and", new BsonArray(all.Predicates.Select(child =>
+                    (BsonValue)GroupPredicateDocument(child, profile, unionPredicateBindings)))),
+            DiagnosticRecordGroupPredicate.Any any =>
+                new("$or", new BsonArray(any.Predicates.Select(child =>
+                    (BsonValue)GroupPredicateDocument(child, profile, unionPredicateBindings)))),
+            DiagnosticRecordGroupPredicate.Comparison comparison =>
+                GroupComparisonDocument(comparison, profile, unionPredicateBindings),
+            _ => throw new ArgumentOutOfRangeException(nameof(predicate))
+        };
+
+    private BsonDocument GroupComparisonDocument(
+        DiagnosticRecordGroupPredicate.Comparison comparison,
+        DiagnosticGroupReductionProfile profile,
+        IReadOnlyList<UnionPredicateBinding> unionPredicateBindings)
+    {
+        var unionBinding = unionPredicateBindings.SingleOrDefault(binding =>
+            ReferenceEquals(binding.Predicate, comparison));
+        if (unionBinding is not null)
+            return new(unionBinding.ResultField, true);
+
+        var item = profile.Reducers.Select((definition, reducerIndex) => (definition, reducerIndex))
+            .Single(item => StringComparer.Ordinal.Equals(item.definition.Alias, comparison.Alias));
+        var field = DiagnosticGroupReductionProfileValidator.OutputField(
+            _definition,
+            profile,
+            comparison.Alias);
+        var path = GroupReducerPredicatePath(
+            item.definition,
+            item.reducerIndex,
+            field,
+            comparison.Operator);
+        var values = comparison.Values.Select(value => GroupQueryValue(
+            value,
+            field,
+            comparison.Operator)).ToArray();
+        BsonValue condition = comparison.Operator switch
+        {
+            DiagnosticPredicateOperator.Equal => values[0],
+            DiagnosticPredicateOperator.In => new BsonDocument("$in", new BsonArray(values)),
+            DiagnosticPredicateOperator.RangeInclusive => new BsonDocument
+            {
+                { "$gte", values[0] },
+                { "$lte", values[1] }
+            },
+            DiagnosticPredicateOperator.Contains when comparison.Values[0].CanonicalValue.Length == 0 =>
+                new BsonRegularExpression("", ""),
+            DiagnosticPredicateOperator.Contains =>
+                new BsonRegularExpression(Regex.Escape(values[0].AsString), ""),
+            _ => throw new ArgumentOutOfRangeException(nameof(comparison.Operator))
+        };
+        return new(path, condition);
+    }
+
+    private sealed record UnionPredicateBinding(
+        DiagnosticRecordGroupPredicate.Comparison Predicate,
+        int ReducerIndex,
+        string ResultField);
+
+    private BsonDocument GroupContinuationDocument(
+        DiagnosticRecordGroupContinuation continuation,
+        DiagnosticRecordGroupOrder order,
+        DiagnosticGroupReducerDefinition reducer,
+        string orderPath,
+        DiagnosticFieldDefinition groupField)
+    {
+        var field = DiagnosticRecordFieldResolver.Resolve(_definition, reducer.Field)!;
+        var orderValue = GroupQueryValue(
+            continuation.LastOrderValue,
+            field,
+            DiagnosticPredicateOperator.Equal);
+        var groupValue = DiagnosticStringComparisonKey.Create(
+            continuation.LastGroupKey,
+            groupField.CasePolicy);
+        var primary = order.Direction == DiagnosticSortDirection.Ascending ? "$gt" : "$lt";
+        return new("$or", new BsonArray
+        {
+            new BsonDocument(orderPath, new BsonDocument(primary, orderValue)),
+            new BsonDocument
+            {
+                { orderPath, orderValue },
+                { "_id", new BsonDocument("$gt", groupValue) }
+            }
+        });
+    }
+
+    private static string GroupReducerOrderPath(
+        DiagnosticGroupReducerDefinition reducer,
+        int index,
+        DiagnosticFieldDefinition field) =>
+        reducer.Kind == DiagnosticGroupReducerKind.FirstBy
+            ? $"r{index}.{(field.Type == DiagnosticFieldType.String ? "comparison_key" : "native")}"
+            : $"r{index}";
+
+    private static string GroupReducerPredicatePath(
+        DiagnosticGroupReducerDefinition reducer,
+        int index,
+        DiagnosticFieldDefinition field,
+        DiagnosticPredicateOperator operation)
+    {
+        if (reducer.Kind == DiagnosticGroupReducerKind.SetUnionString)
+            return operation == DiagnosticPredicateOperator.Contains ? "search_key" : "comparison_key";
+        if (reducer.Kind == DiagnosticGroupReducerKind.FirstBy)
+            return field.Type == DiagnosticFieldType.String
+                ? $"r{index}.{(operation == DiagnosticPredicateOperator.Contains ? "search_key" : "comparison_key")}"
+                : $"r{index}.native";
+        return $"r{index}";
+    }
+
+    private static BsonValue GroupQueryValue(
+        DiagnosticFieldValue value,
+        DiagnosticFieldDefinition field,
+        DiagnosticPredicateOperator operation)
+    {
+        if (field.Type == DiagnosticFieldType.String)
+        {
+            var projection = DiagnosticStringComparisonKey.Project(value.CanonicalValue, field.CasePolicy);
+            return operation == DiagnosticPredicateOperator.Contains
+                ? projection.SearchKey
+                : projection.ComparisonKey;
+        }
+        return NativeValue(value, field);
+    }
 
     private IReadOnlyList<BsonDocument> BuildQueryPipeline(DiagnosticRecordQuery query, long snapshotCursor)
     {
@@ -961,6 +1607,82 @@ public sealed class MongoDbDiagnosticRecordStore :
             document["payload"].AsString,
             new(document["cursor"].ToInt64().ToString(CultureInfo.InvariantCulture)),
             document.GetValue("fields_present", fields.Count > 0).ToBoolean() ? fields : null);
+    }
+
+    private DiagnosticRecordGroup ReadGroup(
+        BsonDocument document,
+        DiagnosticGroupReductionProfile profile)
+    {
+        var fields = new Dictionary<string, IReadOnlyList<DiagnosticFieldValue>>(StringComparer.Ordinal);
+        for (var index = 0; index < profile.Reducers.Count; index++)
+        {
+            var reducer = profile.Reducers[index];
+            var field = DiagnosticRecordFieldResolver.Resolve(_definition, reducer.Field)!;
+            var stored = document.GetValue($"r{index}", BsonNull.Value);
+            if (stored.IsBsonNull)
+            {
+                fields.Add(reducer.Alias, Array.Empty<DiagnosticFieldValue>());
+                continue;
+            }
+            if (reducer.Kind == DiagnosticGroupReducerKind.SetUnionString)
+            {
+                fields.Add(
+                    reducer.Alias,
+                    Array.AsReadOnly(stored.AsBsonArray
+                        .Select(item => ReadNativeGroupValue(item["native"], field))
+                        .ToArray()));
+                continue;
+            }
+            if (reducer.Kind == DiagnosticGroupReducerKind.FirstBy)
+            {
+                fields.Add(
+                    reducer.Alias,
+                    [ReadNativeGroupValue(stored["native"], field)]);
+                continue;
+            }
+            fields.Add(reducer.Alias, [ReadNativeGroupValue(stored, field)]);
+        }
+        return new(
+            document["group_key"].AsString,
+            new System.Collections.ObjectModel.ReadOnlyDictionary<string, IReadOnlyList<DiagnosticFieldValue>>(fields));
+    }
+
+    private static DiagnosticFieldValue ReadNativeGroupValue(
+        BsonValue value,
+        DiagnosticFieldDefinition field) => field.Type switch
+        {
+            DiagnosticFieldType.String => DiagnosticFieldValue.String(value.AsString),
+            DiagnosticFieldType.Int64 => DiagnosticFieldValue.Int64(ReadExactInt64(value)),
+            DiagnosticFieldType.Decimal => DiagnosticFieldValue.Decimal(Decimal128.ToDecimal(value.AsDecimal128)),
+            DiagnosticFieldType.Boolean => DiagnosticFieldValue.Boolean(value.AsBoolean),
+            DiagnosticFieldType.Timestamp => DiagnosticFieldValue.Timestamp(
+                new DateTimeOffset(value.ToInt64(), TimeSpan.Zero)),
+            _ => throw new ArgumentOutOfRangeException(nameof(field.Type))
+        };
+
+    private static long ReadExactInt64(BsonValue value)
+    {
+        if (value.IsInt64 || value.IsInt32)
+            return value.ToInt64();
+        if (value.IsDecimal128)
+        {
+            var exact = Decimal128.ToDecimal(value.AsDecimal128);
+            if (decimal.Truncate(exact) != exact || exact < long.MinValue || exact > long.MaxValue)
+                throw new OverflowException("A grouped Int64 reduction exceeded the portable Int64 range.");
+            return checked((long)exact);
+        }
+        throw new OverflowException(
+            $"A grouped Int64 reduction returned non-exact provider type '{value.BsonType}'.");
+    }
+
+    private static DiagnosticFieldValue AssertSingleReducedValue(
+        DiagnosticRecordGroup group,
+        string alias)
+    {
+        if (!group.Fields.TryGetValue(alias, out var values) || values.Count != 1)
+            throw new InvalidOperationException(
+                $"Grouped order alias '{alias}' did not produce one portable scalar value.");
+        return values[0];
     }
 
     private static BsonDocument FieldValueDocument(DiagnosticFieldValue value) => new()

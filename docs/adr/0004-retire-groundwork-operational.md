@@ -135,7 +135,13 @@ have in common. Until then, a shared implementation is speculative generality.
 ### Applied in the same change
 
 The same principle — a contract is justified by a named workload — was applied to the diagnostic
-record store's grouped-reduction capability, which shipped without a consumer requirement on record.
-It is removed, with the evidence and the conditions for its return in
-[diagnostic-records-grouped-reduction-scope](../reports/diagnostic-records-grouped-reduction-scope.md).
-That removal carries a stream-definition fingerprint break documented in the same note.
+record store's grouped-reduction capability, which appeared to have shipped without a consumer
+requirement on record. It was removed and then restored: reading the consuming source, rather than
+the consumer's design document, found the requirement in the OpenTelemetry trace-list and
+trace-detail endpoints. Grouped reduction is retained and its workload is now recorded on both sides;
+see [diagnostic-records-grouped-reduction-scope](../reports/diagnostic-records-grouped-reduction-scope.md).
+
+The episode sharpens the principle rather than weakening it. "A named workload" means a workload
+named against the consumer's *code* at the version that consumes the contract. A design document is
+evidence of intent at its date; it does not stay current on its own, and an absence in it is not
+evidence that the requirement does not exist.

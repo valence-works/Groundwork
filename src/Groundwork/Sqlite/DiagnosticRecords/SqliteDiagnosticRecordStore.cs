@@ -59,6 +59,11 @@ public sealed class SqliteDiagnosticRecordStore : IDiagnosticRecordStore
         CancellationToken cancellationToken = default) =>
         instrumented.QueryAsync(query, cancellationToken);
 
+    public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default) =>
+        instrumented.QueryGroupsAsync(query, cancellationToken);
+
     public ValueTask<DiagnosticStreamStatistics> InspectAsync(
         DiagnosticStreamInspectionRequest request,
         CancellationToken cancellationToken = default) =>

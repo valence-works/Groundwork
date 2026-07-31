@@ -81,6 +81,7 @@ public static class SqlServerDiagnosticRecordStoreFactory
         return new DelegatingDiagnosticRecordPlanInspector(
             new SqlServerDiagnosticRecordDeploymentInspector(connectionString),
             (definition, query, cancellationToken) => InspectQueryPlanAsync(connectionString, definition, query, hooks, cancellationToken),
+            (definition, query, cancellationToken) => InspectGroupedQueryPlanAsync(connectionString, definition, query, hooks, cancellationToken),
             (definition, request, cancellationToken) => InspectStatisticsPlanAsync(connectionString, definition, request, hooks, cancellationToken),
             (definition, request, cancellationToken) => InspectTrimPlanAsync(connectionString, definition, request, hooks, cancellationToken));
     }
@@ -136,6 +137,18 @@ public static class SqlServerDiagnosticRecordStoreFactory
         DiagnosticRecordQuery query,
         CancellationToken cancellationToken = default) =>
         await ExplainQueryAsync(
+            connectionString,
+            definition,
+            query,
+            new SqlServerDiagnosticRecordPlanExplainHooks(),
+            cancellationToken);
+
+    internal static async ValueTask<IReadOnlyList<string>> ExplainGroupedQueryAsync(
+        string connectionString,
+        DiagnosticRecordStreamDefinition definition,
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default) =>
+        await ExplainGroupedQueryAsync(
             connectionString,
             definition,
             query,
@@ -270,6 +283,18 @@ public static class SqlServerDiagnosticRecordStoreFactory
         new("sqlserver", DiagnosticRecordPlanOperation.Query, DiagnosticRecordNativePlanFormats.SqlServerShowplanXml,
             await ExplainQueryAsync(connectionString, definition, query, hooks, cancellationToken));
 
+    private static async ValueTask<DiagnosticRecordNativePlan> InspectGroupedQueryPlanAsync(
+        string connectionString,
+        DiagnosticRecordStreamDefinition definition,
+        DiagnosticRecordGroupQuery query,
+        SqlServerDiagnosticRecordPlanExplainHooks hooks,
+        CancellationToken cancellationToken) =>
+        new(
+            "sqlserver",
+            DiagnosticRecordPlanOperation.GroupedQuery,
+            DiagnosticRecordNativePlanFormats.SqlServerShowplanXml,
+            await ExplainGroupedQueryAsync(connectionString, definition, query, hooks, cancellationToken));
+
     private static async ValueTask<DiagnosticRecordNativePlan> InspectTrimPlanAsync(
         string connectionString,
         DiagnosticRecordStreamDefinition definition,
@@ -302,6 +327,26 @@ public static class SqlServerDiagnosticRecordStoreFactory
             ? await ReadCursorHighWaterAsync(connectionString, query.Scope, query.Stream, cancellationToken)
             : long.Parse(query.Continuation.SnapshotHighWater.Value, CultureInfo.InvariantCulture);
         return await ExplainAsync(connectionString, store.Inner.BuildQueryCommand(query, snapshot), hooks, cancellationToken);
+    }
+
+    private static async ValueTask<IReadOnlyList<string>> ExplainGroupedQueryAsync(
+        string connectionString,
+        DiagnosticRecordStreamDefinition definition,
+        DiagnosticRecordGroupQuery query,
+        SqlServerDiagnosticRecordPlanExplainHooks hooks,
+        CancellationToken cancellationToken)
+    {
+        SqlServerDiagnosticRecordValidator.ValidateScopeAndThrow(query.Scope, query.Stream);
+        var store = new SqlServerDiagnosticRecordStore(connectionString, definition);
+        DiagnosticRecordGroupQueryValidator.Validate(query, definition, store.Inner);
+        var snapshot = query.Continuation is null
+            ? await ReadCursorHighWaterAsync(connectionString, query.Scope, query.Stream, cancellationToken)
+            : long.Parse(query.Continuation.SnapshotHighWater.Value, CultureInfo.InvariantCulture);
+        return await ExplainAsync(
+            connectionString,
+            store.Inner.BuildGroupQueryCommand(query, snapshot),
+            hooks,
+            cancellationToken);
     }
 
     private static async ValueTask<IReadOnlyList<string>> ExplainTrimAsync(

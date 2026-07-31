@@ -16,6 +16,7 @@ public static class DiagnosticRecordTelemetry
     {
         public const string Append = "groundwork.diagnostic_records.append";
         public const string Query = "groundwork.diagnostic_records.query";
+        public const string QueryGroups = "groundwork.diagnostic_records.query_groups";
         public const string Inspect = "groundwork.diagnostic_records.inspect";
         public const string Trim = "groundwork.diagnostic_records.trim";
     }
@@ -49,6 +50,9 @@ public static class DiagnosticRecordTelemetry
         public const string ExactCountRequested = "groundwork.diagnostic_records.query.exact_count_requested";
         public const string LatestPerKeyRequested = "groundwork.diagnostic_records.query.latest_per_key_requested";
         public const string ContinuationPresent = "groundwork.diagnostic_records.query.continuation_present";
+        public const string GroupTake = "groundwork.diagnostic_records.query_groups.take";
+        public const string GroupPredicatePresent = "groundwork.diagnostic_records.query_groups.predicate_present";
+        public const string GroupContinuationPresent = "groundwork.diagnostic_records.query_groups.continuation_present";
         public const string KeepNewest = "groundwork.diagnostic_records.trim.keep_newest";
     }
 
@@ -56,6 +60,7 @@ public static class DiagnosticRecordTelemetry
     {
         public const string Append = "append";
         public const string Query = "query";
+        public const string QueryGroups = "query_groups";
         public const string Inspect = "inspect";
         public const string Trim = "trim";
     }
@@ -129,6 +134,7 @@ public sealed class InstrumentedDiagnosticRecordStore :
     IDiagnosticRecordStore,
     IDiagnosticAppendHandler,
     IDiagnosticQueryHandler,
+    IDiagnosticGroupedQueryHandler,
     IDiagnosticInspectHandler,
     IDiagnosticTrimHandler
 {
@@ -200,12 +206,13 @@ public sealed class InstrumentedDiagnosticRecordStore :
     {
         _inner = handlers ?? throw new ArgumentNullException(nameof(handlers));
         Identity = identity ?? throw new ArgumentNullException(nameof(identity));
-        Handlers = new(this, this, this, this);
+        Handlers = new(this, this, this, this) { GroupedQuery = this };
     }
 
     public DiagnosticRecordTelemetryIdentity Identity { get; }
     public DiagnosticRecordStoreHandlers Handlers { get; }
     public DiagnosticQueryHandlerCapabilities Capabilities => _inner.Query.Capabilities;
+    DiagnosticGroupedQueryHandlerCapabilities IDiagnosticGroupedQueryHandler.Capabilities => _inner.GroupedQuery.Capabilities;
 
     public ValueTask<DiagnosticAppendResult> AppendAsync(
         DiagnosticRecordBatch batch,
@@ -220,6 +227,13 @@ public sealed class InstrumentedDiagnosticRecordStore :
         IsQueryEnabled
             ? QueryInstrumented(query, cancellationToken)
             : _inner.Query.QueryAsync(query, cancellationToken);
+
+    public ValueTask<DiagnosticRecordGroupPage> QueryGroupsAsync(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken = default) =>
+        IsQueryGroupsEnabled
+            ? QueryGroupsInstrumented(query, cancellationToken)
+            : _inner.GroupedQuery.QueryGroupsAsync(query, cancellationToken);
 
     public ValueTask<DiagnosticStreamStatistics> InspectAsync(
         DiagnosticStreamInspectionRequest request,
@@ -242,6 +256,9 @@ public sealed class InstrumentedDiagnosticRecordStore :
     private static bool IsQueryEnabled =>
         ActivitySource.HasListeners() || OperationDuration.Enabled || OperationOutcomes.Enabled ||
         ExactCountRequests.Enabled || LatestPerKeyRequests.Enabled;
+
+    private static bool IsQueryGroupsEnabled =>
+        ActivitySource.HasListeners() || OperationDuration.Enabled || OperationOutcomes.Enabled;
 
     private static bool IsInspectEnabled =>
         ActivitySource.HasListeners() || OperationDuration.Enabled || OperationOutcomes.Enabled || RetainedRecords.Enabled;
@@ -355,6 +372,24 @@ public sealed class InstrumentedDiagnosticRecordStore :
                     LatestPerKeyRequests.Add(1, requestTags);
             },
             () => _inner.Query.QueryAsync(query!, cancellationToken));
+
+    private ValueTask<DiagnosticRecordGroupPage> QueryGroupsInstrumented(
+        DiagnosticRecordGroupQuery query,
+        CancellationToken cancellationToken) =>
+        QueryOperationInstrumented(
+            DiagnosticRecordTelemetry.Activities.QueryGroups,
+            DiagnosticRecordTelemetry.Operations.QueryGroups,
+            query is null,
+            activity =>
+            {
+                if (query is not { } validQuery)
+                    return;
+                SetRequestContext(activity, validQuery.Stream);
+                activity?.SetTag(DiagnosticRecordTelemetry.Tags.GroupTake, validQuery.Take);
+                activity?.SetTag(DiagnosticRecordTelemetry.Tags.GroupPredicatePresent, validQuery.Predicate is not null);
+                activity?.SetTag(DiagnosticRecordTelemetry.Tags.GroupContinuationPresent, validQuery.Continuation is not null);
+            },
+            () => _inner.GroupedQuery.QueryGroupsAsync(query!, cancellationToken));
 
     private ValueTask<TResult> QueryOperationInstrumented<TResult>(
         string activityName,
