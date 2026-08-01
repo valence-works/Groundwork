@@ -4,6 +4,13 @@ using Groundwork.Documents.Store;
 
 namespace Groundwork.PhysicalStorage.Benchmarks;
 
+/// <summary>
+/// Observes a started recovery worker. <paramref name="recoveryExecution"/> is the token that trips when the
+/// caller cancels or the configured recovery execution bound is exhausted, so an observer can await either
+/// without racing a wall-clock estimate of its own.
+/// </summary>
+internal delegate void RecoveryWorkerStartedHandler(int workerProcessId, CancellationToken recoveryExecution);
+
 /// <summary>Bounded parent-side proof for SQLite process termination and recovery.</summary>
 internal static class SqliteProcessFailureRecovery
 {
@@ -14,7 +21,7 @@ internal static class SqliteProcessFailureRecovery
         CancellationToken cancellationToken,
         TimeSpan? configuredRecoveryExecutionBound = null,
         string? evidenceOutputPath = null,
-        Action<int>? workerStarted = null)
+        RecoveryWorkerStartedHandler? workerStarted = null)
     {
         var bound = configuredRecoveryExecutionBound ?? TimeSpan.FromMilliseconds(RecoveryProtocol.TimeoutMilliseconds);
         if (bound <= TimeSpan.Zero)
@@ -51,7 +58,7 @@ internal static class SqliteProcessFailureRecovery
                 responseReleasePath,
                 requesterAcknowledgementPath), token);
             worker = Start("recovery-worker", requestPath);
-            workerStarted?.Invoke(worker.Id);
+            workerStarted?.Invoke(worker.Id, token);
             using (var barrierTimeout = RemainingTimeout(token, stopwatch, bound))
                 await RecoveryProtocol.WaitForFileAsync(instrumentationBarrierPath, barrierTimeout.Token);
             var barrier = await RecoveryProtocol.ReadAsync<RecoveryInstrumentationBarrier>(instrumentationBarrierPath, token);

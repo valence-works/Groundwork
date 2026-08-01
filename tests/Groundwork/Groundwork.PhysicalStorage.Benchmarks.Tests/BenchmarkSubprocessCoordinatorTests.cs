@@ -36,7 +36,10 @@ public sealed class BenchmarkSubprocessCoordinatorTests
             var wait = BenchmarkSubprocessCoordinator.WaitForExitOrTerminateAsync(
                 process,
                 cancellation.Token);
-            var completed = await Task.WhenAny(wait, Task.Delay(TimeSpan.FromSeconds(5)));
+            // A watchdog against the wait hanging, not a latency budget: wide enough that a contended runner
+            // cannot trip it, and still well inside the child's own 30-second lifetime so a win here means
+            // the coordinator terminated the child rather than the child outliving the test.
+            var completed = await Task.WhenAny(wait, Task.Delay(TimeSpan.FromSeconds(15)));
 
             Assert.Same(wait, completed);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait);
