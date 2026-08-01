@@ -421,7 +421,7 @@ compound-prefix rules, plan diagnostics, and the `GW0004` compatibility bridge.
 
 #### Multi-document transactions
 
-For write commands that persist several related documents all-or-nothing, an `IDocumentStore` is also an `IDocumentSessionFactory`: it begins a document unit of work over a declared `DocumentCommitScope`. This mirrors the operational `IOperationalSessionFactory`/`IOperationalUnitOfWork` shape. Staged `Save`/`Delete` operations are applied to the underlying database transaction and become visible only on `CommitAsync`; `RollbackAsync` (or disposing without committing) discards them.
+For write commands that persist several related documents all-or-nothing, an `IDocumentStore` is also an `IDocumentSessionFactory`: it begins a document unit of work over a declared `DocumentCommitScope`. Staged `Save`/`Delete` operations are applied to the underlying database transaction and become visible only on `CommitAsync`; `RollbackAsync` (or disposing without committing) discards them.
 
 ```csharp
 using Groundwork.Core.Transactions;

@@ -5,6 +5,7 @@ using Groundwork.Core.Manifests;
 using Groundwork.Core.Queries;
 using Groundwork.Core.Validation;
 using Xunit;
+using Groundwork.TestInfrastructure;
 
 namespace Groundwork.Tests;
 
@@ -173,7 +174,7 @@ public sealed class ManifestValidationTests
         var manifest = WithSingleUnit(unit => unit with
         {
             Intent = new StorageIntent(
-                new HashSet<CapabilityId> { WellKnownCapabilities.AtomicClaim },
+                new HashSet<CapabilityId> { TestCapabilities.Primary },
                 rationale: null,
                 descriptor: WorkloadIntent.OperationalStream)
         });
@@ -210,13 +211,13 @@ public sealed class ManifestValidationTests
         var first = StorageIntent.Operational(
             "Requires task claiming.",
             WorkloadIntent.OperationalStream,
-            WellKnownCapabilities.AtomicClaim,
-            WellKnownCapabilities.LeaseRecovery);
+            TestCapabilities.Primary,
+            TestCapabilities.Secondary);
         var second = new StorageIntent(
             new HashSet<CapabilityId>
             {
-                WellKnownCapabilities.LeaseRecovery,
-                WellKnownCapabilities.AtomicClaim
+                TestCapabilities.Secondary,
+                TestCapabilities.Primary
             },
             "Requires task claiming.",
             WorkloadIntent.OperationalStream);

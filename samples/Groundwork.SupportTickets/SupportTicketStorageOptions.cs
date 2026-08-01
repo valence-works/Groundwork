@@ -1,5 +1,4 @@
 using Groundwork.Core.Manifests;
-using Groundwork.Operational;
 using Microsoft.Extensions.Configuration;
 
 namespace Groundwork.SupportTickets;
@@ -13,12 +12,6 @@ public sealed record SupportTicketStorageOptions(
 {
     public PhysicalizationPolicy EffectivePhysicalization => Physicalization ?? PhysicalizationPolicy.Portable;
     public IReadOnlySet<string> EffectivePhysicalizedIndexes => PhysicalizedIndexes ?? EmptyPhysicalizedIndexes;
-
-    /// <summary>
-    /// Optional clock for the operational store, allowing tests to deterministically advance time to
-    /// exercise lease expiry and visibility timeouts.
-    /// </summary>
-    public IOperationalClock? OperationalClock { get; init; }
 
     public static SupportTicketStorageOptions FromConfiguration(IConfiguration configuration)
     {

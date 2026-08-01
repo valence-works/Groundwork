@@ -3,9 +3,20 @@
 Program goal state: [Groundwork Persistence Readiness](../program-goals/groundwork-persistence-readiness.md).
 Related: [Groundwork Runtime Evaluation](../reports/groundwork-runtime-evaluation.md).
 
-Status: design + reference implementation. The capability-derived workload-fit API and the
-operational contract family are implemented in core; the SQLite reference provider implements all
-four seams with passing xUnit coverage.
+Status: **superseded** by [ADR 0004](../adr/0004-retire-groundwork-operational.md) (2026-07-31).
+Retained as the historical design record.
+
+The capability-derived workload-fit half of this note stands and remains implemented:
+`WellKnownCapabilities`, `StorageIntent.Operational`, and `ProviderCapabilityValidator` are
+unchanged, so a manifest can still declare operational demand and have provider fit computed from
+its requirements.
+
+The contract-family half — `IWorkQueueStore`, `ILeaseStore`, `IOutboxStore`,
+`IOperationalUnitOfWork`, and the `Groundwork.Operational` / `Groundwork.Operational.Relational`
+packages with their SQLite reference implementation — has been removed. The intended consumer
+evaluated these contracts and declined them on structural grounds (producer-side idempotency,
+peek-versus-claim drain semantics, caller-supplied outbox ids), implementing the same protocols over
+the portable document store instead. ADR 0004 records the evidence and the reasoning.
 
 ## Problem
 

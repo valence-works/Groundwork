@@ -14,9 +14,8 @@ public interface IIdentityGenerator
 }
 ```
 
-There is **no DI container** and no `services.Add…` registration. Like the operational clock
-(`IOperationalClock? clock = null`), a generator is an optional constructor parameter with a sensible
-default — pass one in to override it.
+There is **no DI container** and no `services.Add…` registration. A generator is an optional
+constructor parameter with a sensible default — pass one in to override it.
 
 ## The catalog
 

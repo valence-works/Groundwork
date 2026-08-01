@@ -15,6 +15,40 @@ It is not a fourth document physical-storage form. Provider implementations may 
 stream with a physical entity table/collection and linked multi-value indexes, but callers see only
 the specialized record contract.
 
+## Why this package exists
+
+This package is not speculative. It exists to serve one named, source-verified consumer workload:
+Elsa Foundation's `IStructuredLogStore` and `IOpenTelemetryStore`, which are moving off EF Core under
+Elsa's Zero-EF Persistence program goal. Elsa direct-references `Groundwork.DiagnosticRecords` and
+ships a Groundwork adapter under `src/Elsa/Diagnostics/Persistence/Groundwork`.
+
+The workload requires guarantees the portable `IDocumentStore` contract cannot honestly provide:
+
+| Requirement | Why document CRUD is not sufficient |
+|---|---|
+| Atomic batch append of 1–1,000 records in one call | `SaveAsync` has no batch atomicity |
+| Idempotent by a versioned caller-supplied append-operation id | Producer-side replay safety after connection loss |
+| Provider-assigned durable monotonic cursor | Deterministic keyset pagination and total order |
+| Exact `KeepNewest = N` retention trim | Count-based, not time-based; no CRUD equivalent |
+| Exact counts (approximations explicitly rejected by the consumer) | — |
+| Continuation that excludes later and backdated appends | Snapshot high-water semantics |
+| 10k–1M retained records per stream, 512 B–32 KB payloads, up to 64 concurrent writers | Volume beyond the shared index-table model |
+
+The consumer's stated performance gate is p95 no worse than 1.25x EF Core and throughput at least
+80%, with p99 no worse than 2x EF Core. Provider work in this package is measured against that bar.
+
+Retention is count-based because the consumer's is: structured logs keep the newest 100,000 rows, and
+OpenTelemetry independently keeps the newest configured number of traces, spans, metric points, and
+log records. Record trim never rewinds or deletes lifetime high-water metadata.
+
+Scope note: the grouped-reduction contract in this package (`DiagnosticGroupedReduction` and its
+provider executors) serves the consumer's OpenTelemetry trace-list and trace-detail endpoints, which
+group spans by trace id and reduce to first/last timestamp, span count, status, and bounded
+service-name sets. The consumer's workload report predates that endpoint and still states that no
+caller requires rollups or grouping; the named requirement and the call sites that depend on it are
+recorded in
+[diagnostic-records-grouped-reduction-scope](../../../docs/reports/diagnostic-records-grouped-reduction-scope.md).
+
 ## Contract surface
 
 `IDiagnosticRecordStore` exposes four bounded operations:

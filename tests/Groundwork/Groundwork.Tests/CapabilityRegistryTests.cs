@@ -15,15 +15,14 @@ public sealed class CapabilityRegistryTests
     [Fact]
     public void DefaultRegistryContainsBuiltInCapabilities()
     {
-        Assert.True(CapabilityRegistry.Default.IsRegistered(WellKnownCapabilities.AtomicClaim));
         Assert.True(CapabilityRegistry.Default.IsRegistered(WellKnownCapabilities.AtomicCommit));
     }
 
     [Fact]
     public void CapabilityIdRejectsNonNamespacedValues()
     {
-        Assert.Throws<ArgumentException>(() => new CapabilityId("atomicclaim"));
-        Assert.Throws<ArgumentException>(() => new CapabilityId("Groundwork.Operational.AtomicClaim"));
+        Assert.Throws<ArgumentException>(() => new CapabilityId("atomiccommit"));
+        Assert.Throws<ArgumentException>(() => new CapabilityId("Groundwork.Storage.AtomicCommit"));
         Assert.Throws<ArgumentException>(() => new CapabilityId(""));
     }
 
@@ -34,7 +33,7 @@ public sealed class CapabilityRegistryTests
         var (registry, _) = new GroundworkModuleCatalog().Add(new SampleModule(custom)).Build();
 
         Assert.True(registry.IsRegistered(custom.Id));
-        Assert.True(registry.IsRegistered(WellKnownCapabilities.AtomicClaim));
+        Assert.True(registry.IsRegistered(WellKnownCapabilities.AtomicCommit));
     }
 
     [Fact]
@@ -50,7 +49,7 @@ public sealed class CapabilityRegistryTests
         Assert.Contains(gated.Id, policy.EvidenceGatedCapabilities);
         Assert.DoesNotContain(ungated.Id, policy.EvidenceGatedCapabilities);
         // Built-in gated capability is still present.
-        Assert.Contains(WellKnownCapabilities.AtomicClaim, policy.EvidenceGatedCapabilities);
+        Assert.Contains(WellKnownCapabilities.AtomicCommit, policy.EvidenceGatedCapabilities);
     }
 
     [Fact]

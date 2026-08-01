@@ -7,12 +7,9 @@ using Groundwork.Modules.Inbox;
 using Groundwork.Modules.Inbox.Sqlite;
 using Groundwork.PostgreSql.Documents;
 using Groundwork.SqlServer.Documents;
-using Groundwork.Operational;
 using Groundwork.Sqlite;
 using Groundwork.Sqlite.Documents;
-using Groundwork.Sqlite.Operational;
 using Groundwork.SupportTickets.ExternalModules;
-using Groundwork.SupportTickets.Operations;
 using Microsoft.Data.Sqlite;
 
 namespace Groundwork.SupportTickets;
@@ -25,8 +22,6 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
         StorageManifest manifest,
         IDocumentStore store,
         SupportTicketRepository tickets,
-        SupportTicketOperations operations,
-        OperationalFitReport operationalFit,
         IInboxStore inbox,
         ExternalModuleFitReport externalModuleFit,
         List<IAsyncDisposable> disposables)
@@ -34,8 +29,6 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
         Manifest = manifest;
         Store = store;
         Tickets = tickets;
-        Operations = operations;
-        OperationalFit = operationalFit;
         Inbox = inbox;
         ExternalModuleFit = externalModuleFit;
         this.disposables = disposables;
@@ -45,15 +38,6 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
     public IDocumentStore Store { get; }
     public SupportTicketRepository Tickets { get; }
 
-    /// <summary>The operational hot path (triage queue, ownership leases, notification outbox).</summary>
-    public SupportTicketOperations Operations { get; }
-
-    /// <summary>
-    /// The capability-derived verdict for the operational manifest against an operational-capable
-    /// provider versus a portable document-only provider. Demonstrates that fit is computed from
-    /// requirements, not author-declared.
-    /// </summary>
-    public OperationalFitReport OperationalFit { get; }
 
     /// <summary>An external module store proving custom capabilities can be wired without core edits.</summary>
     public IInboxStore Inbox { get; }
@@ -72,9 +56,8 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
     {
         var manifest = SupportTicketManifest.Create(options.EffectivePhysicalization, options.EffectivePhysicalizedIndexes);
         var (store, disposables) = await CreateStoreAsync(options, manifest, cancellationToken);
-        var (operations, fit) = await CreateOperationsAsync(disposables, options.OperationalClock, cancellationToken);
         var (inbox, externalModuleFit) = await CreateExternalModulesAsync(disposables, cancellationToken);
-        return new SupportTicketSampleHost(manifest, store, new SupportTicketRepository(store), operations, fit, inbox, externalModuleFit, disposables);
+        return new SupportTicketSampleHost(manifest, store, new SupportTicketRepository(store), inbox, externalModuleFit, disposables);
     }
 
     public async ValueTask DisposeAsync()
@@ -158,32 +141,6 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
             default:
                 throw new ArgumentOutOfRangeException(nameof(options), options.Provider, "Unsupported support-ticket provider.");
         }
-    }
-
-    private static async Task<(SupportTicketOperations Operations, OperationalFitReport Fit)> CreateOperationsAsync(
-        List<IAsyncDisposable> disposables,
-        IOperationalClock? clock,
-        CancellationToken cancellationToken)
-    {
-        // The operational hot path always runs on a dedicated SQLite operational provider, regardless
-        // of the chosen document provider. This is the capability-derived fit story in action: the
-        // operational units below are Unsupported on a portable document-only provider, so they must
-        // run on an operational-capable one.
-        var connection = new SqliteConnection("Data Source=:memory:");
-        disposables.Insert(0, connection);
-        await connection.OpenAsync(cancellationToken);
-        await new SqliteOperationalMaterializer(connection).MaterializeAsync(cancellationToken);
-
-        var store = new SqliteOperationalStore(connection, clock);
-        var operations = new SupportTicketOperations(store);
-
-        var operationalManifest = SupportTicketOperationsManifest.Create();
-        var validator = new ProviderCapabilityValidator();
-        var fit = new OperationalFitReport(
-            validator.Evaluate(operationalManifest, SupportTicketOperationsManifest.OperationalProvider()),
-            validator.Evaluate(operationalManifest, SupportTicketOperationsManifest.DocumentOnlyProvider()));
-
-        return (operations, fit);
     }
 
     private static async Task<(IInboxStore Inbox, ExternalModuleFitReport Fit)> CreateExternalModulesAsync(

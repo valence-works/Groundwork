@@ -14,8 +14,6 @@
     <Project Path="src/Groundwork/DiagnosticRecords.Relational/Groundwork.DiagnosticRecords.Relational.csproj" />
     <Project Path="src/Groundwork/Materialization/Groundwork.Materialization.csproj" />
     <Project Path="src/Groundwork/MongoDb/Groundwork.MongoDb.csproj" />
-    <Project Path="src/Groundwork/Operational/Groundwork.Operational.csproj" />
-    <Project Path="src/Groundwork/Operational.Relational/Groundwork.Operational.Relational.csproj" />
     <Project Path="src/Groundwork/PostgreSql/Groundwork.PostgreSql.csproj" />
     <Project Path="src/Groundwork/Provider.Relational/Groundwork.Provider.Relational.csproj" />
     <Project Path="src/Groundwork/Relational/Groundwork.Relational.csproj" />

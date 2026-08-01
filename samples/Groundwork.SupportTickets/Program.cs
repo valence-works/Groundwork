@@ -5,8 +5,6 @@ var storageOptions = SupportTicketStorageOptions.FromConfiguration(builder.Confi
 await using var supportTickets = await SupportTicketSampleHost.CreateAsync(storageOptions);
 
 builder.Services.AddSingleton(supportTickets.Tickets);
-builder.Services.AddSingleton(supportTickets.Operations);
-builder.Services.AddSingleton(supportTickets.OperationalFit);
 builder.Services.AddSingleton(supportTickets.Inbox);
 builder.Services.AddSingleton(supportTickets.ExternalModuleFit);
 

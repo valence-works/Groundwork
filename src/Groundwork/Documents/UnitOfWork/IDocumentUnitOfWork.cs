@@ -5,8 +5,7 @@ namespace Groundwork.Documents.UnitOfWork;
 
 /// <summary>
 /// Opens an <see cref="IDocumentUnitOfWork"/> spanning a declared set of document kinds that must
-/// commit as one logical transaction. Mirrors the operational <c>IOperationalSessionFactory</c>;
-/// maps to the storage capability <c>AtomicCommit</c>.
+/// commit as one logical transaction. Maps to the storage capability <c>AtomicCommit</c>.
 /// </summary>
 public interface IDocumentSessionFactory
 {
