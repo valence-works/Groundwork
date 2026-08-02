@@ -156,6 +156,7 @@ storage, session, materialization, migration, and provider-health signals remain
 - [Stateless relational document-store factory migration](https://github.com/valence-works/Groundwork/issues/34)
 - [Groundwork Physicalization and Performance specification](../../specs/019-groundwork-physicalization-performance/spec.md)
 - [Groundwork Runtime Evaluation and Hardening report](../reports/groundwork-runtime-evaluation.md)
+- [Elsa EF Core removal strategy](../reports/elsa-ef-core-removal-strategy.md)
 - [Groundwork Automatic Migrations specification](../../specs/021-groundwork-automatic-migrations/spec.md)
 
 ## Drift / Review Notes
