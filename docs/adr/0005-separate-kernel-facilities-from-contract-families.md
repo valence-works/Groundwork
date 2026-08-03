@@ -65,6 +65,35 @@ The `Groundwork.Modules.Inbox` sample demonstrates external module authoring, bu
 across module, provider, and tests, and SQLite only, it does not exercise the machinery a real
 contract family needs.
 
+### Where the kernel boundary already is
+
+The document stack is not uniformly document-coupled. Measured at its public signatures, coupling is
+concentrated at the top of the pipeline and disappears toward the bottom:
+
+| Stage | Entry point | Contract coupling |
+|---|---|---|
+| Declaration → resolution | `PhysicalStorageResolver.Resolve(StorageManifest, IPhysicalNamePolicy, IProviderPhysicalNameNormalizer)` | **Document-coupled.** Takes a manifest of storage units. |
+| Physical definition | `PhysicalTableDefinition` | **Partly.** Generic bones — `ProjectedColumns`, `Indexes`, `SchemaVersion`, `Evolution`. Document concepts — `Form`, `Envelope`, `SharedStorage`, `LinkedProjectionLogicalName`, `LinkedKey` — are present but nullable. |
+| Route compilation | `ExecutableStorageRouteCompiler.Compile(ProviderPhysicalTableDefinition)` | Takes a definition, not a manifest. |
+| Schema evolution | `PhysicalSchemaDiffPlanner.Plan(PhysicalSchemaTarget, PhysicalSchemaHistoryState, DateTimeOffset, …)` | **Already contract-agnostic.** No manifest, no document vocabulary. |
+
+Two consequences follow, and they pull in opposite directions.
+
+First, the kernel is closer than "extract a kernel" suggests. The declaration model above
+`PhysicalTableDefinition` is legitimately per-contract-family and should stay that way; everything
+from schema targets downward is already shared machinery wearing document-stack packaging.
+`PhysicalTableDefinition` itself is the seam: it needs splitting into a generic physical-object
+definition (name, projected columns, indexes, schema version, evolution metadata) that the document
+family extends with form, envelope, shared binding, and linked-key concepts.
+
+Second, and less comfortably: **diagnostics bypassed the contract-agnostic half too.** It reached
+provider SQL directly from stream definitions and reimplemented durable applied state as
+`DiagnosticRecordPhysicalSchemaState` (175 lines) rather than consuming
+`Core.SchemaEvolution`. Part of the duplication was therefore avoidable with no kernel work at all.
+This is evidence for the sequencing in decision §5 — a meaningful share of the reduction is
+available before any extraction lands — and evidence against treating the parallel stack as forced
+by Core's shape.
+
 ### The observable failure
 
 On 2026-07-31 the grouped-reduction contract was removed from Groundwork on the reasoning that no
@@ -84,10 +113,17 @@ diagnostic records are both contract families; documents remains Groundwork's fi
 
 ### 2. The kernel is the extension point, and must be sufficient to author a contract family outside core
 
+The seam is `PhysicalTableDefinition`. Above it — declaration models, intent, and resolution from a
+declaration to a physical definition — is per-contract-family. At and below it, machinery is shared.
+`PhysicalStorageResolver.Resolve` therefore stays with the document family; what generalizes is the
+definition it produces and everything consuming that definition.
+
 Kernel facilities are:
 
-- physical definitions, host naming policy, provider identifier normalization, and deterministic
-  fingerprinting (`PhysicalStorageResolver`, `PhysicalTableDefinition` — already contract-agnostic);
+- a generic physical-object definition — logical name, projected columns, indexes, schema version,
+  evolution metadata — split out of `PhysicalTableDefinition`, which retains form, envelope, shared
+  binding, and linked-key concepts as the document family's extension of it;
+- host naming policy, provider identifier normalization, and deterministic fingerprinting;
 - provider-neutral schema evolution: additive diffs, durable applied state, compare-and-swap,
   locking, and safe/destructive authorization;
 - per-provider session and connection lifecycle (`Groundwork.Provider.Relational` today);
@@ -122,9 +158,12 @@ external consumer belongs to that consumer.
 
 1. Extract the kernel facilities in §2 and close the §3 gap.
 2. Refactor `Groundwork.DiagnosticRecords` onto the kernel **in place**, still in this repository.
-   This is where kernel sufficiency is proven, with no cross-repository coordination while it is
-   still being learned. The reduction in diagnostics line count is the measure of whether the
-   extraction succeeded.
+   Start with what is already contract-agnostic — `Core.SchemaEvolution` in place of the
+   independently reimplemented `DiagnosticRecordPhysicalSchemaState` — which needs no extraction at
+   all and independently tests whether the parallel stack was forced or incidental. Then adopt the
+   extracted seam. This is where kernel sufficiency is proven, with no cross-repository coordination
+   while it is still being learned. The reduction in diagnostics line count is the measure of
+   whether the extraction succeeded.
 3. Move the remaining contract family to its consumer.
 
 Each step is independently shippable. Step 3 must not begin before step 2 demonstrates sufficiency;
