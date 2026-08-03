@@ -75,7 +75,7 @@ concentrated at the top of the pipeline and disappears toward the bottom:
 | Declaration → resolution | `PhysicalStorageResolver.Resolve(StorageManifest, IPhysicalNamePolicy, IProviderPhysicalNameNormalizer)` | **Document-coupled.** Takes a manifest of storage units. |
 | Physical definition | `PhysicalTableDefinition` | **Partly.** Generic bones — `ProjectedColumns`, `Indexes`, `SchemaVersion`, `Evolution`. Document concepts — `Form`, `Envelope`, `SharedStorage`, `LinkedProjectionLogicalName`, `LinkedKey` — are present but nullable. |
 | Route compilation | `ExecutableStorageRouteCompiler.Compile(ProviderPhysicalTableDefinition)` | Takes a definition, not a manifest. |
-| Schema evolution | `PhysicalSchemaDiffPlanner.Plan(PhysicalSchemaTarget, PhysicalSchemaHistoryState, DateTimeOffset, …)` | **Already contract-agnostic.** No manifest, no document vocabulary. |
+| Schema evolution | `PhysicalSchemaDiffPlanner.Plan(PhysicalSchemaTarget, PhysicalSchemaHistoryState, DateTimeOffset, …)` | **Agnostic at the signature, coupled in its types.** No manifest parameter, but `PhysicalSchemaTarget` requires a non-null `IReadOnlyList<ExecutableStorageRoute>` plus manifest identity and version, and `AppliedStorageRouteSnapshot` carries `DocumentIdentitySchemaState?`. |
 
 Two consequences follow, and they pull in opposite directions.
 
@@ -86,13 +86,35 @@ from schema targets downward is already shared machinery wearing document-stack 
 definition (name, projected columns, indexes, schema version, evolution metadata) that the document
 family extends with form, envelope, shared binding, and linked-key concepts.
 
-Second, and less comfortably: **diagnostics bypassed the contract-agnostic half too.** It reached
-provider SQL directly from stream definitions and reimplemented durable applied state as
-`DiagnosticRecordPhysicalSchemaState` (175 lines) rather than consuming
-`Core.SchemaEvolution`. Part of the duplication was therefore avoidable with no kernel work at all.
-This is evidence for the sequencing in decision §5 — a meaningful share of the reduction is
-available before any extraction lands — and evidence against treating the parallel stack as forced
-by Core's shape.
+Second, Core already contains the intended extension point, and it is closer to sufficient than the
+parallel stack suggests. `ProviderPhysicalSchemaDefinition` carries an **opaque**
+`canonicalDefinition` payload and computes its own fingerprint, under a doc comment that states the
+split precisely: *"Core owns identity, fingerprinting, diffing, durable snapshots, and publication;
+the named provider owns the canonical definition payload and its execution semantics."* That is
+exactly the contract `DiagnosticRecordPhysicalSchemaState` reimplements — canonical serialization
+plus fingerprinting of a definition Core does not interpret.
+
+Third, and this is what blocks reuse today: **that extension point is structurally subordinate to
+document routes.** `PhysicalSchemaTarget` rejects any provider definition that does not match an
+executable storage route —
+
+```csharp
+if (ProviderDefinitions.Any(definition =>
+        Routes.All(route => route.StorageUnit != definition.StorageUnit)))
+    throw new ArgumentException(
+        "Every provider physical-schema definition must belong to an executable storage route.", …);
+```
+
+— and additionally requires `StorageManifestIdentity`, `StorageManifestVersion`, and a non-null
+route list. A diagnostic stream has none of these. Provider definitions are therefore annotations on
+document routes, not first-class subjects, and diagnostics could not have consumed
+`Core.SchemaEvolution` without synthesizing a document route and manifest identity for a
+non-document stream.
+
+The parallel stack was, on this evidence, **not** avoidable by discipline alone. The minimum useful
+generalization is correspondingly well-defined: lift `ProviderPhysicalSchemaDefinition` from an
+annotation on an `ExecutableStorageRoute` to a first-class schema subject, and admit a schema target
+whose subjects are provider definitions rather than routes.
 
 ### The observable failure
 
@@ -113,10 +135,21 @@ diagnostic records are both contract families; documents remains Groundwork's fi
 
 ### 2. The kernel is the extension point, and must be sufficient to author a contract family outside core
 
-The seam is `PhysicalTableDefinition`. Above it — declaration models, intent, and resolution from a
-declaration to a physical definition — is per-contract-family. At and below it, machinery is shared.
-`PhysicalStorageResolver.Resolve` therefore stays with the document family; what generalizes is the
-definition it produces and everything consuming that definition.
+There are two seams, not one.
+
+**Seam A — `PhysicalTableDefinition`.** Above it, declaration models, intent, and resolution from a
+declaration to a physical definition are per-contract-family; `PhysicalStorageResolver.Resolve`
+therefore stays with the document family. What generalizes is the definition it produces.
+
+**Seam B — the schema subject.** `ProviderPhysicalSchemaDefinition` is already the right shape (an
+opaque canonical payload with Core-owned fingerprinting) but is admitted only as an annotation on an
+`ExecutableStorageRoute`. It must become a first-class schema subject, with `PhysicalSchemaTarget`
+admitting targets whose subjects are provider definitions rather than document routes, and
+`AppliedStorageRouteSnapshot`'s `DocumentIdentitySchemaState` moving to the document family's
+extension.
+
+Seam B is the smaller change and unblocks diagnostics on its own; Seam A is the larger one and is
+what lets a contract family reuse physicalization rather than only schema evolution.
 
 Kernel facilities are:
 
@@ -156,14 +189,15 @@ external consumer belongs to that consumer.
 
 ### 5. Diagnostic records becomes an externally owned contract family, in three ordered steps
 
-1. Extract the kernel facilities in §2 and close the §3 gap.
-2. Refactor `Groundwork.DiagnosticRecords` onto the kernel **in place**, still in this repository.
-   Start with what is already contract-agnostic — `Core.SchemaEvolution` in place of the
-   independently reimplemented `DiagnosticRecordPhysicalSchemaState` — which needs no extraction at
-   all and independently tests whether the parallel stack was forced or incidental. Then adopt the
-   extracted seam. This is where kernel sufficiency is proven, with no cross-repository coordination
-   while it is still being learned. The reduction in diagnostics line count is the measure of
-   whether the extraction succeeded.
+1. Open **seam B** — make `ProviderPhysicalSchemaDefinition` a first-class schema subject — and
+   immediately prove it by replacing `DiagnosticRecordPhysicalSchemaState` with
+   `Core.SchemaEvolution` in place. This is the smallest change that produces evidence: it is
+   confined to the schema-evolution types, it has one obvious consumer waiting, and success or
+   failure is legible before any larger commitment. Open **seam A** and close the §3 MongoDB gap
+   only after seam B lands.
+2. Refactor the rest of `Groundwork.DiagnosticRecords` onto the kernel **in place**, still in this
+   repository, with no cross-repository coordination while sufficiency is still being learned. The
+   reduction in diagnostics line count is the measure of whether the extraction succeeded.
 3. Move the remaining contract family to its consumer.
 
 Each step is independently shippable. Step 3 must not begin before step 2 demonstrates sufficiency;
