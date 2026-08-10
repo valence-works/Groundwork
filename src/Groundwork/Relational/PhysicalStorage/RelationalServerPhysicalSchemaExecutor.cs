@@ -462,7 +462,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         ExecutablePhysicalIndexRoute index,
         CancellationToken ct)
     {
-        var nullableColumns = NullableIndexColumns(route, index);
+        var nullableColumns = RelationalPhysicalIndexNullExclusion.Columns(route, index);
         var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
         if (existing is null)
             await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, nullableColumns), ct);
@@ -900,7 +900,9 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     {
         var actual = await dialect.ReadIndexAsync(connection, transaction, table, expected.Name.Identifier, ct)
             ?? throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' is missing from '{table}'.");
-        var expectedFilter = dialect.IndexFilter(expected, NullableIndexColumns(route, expected));
+        var expectedFilter = dialect.IndexFilter(
+            expected,
+            RelationalPhysicalIndexNullExclusion.Columns(route, expected));
         if (actual.IsUnique != expected.IsUnique || actual.Columns.Count != expected.Columns.Count ||
             !string.Equals(actual.Filter, expectedFilter, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' has incompatible uniqueness, filter, or column count.");
@@ -1057,16 +1059,6 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         new(route.LinkedRelationship.Identity.ComparisonKey.Identifier, RelationalEnvelopeColumnKind.IdentityComparison),
         new(route.LinkedRelationship.Identity.LookupKey.Identifier, RelationalEnvelopeColumnKind.IdentityLookup)
     ];
-
-    private static string[] NullableIndexColumns(ExecutableStorageRoute route, ExecutablePhysicalIndexRoute index)
-    {
-        var indexed = index.Columns.Select(column => column.Column.Identifier).ToHashSet(StringComparer.Ordinal);
-        return route.ProjectedColumns
-            .Where(column => column.Target == index.Target && column.Definition.IsNullable && indexed.Contains(column.Column.Identifier))
-            .Select(column => column.Column.Identifier)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-    }
 
     protected static long ReadLockSessionId(IPhysicalSchemaApplicationLock applicationLock) =>
         applicationLock is ApplicationLock relationalLock
