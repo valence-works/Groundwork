@@ -895,15 +895,19 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     /// </summary>
     /// <remarks>
     /// Providers re-render the predicate they stored rather than echoing what was submitted: SQL Server
-    /// keeps <c>([name] IS NOT NULL)</c>, PostgreSQL reports <c>(name IS NOT NULL)</c> from
-    /// <c>pg_get_expr</c>. Comparing the raw text would report drift that does not exist, so identifier
-    /// quoting and whitespace are dropped before comparing.
+    /// keeps <c>([name] IS NOT NULL)</c>, while PostgreSQL's <c>pg_get_expr</c> quotes nothing and
+    /// parenthesises every conjunct, turning one submitted pair into
+    /// <c>((name IS NOT NULL) AND (description IS NOT NULL))</c>. Comparing the raw text would report
+    /// drift that does not exist, so identifier quoting, grouping and whitespace are dropped first.
+    /// Filters are only ever conjunctions of <c>IS NOT NULL</c>, so dropping grouping cannot make two
+    /// meaningfully different predicates compare equal — a changed column set still shows up.
     /// </remarks>
     private static string? NormalizeIndexFilter(string? filter) =>
         filter is null
             ? null
             : new string(filter.Where(character =>
-                character is not ('"' or '[' or ']' or '`') && !char.IsWhiteSpace(character)).ToArray());
+                character is not ('"' or '[' or ']' or '`' or '(' or ')') &&
+                !char.IsWhiteSpace(character)).ToArray());
 
     private async Task ValidateIndexAsync(
         DbConnection connection,

@@ -1,3 +1,4 @@
+using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Documents.Scoping;
@@ -62,6 +63,36 @@ public sealed class PostgreSqlNullExcludedIndexHintTests(
         var result = await runtime.QueryAsync(NullExcludedIndexScenario.Query(comparison));
 
         Assert.Equal("absent", Assert.Single(result.Documents).Id);
+    }
+
+    /// <summary>
+    /// An index excluding two columns emits a two-conjunct filter, and PostgreSQL re-renders it with
+    /// every conjunct parenthesised. Schema validation compares the filter it emitted against the one
+    /// the catalog reports, so a single-column filter is not enough to prove the round trip: applying
+    /// this model is the assertion.
+    /// </summary>
+    [Theory]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    public async Task Compound_null_excluding_index_survives_the_catalog_round_trip(PhysicalStorageForm form)
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            form,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: true,
+            priorityNullable: true,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames,
+            categoryNullable: true,
+            categoryMissingValues: MissingValueBehavior.Excluded,
+            compoundMissingValues: MissingValueBehavior.Excluded);
+        var connectionString = fixture.Container.GetConnectionString();
+        var executor = new PostgreSqlPhysicalSchemaExecutor(connectionString);
+
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, executor);
+
+        // Re-applying validates every emitted index against the catalog rather than recreating it.
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, executor);
     }
 
     private async Task<(RelationalPhysicalQueryCommand Rendered, IBoundedDocumentStore Runtime, string Column)>
