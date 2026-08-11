@@ -151,15 +151,15 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
     public override string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
         $"ALTER TABLE {Q(table)} ALTER COLUMN {Q(column)} {ProjectedType(definition)}{CollationSql(definition)} NOT NULL;";
 
-    public override string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> nullableColumns) =>
-        index.IsUnique && nullableColumns.Count > 0
-            ? $"({string.Join(" AND ", nullableColumns.Select(column => $"{Q(column)} IS NOT NULL"))})"
+    public override string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
+        excludedColumns.Count > 0
+            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{Q(column)} IS NOT NULL"))})"
             : null;
 
-    public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> nullableColumns) =>
+    public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
         $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {Q(index.Name.Identifier)} ON {Q(table)} " +
         $"({string.Join(", ", index.Columns.Select(column => $"{Q(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"))})" +
-        (IndexFilter(index, nullableColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
+        (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
 
     public override string UpsertLinkedSql(
         string table,

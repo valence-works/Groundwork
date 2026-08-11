@@ -22,7 +22,9 @@ public static class SortOnlyResidualPredicateConformance
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            // The residual Contains predicate has to be evaluated against every row, including those
+            // with no lastModifiedAt, so this index cannot omit them.
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "browse-definitions",
             index.Identity,
@@ -89,7 +91,8 @@ public static class SortOnlyResidualPredicateConformance
                             new DocumentEnvelopeDefinition().IdLookupKeyColumn,
                             2,
                             PhysicalSortDirection.Ascending)
-                    ])
+                    ],
+                    missingValueBehavior: MissingValueBehavior.IncludedAsNull)
             ]);
         var unit = new StorageUnit(
             new StorageUnitIdentity("workflowDefinition"),

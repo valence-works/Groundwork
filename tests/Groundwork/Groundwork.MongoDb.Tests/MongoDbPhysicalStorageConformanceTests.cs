@@ -2504,7 +2504,9 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     public async Task Applied_state_rejects_provider_significant_index_option_conflicts(string option)
     {
         var database = Database();
-        var model = Model(PhysicalStorageForm.PhysicalEntityTable);
+        // The keyed column has to be nullable for Excluded to produce a partial filter at all, which is
+        // what the "partial-omitted" case exists to detect the absence of.
+        var model = Model(PhysicalStorageForm.PhysicalEntityTable, isNullable: true);
         var materializer = new MongoDbGroundworkMaterializer(database);
         await materializer.MaterializeAsync(model);
         var route = Assert.Single(model.Routes);

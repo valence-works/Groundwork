@@ -462,10 +462,10 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         ExecutablePhysicalIndexRoute index,
         CancellationToken ct)
     {
-        var nullableColumns = RelationalPhysicalIndexNullExclusion.Columns(route, index);
+        var excludedColumns = PhysicalIndexNullExclusion.Columns(route, index);
         var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
         if (existing is null)
-            await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, nullableColumns), ct);
+            await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, excludedColumns), ct);
         await ValidateIndexAsync(connection, transaction, route, table, index, ct);
     }
 
@@ -890,6 +890,21 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             dialect.ProjectedCollation(definition)), actual.GetValueOrDefault(column));
     }
 
+    /// <summary>
+    /// Reduces an index filter to a form that survives the round trip through a provider's catalog.
+    /// </summary>
+    /// <remarks>
+    /// Providers re-render the predicate they stored rather than echoing what was submitted: SQL Server
+    /// keeps <c>([name] IS NOT NULL)</c>, PostgreSQL reports <c>(name IS NOT NULL)</c> from
+    /// <c>pg_get_expr</c>. Comparing the raw text would report drift that does not exist, so identifier
+    /// quoting and whitespace are dropped before comparing.
+    /// </remarks>
+    private static string? NormalizeIndexFilter(string? filter) =>
+        filter is null
+            ? null
+            : new string(filter.Where(character =>
+                character is not ('"' or '[' or ']' or '`') && !char.IsWhiteSpace(character)).ToArray());
+
     private async Task ValidateIndexAsync(
         DbConnection connection,
         DbTransaction transaction,
@@ -902,9 +917,12 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             ?? throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' is missing from '{table}'.");
         var expectedFilter = dialect.IndexFilter(
             expected,
-            RelationalPhysicalIndexNullExclusion.Columns(route, expected));
+            PhysicalIndexNullExclusion.Columns(route, expected));
         if (actual.IsUnique != expected.IsUnique || actual.Columns.Count != expected.Columns.Count ||
-            !string.Equals(actual.Filter, expectedFilter, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(
+                NormalizeIndexFilter(actual.Filter),
+                NormalizeIndexFilter(expectedFilter),
+                StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' has incompatible uniqueness, filter, or column count.");
         for (var index = 0; index < expected.Columns.Count; index++)
         {
@@ -1436,8 +1454,12 @@ public abstract class RelationalServerPhysicalSchemaDialect
     public abstract string ProjectedColumnSql(string column, ProjectedColumnDefinition definition);
     public abstract string AddColumnSql(string table, string column, ProjectedColumnDefinition definition);
     public abstract string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition);
-    public abstract string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> nullableColumns);
-    public abstract string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> nullableColumns);
+    /// <summary>
+    /// The index filter that realises <see cref="MissingValueBehavior.Excluded"/>, or <see langword="null"/>
+    /// when <paramref name="excludedColumns"/> is empty and the index therefore keeps every row.
+    /// </summary>
+    public abstract string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
+    public abstract string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
     public abstract string UpsertLinkedSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> keyColumns, IReadOnlyList<string> updateColumns);
     public abstract string SelectCanonicalBatchSql(ExecutableStorageRoute route, int batchSize, bool hasCursor);
     public abstract object? ConvertStorageValue(object? value, ProjectedColumnDefinition definition);

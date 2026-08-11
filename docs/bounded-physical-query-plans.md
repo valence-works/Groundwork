@@ -104,11 +104,21 @@ otherwise remains unchanged.
 ## Pinning an index that excludes null rows
 
 Some providers pin the planned index into the emitted statement — SQL Server as `WITH (INDEX(...))`,
-SQLite as `INDEXED BY`. Some indexes also exclude rows rather than merely ordering them: SQL Server
-gives a unique index over a nullable column a `WHERE column IS NOT NULL` filter, because its unique
-indexes treat nulls as equal to one another, so the filter is what keeps the declared uniqueness
-semantics portable. Where both hold, pinning is only sound for a predicate that cannot match the
-excluded rows.
+SQLite as `INDEXED BY`. Some indexes also exclude rows rather than merely ordering them, and exactly
+one thing decides that: an index declared `MissingValueBehavior.Excluded` omits rows that have no
+value for its nullable keyed columns. Every provider realises that identically — a filtered index on
+SQL Server and PostgreSQL, a partial index on SQLite, a partial filter expression on MongoDB — from a
+single shared rule, `PhysicalIndexNullExclusion`. Where both hold, pinning is only sound for a
+predicate that cannot match the excluded rows.
+
+Uniqueness does not enter into it. SQL Server unique indexes treat nulls as equal to one another, so
+a unique index over a nullable column used to acquire a null-excluding filter as a side effect of
+emulating null-distinct uniqueness — which silently turned a constraint choice into a row-visibility
+choice, and made one manifest mean different things on different providers. Null-distinct uniqueness
+is now what `Excluded` states: the constraint applies only to rows that have a value. The opposite
+pairing, a unique index that keeps rows without a value, is refused at route compilation
+(`GW-ROUTE-007`) because the providers genuinely disagree about whether two such rows collide and
+SQLite cannot be told otherwise.
 
 The pin is therefore decided per invocation, from the predicate rather than from the plan alone. A
 clause proves a column non-null only when *every* alternative in that disjunction rejects nulls on
@@ -125,8 +135,8 @@ to produce a plan at all.
 
 When the predicate does not prove it, the index would drop rows the query can match. A scale-bearing
 query is refused by name rather than degraded to a scan; any other query drops the pin and leaves the
-choice to the optimizer. Providers that never pin an index, or never exclude nulls from one, are
-unaffected: PostgreSQL emits no pin and no index filter, and SQLite emits no partial index.
+choice to the optimizer. PostgreSQL emits the filter but never pins an index, so it is unaffected by
+the pin decision while still honouring the declaration.
 
 ## Isolation and failure rules
 

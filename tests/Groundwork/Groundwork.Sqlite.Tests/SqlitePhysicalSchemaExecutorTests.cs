@@ -2008,7 +2008,10 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         }
         var indexes = new List<PhysicalIndexDefinition>
         {
-            new("by-category", categoryIndexColumns, isUnique: categoryUnique)
+            // These routes serve NotContains, null equality and residual predicates, all of which must
+            // return rows that have no category, so the index has to keep them.
+            new("by-category", categoryIndexColumns, isUnique: categoryUnique,
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull)
         };
         if (includePriority)
         {
@@ -2028,7 +2031,8 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             if (scoped)
                 priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
             priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("priority", priorityIndexColumns.Count));
-            indexes.Add(new PhysicalIndexDefinition("by-priority", priorityIndexColumns));
+            indexes.Add(new PhysicalIndexDefinition("by-priority", priorityIndexColumns,
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull));
             var compoundColumns = new List<PhysicalIndexColumnDefinition>();
             if (scoped)
                 compoundColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
@@ -2052,7 +2056,8 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                         : new DocumentEnvelopeDefinition().IdComparisonKeyColumn,
                     compoundColumns.Count));
             }
-            indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns));
+            indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns,
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull));
         }
 
         var binding = new SharedStorageBinding("runtime-documents");
@@ -2061,7 +2066,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             [new IndexField("category")],
             IndexValueKind.String,
             categoryUnique,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var boundedQuery = new BoundedQueryDeclaration(
             "list-by-category",
             logicalIndex.Identity,
@@ -2108,7 +2113,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                 [new IndexField("category"), new IndexField("priority", ToIndexValueKind(priorityType))],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.Excluded);
+                MissingValueBehavior.IncludedAsNull);
             logicalIndexes.Add(compound);
             boundedQueries.Add(compoundPaging == QueryPagingSupport.Cursor
                 ? new BoundedQueryDeclaration(
