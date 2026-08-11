@@ -106,10 +106,15 @@ if (ProviderDefinitions.Any(definition =>
 ```
 
 — and additionally requires `StorageManifestIdentity`, `StorageManifestVersion`, and a non-null
-route list. A diagnostic stream has none of these. Provider definitions are therefore annotations on
-document routes, not first-class subjects, and diagnostics could not have consumed
-`Core.SchemaEvolution` without synthesizing a document route and manifest identity for a
-non-document stream.
+route list. The same constraint is enforced a second time on the durable side:
+`PhysicalSchemaAppliedSnapshot.ValidateProviderDefinitions` rejects an applied definition whose
+`StorageUnit` matches no route, with "Applied provider physical-schema definitions must belong to an
+executable storage route." Route subordination is therefore an invariant of both the desired and the
+applied state, not a single admission check that could be relaxed in one place.
+
+A diagnostic stream satisfies none of this. Provider definitions are annotations on document routes,
+not first-class subjects, and diagnostics could not have consumed `Core.SchemaEvolution` without
+synthesizing a document route and manifest identity for a non-document stream.
 
 The parallel stack was, on this evidence, **not** avoidable by discipline alone. The minimum useful
 generalization is correspondingly well-defined: lift `ProviderPhysicalSchemaDefinition` from an
