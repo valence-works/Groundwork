@@ -245,6 +245,17 @@ public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation, IRed
     public ExecutablePhysicalIndexRoute Index { get; }
 
     public ExecutableStorageObjectRoute Storage => PhysicalSchemaOperationStorage.Resolve(Route, Index.Target);
+
+    /// <summary>
+    /// True when the planner matched this operation to a changed applied definition in the same slot, so the
+    /// executor must rebuild the existing index. False on a first apply, where a same-named index the planner
+    /// never applied is a conflict to report rather than something to replace. Deliberately outside the
+    /// canonical payload: it describes how to reach the desired state, not what that state is, so it must not
+    /// alter the operation's identity.
+    /// </summary>
+    public bool IsRebuild { get; private set; }
+
+    internal void MarkAsRebuild() => IsRebuild = true;
 }
 
 public sealed class BackfillCanonicalJsonOperation

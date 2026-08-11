@@ -329,7 +329,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 break;
             case CreatePhysicalIndexOperation create:
                 ValidateRoute(create.Route);
-                await CreateIndexAsync(connection, transaction, create.Route, create.Storage.Name.Identifier, create.Index, ct);
+                await CreateIndexAsync(connection, transaction, create.Route, create.Storage.Name.Identifier, create.Index, create.IsRebuild, ct);
                 break;
             case BackfillCanonicalJsonOperation backfill:
                 if (backfill.Route is not null)
@@ -460,14 +460,15 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         ExecutableStorageRoute route,
         string table,
         ExecutablePhysicalIndexRoute index,
+        bool isRebuild,
         CancellationToken ct)
     {
         var excludedColumns = PhysicalIndexNullExclusion.Columns(route, index);
         var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
 
-        // An index is derived state, so a changed definition is a rebuild rather than a conflict. Without
-        // the drop the create is a no-op on the stale shape and validation below would reject it.
-        if (existing is not null && !IndexShapeMatches(existing, route, index, out _))
+        // Only rebuild when the planner matched this to a changed applied definition. A mismatched index on a
+        // first apply may be the operator's own, so it stays and validation reports the conflict.
+        if (isRebuild && existing is not null && !IndexShapeMatches(existing, route, index, out _))
         {
             await ExecuteAsync(connection, transaction, dialect.DropIndexSql(table, index.Name.Identifier), ct);
             existing = null;

@@ -606,13 +606,15 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             });
         var collection = database.GetCollection<BsonDocument>(operation.Storage.Name.Identifier);
 
-        // An index is derived state, so a changed definition is a rebuild rather than a conflict. Creating
-        // over a differing key spec or partial filter raises 85/86 below; dropping first lets the new
-        // definition take effect. A matching index is left alone.
-        var applied = (await (await collection.Indexes.ListAsync(cancellationToken)).ToListAsync(cancellationToken))
-            .SingleOrDefault(index => index.GetValue("name", "").AsString == operation.Index.Name.Identifier);
-        if (applied is not null && !IndexMatches(applied, keys, operation.Index.IsUnique, partialFilter))
-            await collection.Indexes.DropOneAsync(operation.Index.Name.Identifier, cancellationToken);
+        // Only rebuild when the planner matched this to a changed applied definition. A mismatched index on a
+        // first apply may be the operator's own, so it stays and the 85/86 conflict below reports it.
+        if (operation.IsRebuild)
+        {
+            var applied = (await (await collection.Indexes.ListAsync(cancellationToken)).ToListAsync(cancellationToken))
+                .SingleOrDefault(index => index.GetValue("name", "").AsString == operation.Index.Name.Identifier);
+            if (applied is not null && !IndexMatches(applied, keys, operation.Index.IsUnique, partialFilter))
+                await collection.Indexes.DropOneAsync(operation.Index.Name.Identifier, cancellationToken);
+        }
 
         try
         {

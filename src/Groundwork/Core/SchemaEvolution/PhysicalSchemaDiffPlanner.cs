@@ -81,6 +81,7 @@ public static class PhysicalSchemaDiffPlanner
         var pending = desiredSemanticOperations
             .Where(operation => !appliedIdentities.Contains(operation.Identity))
             .ToList();
+        MarkRebuilds(pending, applied);
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
             return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint);
 
@@ -181,6 +182,30 @@ public static class PhysicalSchemaDiffPlanner
                 : string.Empty, StringComparer.Ordinal)
             .ThenBy(operation => operation.SubjectIdentity, StringComparer.Ordinal)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Flags the pending operations that replace an applied definition in the same slot. Only the planner can
+    /// tell a redefinition from a first apply, because only it sees the applied snapshot. Executors must not
+    /// infer it from a shape mismatch: on a first apply a same-named index can belong to the operator, and
+    /// replacing it would destroy something Groundwork never created.
+    /// </summary>
+    private static void MarkRebuilds(
+        IReadOnlyList<PhysicalSchemaOperation> pending,
+        PhysicalSchemaAppliedState? applied)
+    {
+        if (applied is null)
+            return;
+
+        var appliedSlots = applied.Snapshot.SemanticOperations
+            .Select(operation => operation.SlotIdentity)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var operation in pending.OfType<CreatePhysicalIndexOperation>())
+        {
+            if (appliedSlots.Contains(operation.SlotIdentity))
+                operation.MarkAsRebuild();
+        }
     }
 
     private static IReadOnlyList<GroundworkDiagnostic> ValidateAdditiveDiff(

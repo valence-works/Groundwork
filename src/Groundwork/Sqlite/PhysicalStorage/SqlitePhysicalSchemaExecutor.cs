@@ -327,7 +327,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
                 break;
             case CreatePhysicalIndexOperation create:
                 RelationalPhysicalStorageColumns.Validate(create.Route);
-                await CreateIndexAsync(create.Route, create.Index, create.Storage.Name.Identifier, transaction, cancellationToken, validateObjects);
+                await CreateIndexAsync(create.Route, create.Index, create.Storage.Name.Identifier, create.IsRebuild, transaction, cancellationToken, validateObjects);
                 break;
             case BackfillCanonicalJsonOperation backfill:
                 if (backfill.Route is not null)
@@ -608,6 +608,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         ExecutableStorageRoute route,
         ExecutablePhysicalIndexRoute index,
         string table,
+        bool isRebuild,
         DbTransaction transaction,
         CancellationToken ct,
         bool validateObjects = true)
@@ -620,10 +621,10 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
             $"CREATE {unique}INDEX {Q(index.Name.Identifier)} ON {Q(table)} ({columns})" +
             (filter is null ? string.Empty : $" WHERE {filter}");
 
-        // An index is derived state, so a changed definition is a rebuild rather than a conflict. SQLite
-        // keeps the original statement in sqlite_master, which is the definition to compare against; without
-        // the drop, CREATE ... IF NOT EXISTS is a no-op on the stale shape and validation would reject it.
-        var applied = await ReadIndexDefinitionAsync(index.Name.Identifier, transaction, ct);
+        // Only rebuild when the planner matched this to a changed applied definition. A mismatched index on a
+        // first apply may be the operator's own, so it stays and validation reports the conflict. SQLite keeps
+        // the original statement in sqlite_master, which is the definition to compare against.
+        var applied = isRebuild ? await ReadIndexDefinitionAsync(index.Name.Identifier, transaction, ct) : null;
         if (applied is not null && !DefinitionsMatch(applied, desired))
             await ExecuteAsync($"DROP INDEX IF EXISTS {Q(index.Name.Identifier)};", transaction, ct);
 
