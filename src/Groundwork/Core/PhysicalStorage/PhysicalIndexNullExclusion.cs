@@ -47,6 +47,7 @@ public static class PhysicalIndexNullExclusion
     /// Whether <paramref name="index"/> declares a uniqueness constraint whose meaning is not portable.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A unique index that keeps rows with no value has to decide whether two such rows collide, and the
     /// providers genuinely disagree: SQL Server and MongoDB treat them as equal, so at most one may
     /// exist, while PostgreSQL and SQLite treat them as distinct and allow any number. PostgreSQL can be
@@ -54,6 +55,14 @@ public static class PhysicalIndexNullExclusion
     /// than let one manifest mean two different things, the shape is rejected — declare
     /// <see cref="MissingValueBehavior.Excluded"/> so uniqueness applies only to rows that have the
     /// value, make the column non-nullable, or drop the uniqueness.
+    /// </para>
+    /// <para>
+    /// Unless the uniqueness is already implied. When some other unique index's key columns are a subset
+    /// of this index's, no two rows can share this whole key whatever the nullable columns hold, so the
+    /// disagreement is unobservable and the declaration is portable after all. That is not a corner
+    /// case: a compound index that appends a searchable column to an already-unique identity is the
+    /// ordinary way to get a total order without paying for a wide identity tie-break column.
+    /// </para>
     /// </remarks>
     public static bool HasNonPortableUniqueness(ExecutableStorageRoute route, ExecutablePhysicalIndexRoute index)
     {
@@ -62,9 +71,24 @@ public static class PhysicalIndexNullExclusion
         if (!index.IsUnique || index.MissingValueBehavior == MissingValueBehavior.Excluded)
             return false;
         var indexed = index.Columns.Select(column => column.Column.Identifier).ToHashSet(StringComparer.Ordinal);
-        return route.ProjectedColumns.Any(column =>
+        var keysNullableColumn = route.ProjectedColumns.Any(column =>
             column.Target == index.Target &&
             column.Definition.IsNullable &&
             indexed.Contains(column.Column.Identifier));
+        return keysNullableColumn && !HasImpliedUniqueness(route, index, indexed);
     }
+
+    private static bool HasImpliedUniqueness(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        IReadOnlySet<string> indexed) =>
+        route.Indexes.Any(other =>
+            other.IsUnique &&
+            other.Identity != index.Identity &&
+            other.Target == index.Target &&
+            other.Columns.Count < index.Columns.Count &&
+            other.Columns.All(column => indexed.Contains(column.Column.Identifier)) &&
+            // An implying index must itself constrain every row, or it only proves uniqueness among the
+            // rows it kept.
+            Columns(route, other).Length == 0);
 }
