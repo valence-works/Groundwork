@@ -161,6 +161,10 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
         $"({string.Join(", ", index.Columns.Select(column => $"{Q(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"))})" +
         (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
 
+    // SQL Server scopes index names to their table, so the drop needs the table too.
+    public override string DropIndexSql(string table, string index) =>
+        $"DROP INDEX IF EXISTS {Q(index)} ON {Q(table)};";
+
     public override string UpsertLinkedSql(
         string table,
         IReadOnlyList<string> columns,

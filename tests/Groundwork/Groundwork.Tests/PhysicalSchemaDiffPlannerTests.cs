@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using Groundwork.Core.Capabilities;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
@@ -193,6 +194,33 @@ public sealed class PhysicalSchemaDiffPlannerTests
             operation => Assert.Equal("prune-by-priority", Assert.IsType<ApplyProviderPhysicalSchemaDefinitionOperation>(operation).SubjectIdentity),
             operation => Assert.IsType<ValidatePhysicalSchemaOperation>(operation),
             operation => Assert.IsType<RecordPhysicalSchemaAppliedStateOperation>(operation));
+    }
+
+    [Fact]
+    public void Redefining_an_applied_index_is_planned_as_a_rebuild()
+    {
+        var initialTarget = CreateTarget(
+            PhysicalStorageForm.DedicatedDocumentTable,
+            includeSecondProjection: false,
+            firstIndexMissingValues: MissingValueBehavior.Excluded);
+        var applied = Complete(PhysicalSchemaDiffPlanner.Plan(
+            initialTarget,
+            PhysicalSchemaHistoryState.Empty,
+            PlannedAt));
+        var changedTarget = CreateTarget(
+            PhysicalStorageForm.DedicatedDocumentTable,
+            includeSecondProjection: false,
+            firstIndexMissingValues: MissingValueBehavior.IncludedAsNull);
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            changedTarget,
+            PhysicalSchemaHistoryState.FromApplied(applied),
+            PlannedAt.AddHours(1));
+
+        // An index is derived state, so changing its definition is a rebuild rather than a #44 violation.
+        Assert.True(plan.IsApplicable, JoinDiagnostics(plan));
+        Assert.DoesNotContain(plan.Diagnostics, diagnostic => diagnostic.Code == "GW-SCHEMA-003");
+        Assert.Contains(plan.Operations, operation => operation is CreatePhysicalIndexOperation);
     }
 
     [Fact]
@@ -736,7 +764,8 @@ public sealed class PhysicalSchemaDiffPlannerTests
         ProviderIdentity? provider = null,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal,
         bool dedicatedWithoutLinked = false,
-        bool collectionProjection = false)
+        bool collectionProjection = false,
+        MissingValueBehavior firstIndexMissingValues = MissingValueBehavior.Excluded)
     {
         var template = SampleManifests.MetadataManifest();
         var projectedColumns = new List<ProjectedColumnDefinition>
@@ -755,7 +784,8 @@ public sealed class PhysicalSchemaDiffPlannerTests
         {
             new(
                 firstIndexName,
-                [new PhysicalIndexColumnDefinition("storage_scope", 0), new PhysicalIndexColumnDefinition("category", 1)])
+                [new PhysicalIndexColumnDefinition("storage_scope", 0), new PhysicalIndexColumnDefinition("category", 1)],
+                missingValueBehavior: firstIndexMissingValues)
         };
 
         if (includeSecondProjection)

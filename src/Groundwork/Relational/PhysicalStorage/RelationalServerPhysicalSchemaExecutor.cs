@@ -464,6 +464,15 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     {
         var excludedColumns = PhysicalIndexNullExclusion.Columns(route, index);
         var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
+
+        // An index is derived state, so a changed definition is a rebuild rather than a conflict. Without
+        // the drop the create is a no-op on the stale shape and validation below would reject it.
+        if (existing is not null && !IndexShapeMatches(existing, route, index, out _))
+        {
+            await ExecuteAsync(connection, transaction, dialect.DropIndexSql(table, index.Name.Identifier), ct);
+            existing = null;
+        }
+
         if (existing is null)
             await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, excludedColumns), ct);
         await ValidateIndexAsync(connection, transaction, route, table, index, ct);
@@ -919,6 +928,22 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     {
         var actual = await dialect.ReadIndexAsync(connection, transaction, table, expected.Name.Identifier, ct)
             ?? throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' is missing from '{table}'.");
+        if (IndexShapeMatches(actual, route, expected, out var mismatch))
+            return;
+
+        throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' {mismatch}.");
+    }
+
+    /// <summary>
+    /// Compares a live index against the compiled route. Shared by the create path, which rebuilds a
+    /// mismatched index, and the validate path, which reports one.
+    /// </summary>
+    private bool IndexShapeMatches(
+        RelationalPhysicalIndexMetadata actual,
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute expected,
+        out string mismatch)
+    {
         var expectedFilter = dialect.IndexFilter(
             expected,
             PhysicalIndexNullExclusion.Columns(route, expected));
@@ -927,13 +952,23 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 NormalizeIndexFilter(actual.Filter),
                 NormalizeIndexFilter(expectedFilter),
                 StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' has incompatible uniqueness, filter, or column count.");
+        {
+            mismatch = "has incompatible uniqueness, filter, or column count";
+            return false;
+        }
+
         for (var index = 0; index < expected.Columns.Count; index++)
         {
             if (actual.Columns[index].Name != expected.Columns[index].Column.Identifier ||
                 actual.Columns[index].Direction != expected.Columns[index].Direction)
-                throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' column {index} does not match the compiled route.");
+            {
+                mismatch = $"column {index} does not match the compiled route";
+                return false;
+            }
         }
+
+        mismatch = string.Empty;
+        return true;
     }
 
     private void EnsureColumnCompatible(string table, ExpectedColumn expected, RelationalPhysicalColumnMetadata? actual)
@@ -1464,6 +1499,9 @@ public abstract class RelationalServerPhysicalSchemaDialect
     /// </summary>
     public abstract string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
     public abstract string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
+
+    /// <summary>Drops an index so a changed definition can be rebuilt in place.</summary>
+    public abstract string DropIndexSql(string table, string index);
     public abstract string UpsertLinkedSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> keyColumns, IReadOnlyList<string> updateColumns);
     public abstract string SelectCanonicalBatchSql(ExecutableStorageRoute route, int batchSize, bool hasCursor);
     public abstract object? ConvertStorageValue(object? value, ProjectedColumnDefinition definition);

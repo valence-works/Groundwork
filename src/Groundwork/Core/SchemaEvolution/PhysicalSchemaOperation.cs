@@ -218,7 +218,16 @@ public sealed class FinalizeProjectedColumnOperation : PhysicalSchemaOperation
     public ExecutableStorageObjectRoute Storage => PhysicalSchemaOperationStorage.Resolve(Route, Column.Target);
 }
 
-public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
+/// <summary>
+/// Marks an operation whose physical effect is derived state the executor can rebuild from the desired
+/// definition. A redefinable operation may change within its <see cref="PhysicalSchemaOperation.SlotIdentity"/>,
+/// because reapplying it converges the database on the new definition. Operations that create durable
+/// structure holding data are deliberately not redefinable: changing those is a migration rather than a
+/// redefinition, and stays outside the additive #44 contract.
+/// </summary>
+public interface IRedefinablePhysicalSchemaOperation;
+
+public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation, IRedefinablePhysicalSchemaOperation
 {
     internal CreatePhysicalIndexOperation(ExecutableStorageRoute route, ExecutablePhysicalIndexRoute index)
         : base(
@@ -238,7 +247,8 @@ public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
     public ExecutableStorageObjectRoute Storage => PhysicalSchemaOperationStorage.Resolve(Route, Index.Target);
 }
 
-public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IProviderMaterializationOperation
+public sealed class BackfillCanonicalJsonOperation
+    : PhysicalSchemaOperation, IProviderMaterializationOperation, IRedefinablePhysicalSchemaOperation
 {
     internal BackfillCanonicalJsonOperation(
         ExecutableStorageRoute route,

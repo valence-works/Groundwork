@@ -201,6 +201,12 @@ public static class PhysicalSchemaDiffPlanner
             var slot = current.SlotIdentity;
             if (desiredBySlot.TryGetValue(slot, out var replacement))
             {
+                // Derived state may be redefined in place: reapplying the operation rebuilds it from the
+                // desired definition, so the database converges rather than diverging. Structure that holds
+                // data may not, because changing it is a migration rather than a redefinition.
+                if (replacement is IRedefinablePhysicalSchemaOperation)
+                    continue;
+
                 diagnostics.Add(GroundworkDiagnostic.Error(
                     "GW-SCHEMA-003",
                     $"Applied operation '{current.Identity}' conflicts with changed definition '{replacement.Identity}'. #44 supports additive diffs only.",
