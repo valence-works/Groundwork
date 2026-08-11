@@ -161,6 +161,9 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
         $"({string.Join(", ", index.Columns.Select(column => $"{Q(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"))})" +
         (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
 
+    public override string DropIndexSql(string table, string index) =>
+        $"DROP INDEX {Q(index)} ON {Q(table)};";
+
     public override string UpsertLinkedSql(
         string table,
         IReadOnlyList<string> columns,

@@ -1186,6 +1186,27 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     }
 
     [Fact]
+    public Task WideningANullExcludingIndexRebuildsItWithoutItsFilter() =>
+        RelationalPhysicalServerAssertions.WideningANullExcludingIndexRebuildsItWithoutItsFilterAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            () => new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString()),
+            ReadIndexFilterAsync);
+
+    private async Task<string?> ReadIndexFilterAsync(string table, string index)
+    {
+        await using var connection = new NpgsqlConnection(container.GetConnectionString());
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT pg_get_expr(i.indpred, i.indrelid) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid " +
+            "JOIN pg_class t ON t.oid = i.indrelid WHERE c.relname = @index AND t.relname = @table;";
+        command.Parameters.AddWithValue("@table", table);
+        command.Parameters.AddWithValue("@index", index);
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    [Fact]
     public Task NullableUniqueProjectionUsesPortableNullDistinctSemantics() =>
         RelationalPhysicalServerAssertions.NullableUniqueProjectionUsesPortableNullDistinctSemanticsAsync(
             PostgreSqlGroundworkCapabilities.Provider,

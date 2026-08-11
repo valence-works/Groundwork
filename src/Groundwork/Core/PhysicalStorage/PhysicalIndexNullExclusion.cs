@@ -25,13 +25,17 @@ public static class PhysicalIndexNullExclusion
     /// The ordered key columns whose missing values <paramref name="index"/> excludes rows for, or empty
     /// when it indexes every row. Only nullable projected columns can be excluded: a non-nullable column
     /// is always present, so filtering on it would restrict nothing while making the filter harder to
-    /// match.
+    /// match. <paramref name="missingValueBehavior"/> overrides the declared behavior, which lets a caller
+    /// ask what an index excluded under a definition it no longer carries.
     /// </summary>
-    public static string[] Columns(ExecutableStorageRoute route, ExecutablePhysicalIndexRoute index)
+    public static string[] Columns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        MissingValueBehavior? missingValueBehavior = null)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(index);
-        if (index.MissingValueBehavior != MissingValueBehavior.Excluded)
+        if ((missingValueBehavior ?? index.MissingValueBehavior) != MissingValueBehavior.Excluded)
             return [];
         var indexed = index.Columns.Select(column => column.Column.Identifier).ToHashSet(StringComparer.Ordinal);
         return route.ProjectedColumns

@@ -153,7 +153,7 @@ public sealed class MaterializationPlannerTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var physicalStorage = new StorageUnitPhysicalStorage(
             StorageUnitProvisioningMode.Declared,
             PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(

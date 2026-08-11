@@ -1391,7 +1391,7 @@ public sealed class MongoDbPhysicalStorageModelTests
             [new IndexField("enabled")],
             IndexValueKind.Boolean,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-enabled",
             logical.Identity,
@@ -1423,7 +1423,7 @@ public sealed class MongoDbPhysicalStorageModelTests
             [new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "history-by-created-at",
             logicalIndex.Identity,
@@ -1499,7 +1499,7 @@ public sealed class MongoDbPhysicalStorageModelTests
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "find-by-id",
             logicalIndex.Identity,
@@ -1554,7 +1554,7 @@ public sealed class MongoDbPhysicalStorageModelTests
             [new IndexField("status"), new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "find-by-status-id",
             logicalIndex.Identity,

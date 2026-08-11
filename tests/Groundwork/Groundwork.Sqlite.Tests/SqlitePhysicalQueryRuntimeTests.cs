@@ -881,7 +881,7 @@ public sealed class SqlitePhysicalQueryRuntimeTests
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "find-by-id",
             logicalIndex.Identity,
@@ -1179,9 +1179,9 @@ public sealed class SqlitePhysicalQueryRuntimeTests
         var template = SqliteTestManifests.MetadataManifest();
         var logicalIndexes = new[]
         {
-            new LogicalIndexDeclaration("by-score", [new IndexField("score")], IndexValueKind.Number, false, MissingValueBehavior.Excluded),
-            new LogicalIndexDeclaration("by-enabled", [new IndexField("enabled")], IndexValueKind.Boolean, false, MissingValueBehavior.Excluded),
-            new LogicalIndexDeclaration("by-occurred-at", [new IndexField("occurredAt")], IndexValueKind.DateTime, false, MissingValueBehavior.Excluded)
+            new LogicalIndexDeclaration("by-score", [new IndexField("score")], IndexValueKind.Number, false, MissingValueBehavior.IncludedAsNull),
+            new LogicalIndexDeclaration("by-enabled", [new IndexField("enabled")], IndexValueKind.Boolean, false, MissingValueBehavior.IncludedAsNull),
+            new LogicalIndexDeclaration("by-occurred-at", [new IndexField("occurredAt")], IndexValueKind.DateTime, false, MissingValueBehavior.IncludedAsNull)
         };
         var comparableOperations = new HashSet<PortableQueryOperation>
         {
@@ -1238,7 +1238,7 @@ public sealed class SqlitePhysicalQueryRuntimeTests
             [new IndexField("value")],
             logicalKind,
             isUnique,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "by-value",
             logical.Identity,

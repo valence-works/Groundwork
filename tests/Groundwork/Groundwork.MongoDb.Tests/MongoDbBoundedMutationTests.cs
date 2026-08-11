@@ -1666,7 +1666,7 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             logical.Identity,
@@ -1797,7 +1797,7 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "prune-by-authorization-expiry",
             logical.Identity,
@@ -1873,7 +1873,7 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
             [new IndexField("schemaVersion")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-schema-version",
             logicalIndex.Identity,
@@ -1920,7 +1920,7 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
                 : [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var physicalIndex = new PhysicalIndexDefinition(
             logicalIndex.Identity,
             [

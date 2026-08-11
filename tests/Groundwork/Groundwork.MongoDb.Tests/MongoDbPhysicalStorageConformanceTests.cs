@@ -3310,6 +3310,43 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             actual["partialFilterExpression"].AsBsonDocument);
     }
 
+    /// <summary>
+    /// Widening an applied index to keep documents with no value is additive, but row exclusion is a
+    /// partial filter expression, so creating the index reports the change as a conflict rather than
+    /// applying it. The plan has to rebuild the index, and the filter has to be gone afterwards.
+    /// </summary>
+    [Fact]
+    public async Task Widening_a_partially_filtered_index_rebuilds_it_without_its_filter()
+    {
+        var database = Database();
+        var narrow = Model(PhysicalStorageForm.PhysicalEntityTable, isNullable: true);
+        var widened = Model(
+            PhysicalStorageForm.PhysicalEntityTable,
+            isNullable: true,
+            missingValueBehavior: MissingValueBehavior.IncludedAsNull);
+        await PhysicalSchemaApplication.ApplyAsync(narrow.Target, new MongoDbPhysicalSchemaExecutor(database));
+        var route = widened.Target.Routes.Single();
+        var index = Assert.Single(route.Indexes);
+        var collection = database.GetCollection<BsonDocument>(route.PrimaryStorage.Name.Identifier);
+        Assert.True((await ReadIndexAsync(collection, index.Name.Identifier))!.Contains("partialFilterExpression"));
+
+        var result = await PhysicalSchemaApplication.ApplyAsync(
+            widened.Target,
+            new MongoDbPhysicalSchemaExecutor(database));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Outcome);
+        Assert.Single(result.Plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.False((await ReadIndexAsync(collection, index.Name.Identifier))!.Contains("partialFilterExpression"));
+        var restart = await PhysicalSchemaApplication.ApplyAsync(
+            widened.Target,
+            new MongoDbPhysicalSchemaExecutor(database));
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, restart.Outcome);
+    }
+
+    private static async Task<BsonDocument?> ReadIndexAsync(IMongoCollection<BsonDocument> collection, string name) =>
+        (await (await collection.Indexes.ListAsync()).ToListAsync())
+        .SingleOrDefault(document => document["name"].AsString == name);
+
     [Fact]
     public async Task Included_as_null_omits_partial_membership_and_collapses_missing_with_null()
     {
@@ -3429,7 +3466,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         string? defaultValue = null,
         string? collation = null,
         bool isUnique = false,
-        MissingValueBehavior missingValueBehavior = MissingValueBehavior.Excluded,
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull,
         StringIdentityCasePolicy identityCasePolicy = StringIdentityCasePolicy.Ordinal,
         QueryPagingSupport pagingSupport = QueryPagingSupport.Offset,
         ProjectionCardinality cardinality = ProjectionCardinality.Scalar,
@@ -3532,7 +3569,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all-by-id",
             index.Identity,
@@ -3616,7 +3653,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 [new IndexField("category")],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.Excluded)
+                MissingValueBehavior.IncludedAsNull)
         };
         var queries = new List<BoundedQueryDeclaration>
         {
@@ -3636,7 +3673,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 [new IndexField("tags")],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.Excluded));
+                MissingValueBehavior.IncludedAsNull));
             queries.Add(new BoundedQueryDeclaration(
                 "list-by-tags",
                 "by-tags",
@@ -3716,7 +3753,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         var projected = new ProjectedColumnDefinition(path, path, PortablePhysicalType.String);
         var definition = PhysicalTableDefinition.PhysicalEntityTable("work_items", [projected], indexes: []);
         var logical = new LogicalIndexDeclaration(
-            $"by-{path}", [new IndexField(path)], IndexValueKind.Keyword, false, MissingValueBehavior.Excluded);
+            $"by-{path}", [new IndexField(path)], IndexValueKind.Keyword, false, MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             $"list-by-{path}",
             logical.Identity,
@@ -3785,7 +3822,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             [new IndexField("category"), new IndexField("priority", IndexValueKind.Number)],
             IndexValueKind.String,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "latest-by-category",
             logical.Identity,
@@ -3905,7 +3942,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-status",
             logical.Identity,
@@ -3953,7 +3990,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             }
             : [];
         var logical = new LogicalIndexDeclaration(
-            "by-status", [new IndexField("status")], IndexValueKind.Keyword, uniqueStatus, MissingValueBehavior.Excluded);
+            "by-status", [new IndexField("status")], IndexValueKind.Keyword, uniqueStatus, MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-status", logical.Identity,
             new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
@@ -4024,7 +4061,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
                 new PhysicalIndexColumnDefinition("status", 1)
             ],
-            isUnique: true);
+            isUnique: true,
+                    missingValueBehavior: MissingValueBehavior.Excluded);
         var definition = PhysicalTableDefinition.SharedDocuments(
             binding,
             includeCategory ? [status, category] : [status],

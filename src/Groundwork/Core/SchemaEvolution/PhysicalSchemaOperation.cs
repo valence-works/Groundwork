@@ -17,6 +17,7 @@ public enum PhysicalSchemaOperationKind
     AddProjectedColumn,
     FinalizeProjectedColumn,
     CreatePhysicalIndex,
+    RebuildPhysicalIndex,
     BackfillCanonicalJson,
     ApplyProviderDefinition,
     ValidatePhysicalSchema,
@@ -82,6 +83,18 @@ public abstract class PhysicalSchemaOperation
     /// independent slots.
     /// </summary>
     public string SlotIdentity { get; }
+
+    /// <summary>
+    /// The already-applied operation this one may legally replace in its slot, or <see langword="null"/>
+    /// when replacing anything in the slot is a non-additive conflict.
+    /// </summary>
+    /// <remarks>
+    /// It is the same operation canonicalized under the strictly narrower definition it supersedes, so
+    /// the match is payload-exact: a widening combined with any other change does not produce it and is
+    /// still rejected. Derived from the target alone, it is a comparison-only object — never planned,
+    /// executed, acknowledged, or recorded.
+    /// </remarks>
+    internal PhysicalSchemaOperation? Superseded { get; private protected init; }
 
     internal static string CreateIdentity(
         PhysicalSchemaOperationKind kind,
@@ -218,14 +231,40 @@ public sealed class FinalizeProjectedColumnOperation : PhysicalSchemaOperation
     public ExecutableStorageObjectRoute Storage => PhysicalSchemaOperationStorage.Resolve(Route, Column.Target);
 }
 
-public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
+/// <summary>
+/// One operation that brings a physical index into being. Providers execute creation and rebuilding
+/// through the same route, index, and storage, so they match this rather than each concrete kind.
+/// </summary>
+public interface IPhysicalIndexOperation
+{
+    ExecutableStorageRoute Route { get; }
+
+    ExecutablePhysicalIndexRoute Index { get; }
+
+    ExecutableStorageObjectRoute Storage { get; }
+}
+
+public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation, IPhysicalIndexOperation
 {
     internal CreatePhysicalIndexOperation(ExecutableStorageRoute route, ExecutablePhysicalIndexRoute index)
+        : this(route, index, index.MissingValueBehavior)
+    {
+        // An index that keeps every row keeps every row the same index kept while it excluded those
+        // with no value, so it can serve every predicate the applied one served. That widening is the
+        // one redefinition this slot admits; nothing else about the index may move with it.
+        if (index.MissingValueBehavior == MissingValueBehavior.IncludedAsNull)
+            Superseded = new CreatePhysicalIndexOperation(route, index, MissingValueBehavior.Excluded);
+    }
+
+    private CreatePhysicalIndexOperation(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        MissingValueBehavior missingValueBehavior)
         : base(
             PhysicalSchemaOperationKind.CreatePhysicalIndex,
             route.StorageUnit,
             index.Identity,
-            PhysicalSchemaOperationCanonicalizer.Index(index))
+            PhysicalSchemaOperationCanonicalizer.Index(index, missingValueBehavior))
     {
         Route = route;
         Index = index;
@@ -238,6 +277,44 @@ public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
     public ExecutableStorageObjectRoute Storage => PhysicalSchemaOperationStorage.Resolve(Route, Index.Target);
 }
 
+/// <summary>
+/// Replaces an applied physical index with the widened definition that supersedes it.
+/// </summary>
+/// <remarks>
+/// <see cref="MissingValueBehavior.Excluded"/> is realised as a filtered or partial index, so widening it
+/// is not something index creation can reach: the object already exists under the wrong predicate. The
+/// planner emits this in place of the ordinary create so the drop is a plan step an operator authorizes
+/// rather than a repair hidden inside creation, and only where the applied index carries a predicate the
+/// target no longer wants — widening an index that keys no nullable column changes nothing physical.
+/// </remarks>
+public sealed class RebuildPhysicalIndexOperation : PhysicalSchemaOperation, IPhysicalIndexOperation
+{
+    internal RebuildPhysicalIndexOperation(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        string supersededFingerprint)
+        : base(
+            PhysicalSchemaOperationKind.RebuildPhysicalIndex,
+            route.StorageUnit,
+            index.Identity,
+            PhysicalSchemaOperationCanonicalizer.Index(index),
+            supersededFingerprint)
+    {
+        Route = route;
+        Index = index;
+        SupersededFingerprint = supersededFingerprint;
+    }
+
+    public ExecutableStorageRoute Route { get; }
+
+    public ExecutablePhysicalIndexRoute Index { get; }
+
+    public ExecutableStorageObjectRoute Storage => PhysicalSchemaOperationStorage.Resolve(Route, Index.Target);
+
+    /// <summary>Fingerprint of the applied index definition this rebuild replaces.</summary>
+    public string SupersededFingerprint { get; }
+}
+
 public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IProviderMaterializationOperation
 {
     internal BackfillCanonicalJsonOperation(
@@ -246,7 +323,8 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
         CanonicalJsonBackfillSubjectKind subjectKind,
         string subjectIdentity,
         IReadOnlyList<string> sourcePaths,
-        string subjectFingerprint)
+        string subjectFingerprint,
+        string? supersededSubjectFingerprint = null)
         : this(
             route.StorageUnit,
             route,
@@ -257,6 +335,21 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
             [subjectFingerprint],
             null)
     {
+        // This backfill names the definition it reconciles, so its own fingerprint moves whenever that
+        // subject's does. A superseded subject therefore has to carry its dependent backfill with it, or
+        // the widening it licenses would still collide here.
+        if (supersededSubjectFingerprint is not null)
+        {
+            Superseded = new BackfillCanonicalJsonOperation(
+                route.StorageUnit,
+                route,
+                target,
+                subjectKind,
+                subjectIdentity,
+                sourcePaths,
+                [supersededSubjectFingerprint],
+                null);
+        }
     }
 
     internal BackfillCanonicalJsonOperation(
@@ -668,14 +761,21 @@ internal static class PhysicalSchemaOperationCanonicalizer
         column.Definition.DefaultValue,
         column.Definition.RebuildMode.ToString());
 
-    public static string Index(ExecutablePhysicalIndexRoute index) => string.Join(
+    /// <summary>
+    /// One physical index's canonical semantic payload. <paramref name="missingValueBehavior"/> overrides
+    /// the declared behavior so an operation can also canonicalize the narrower definition it supersedes;
+    /// the emitted format is identical either way and must stay byte-stable.
+    /// </summary>
+    public static string Index(
+        ExecutablePhysicalIndexRoute index,
+        MissingValueBehavior? missingValueBehavior = null) => string.Join(
         '\u001f',
         new string?[]
             {
                 index.Name.Identifier,
                 index.Target.ToString(),
                 index.IsUnique.ToString(CultureInfo.InvariantCulture),
-                index.MissingValueBehavior.ToString(),
+                (missingValueBehavior ?? index.MissingValueBehavior).ToString(),
                 index.Definition.SchemaVersion.ToString(CultureInfo.InvariantCulture),
                 index.Definition.Evolution?.RequiresBackfill.ToString(CultureInfo.InvariantCulture),
                 index.Definition.Evolution?.IsDestructive.ToString(CultureInfo.InvariantCulture),

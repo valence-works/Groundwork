@@ -821,8 +821,11 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
                 $"'{plan.IndexName.Identifier}', which declares MissingValueBehavior.Excluded and so omits " +
                 $"rows whose {string.Join(" or ", unproven.Select(column => $"'{column}'"))} is null. Its " +
                 "predicate can match those rows, so the index cannot serve the query without dropping " +
-                "them. Declare the index MissingValueBehavior.IncludedAsNull so it keeps every row, bind " +
-                "the query to an index that keys no nullable column, or make the column non-nullable.");
+                "them. Declare the index MissingValueBehavior.IncludedAsNull so it keeps every row — an " +
+                "already-applied index is rebuilt under it, which is additive. A unique index that keys a " +
+                "nullable column cannot take that route, because null-distinct uniqueness is not portable " +
+                "(GW-ROUTE-007); bind the query to an index that keys no nullable column, make the column " +
+                "non-nullable, or declare a new index identity for the shape the query needs.");
         }
         return (null, []);
     }

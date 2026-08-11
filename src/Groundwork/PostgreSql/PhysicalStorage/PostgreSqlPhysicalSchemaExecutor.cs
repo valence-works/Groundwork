@@ -135,6 +135,8 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
             (column.Direction == PhysicalSortDirection.Descending ? "DESC NULLS LAST" : "ASC NULLS FIRST")))})" +
         (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
 
+    public override string DropIndexSql(string table, string index) => $"DROP INDEX {Q(index)};";
+
     public override string UpsertLinkedSql(
         string table,
         IReadOnlyList<string> columns,
