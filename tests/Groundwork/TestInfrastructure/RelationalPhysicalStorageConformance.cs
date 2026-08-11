@@ -241,7 +241,7 @@ public abstract class RelationalPhysicalStorageConformance
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all-by-id",
             index.Identity,

@@ -574,7 +574,7 @@ public static class DocumentIdentityAcceptanceModel
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var exactQuery = new BoundedQueryDeclaration(
             ExactQueryIdentity,
             exactIndexIdentity,
@@ -593,7 +593,7 @@ public static class DocumentIdentityAcceptanceModel
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var rangeQuery = new BoundedQueryDeclaration(
             RangeQueryIdentity,
             orderedIndexIdentity,
@@ -621,7 +621,7 @@ public static class DocumentIdentityAcceptanceModel
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var statusQuery = new BoundedQueryDeclaration(
             StatusQueryIdentity,
             statusIndexIdentity,

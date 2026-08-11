@@ -106,7 +106,7 @@ public sealed class SqlitePhysicalNameNormalizerTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var projectedColumn = new ProjectedColumnDefinition(
             "category",
             "category",

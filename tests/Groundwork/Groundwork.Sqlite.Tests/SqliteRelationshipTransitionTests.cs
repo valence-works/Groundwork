@@ -714,7 +714,7 @@ public sealed class SqliteRelationshipTransitionTests
             [new IndexField("authorizationId")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var authorization = StorageUnit.Create(
             new StorageUnitIdentity("authorization"),
             "Authorization",
@@ -737,7 +737,8 @@ public sealed class SqliteRelationshipTransitionTests
                                 new PhysicalIndexColumnDefinition("storage_scope", 0),
                                 new PhysicalIndexColumnDefinition("id_comparison_key", 1)
                             ],
-                            isUnique: true)
+                            isUnique: true,
+                    missingValueBehavior: MissingValueBehavior.Excluded)
                     ])),
                 [authorizationId]));
         var token = StorageUnit.Create(

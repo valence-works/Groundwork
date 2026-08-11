@@ -2091,7 +2091,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                 [new IndexField("permissions")],
                 collectionLogicalValueKind,
                 false,
-                MissingValueBehavior.Excluded);
+                MissingValueBehavior.IncludedAsNull);
             logicalIndexes.Add(permissions);
             boundedQueries.Add(new BoundedQueryDeclaration(
                 "list-by-permissions",

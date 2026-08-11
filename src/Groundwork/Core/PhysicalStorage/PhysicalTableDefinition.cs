@@ -110,7 +110,7 @@ public sealed class PhysicalIndexDefinition : IEquatable<PhysicalIndexDefinition
         int schemaVersion = 1,
         PhysicalEvolutionMetadata? evolution = null,
         PhysicalIndexStorageTarget target = PhysicalIndexStorageTarget.FormDefault,
-        MissingValueBehavior missingValueBehavior = MissingValueBehavior.Excluded)
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull)
     {
         LogicalName = logicalName;
         Columns = Array.AsReadOnly(columns?

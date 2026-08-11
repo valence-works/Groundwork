@@ -3429,7 +3429,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         string? defaultValue = null,
         string? collation = null,
         bool isUnique = false,
-        MissingValueBehavior missingValueBehavior = MissingValueBehavior.Excluded,
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull,
         StringIdentityCasePolicy identityCasePolicy = StringIdentityCasePolicy.Ordinal,
         QueryPagingSupport pagingSupport = QueryPagingSupport.Offset,
         ProjectionCardinality cardinality = ProjectionCardinality.Scalar,
@@ -3532,7 +3532,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all-by-id",
             index.Identity,
@@ -3616,7 +3616,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 [new IndexField("category")],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.Excluded)
+                MissingValueBehavior.IncludedAsNull)
         };
         var queries = new List<BoundedQueryDeclaration>
         {
@@ -3636,7 +3636,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 [new IndexField("tags")],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.Excluded));
+                MissingValueBehavior.IncludedAsNull));
             queries.Add(new BoundedQueryDeclaration(
                 "list-by-tags",
                 "by-tags",
@@ -3716,7 +3716,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         var projected = new ProjectedColumnDefinition(path, path, PortablePhysicalType.String);
         var definition = PhysicalTableDefinition.PhysicalEntityTable("work_items", [projected], indexes: []);
         var logical = new LogicalIndexDeclaration(
-            $"by-{path}", [new IndexField(path)], IndexValueKind.Keyword, false, MissingValueBehavior.Excluded);
+            $"by-{path}", [new IndexField(path)], IndexValueKind.Keyword, false, MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             $"list-by-{path}",
             logical.Identity,
@@ -3785,7 +3785,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             [new IndexField("category"), new IndexField("priority", IndexValueKind.Number)],
             IndexValueKind.String,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "latest-by-category",
             logical.Identity,
@@ -3905,7 +3905,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-status",
             logical.Identity,
@@ -3953,7 +3953,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             }
             : [];
         var logical = new LogicalIndexDeclaration(
-            "by-status", [new IndexField("status")], IndexValueKind.Keyword, uniqueStatus, MissingValueBehavior.Excluded);
+            "by-status", [new IndexField("status")], IndexValueKind.Keyword, uniqueStatus, MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-status", logical.Identity,
             new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
@@ -4024,7 +4024,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 new PhysicalIndexColumnDefinition("storage_scope", 0),
                 new PhysicalIndexColumnDefinition("status", 1)
             ],
-            isUnique: true);
+            isUnique: true,
+                    missingValueBehavior: MissingValueBehavior.Excluded);
         var definition = PhysicalTableDefinition.SharedDocuments(
             binding,
             includeCategory ? [status, category] : [status],

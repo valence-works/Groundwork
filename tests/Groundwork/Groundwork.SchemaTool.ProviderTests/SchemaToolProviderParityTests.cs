@@ -732,7 +732,7 @@ public sealed class SchemaToolProviderParityTests
                 [new IndexField("category", IndexValueKind.Keyword)],
                 IndexValueKind.Keyword,
                 isUnique: false,
-                MissingValueBehavior.Excluded);
+                MissingValueBehavior.IncludedAsNull);
             var query = new BoundedQueryDeclaration(
                 "list-by-category",
                 indexIdentity,
@@ -786,7 +786,7 @@ public sealed class SchemaToolProviderParityTests
                     new PhysicalIndexColumnDefinition("storage_scope", 0),
                     new PhysicalIndexColumnDefinition("category", 1)
                 ],
-                missingValueBehavior: MissingValueBehavior.Excluded)
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull)
         };
         if (includePriority)
         {
@@ -797,7 +797,7 @@ public sealed class SchemaToolProviderParityTests
                     new PhysicalIndexColumnDefinition("storage_scope", 0),
                     new PhysicalIndexColumnDefinition("priority", 1)
                 ],
-                missingValueBehavior: MissingValueBehavior.Excluded));
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull));
         }
         var definition = PhysicalTableDefinition.PhysicalEntityTable(
             table,
