@@ -37,6 +37,7 @@ internal static class RelationalPhysicalStorageTestModels
         IProviderPhysicalNameNormalizer? normalizer = null,
         bool categoryUnique = false,
         bool categoryNullable = false,
+        IReadOnlySet<PortableQueryOperation>? categoryOperations = null,
         string documentKind = "configurationDocument",
         Func<PhysicalNameContext, string>? namePolicy = null,
         RelationalMutationScenarioOptions? mutationOptions = null,
@@ -148,7 +149,7 @@ internal static class RelationalPhysicalStorageTestModels
         var boundedQuery = new BoundedQueryDeclaration(
             "list-by-category",
             logicalIndex.Identity,
-            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            categoryOperations ?? new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
             QuerySortSupport.Ascending,
             categoryPaging,
             BoundedQueryExecutionClass.ScaleBearing,

@@ -8,6 +8,7 @@ using Groundwork.Documents.Scoping;
 using Groundwork.Provider.Relational;
 using Groundwork.Relational.Documents;
 using Groundwork.Relational.Physicalization;
+using Groundwork.Relational.PhysicalStorage;
 using Groundwork.SqlServer.PhysicalStorage;
 using Microsoft.Data.SqlClient;
 
@@ -218,6 +219,18 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
         indexIdentifier is null
             ? $"{QuoteIdentifier(tableIdentifier)} AS {alias}"
             : $"{QuoteIdentifier(tableIdentifier)} AS {alias} WITH (INDEX({QuoteIdentifier(indexIdentifier)}))";
+
+    /// <summary>
+    /// A unique index over a nullable column carries a <c>WHERE column IS NOT NULL</c> filter, because
+    /// SQL Server unique indexes treat nulls as equal to one another. The filter is what makes the
+    /// uniqueness semantics portable, but it also removes those rows from the index — so pinning it is
+    /// only sound for a predicate that provably rejects nulls on every filtered column. This must stay
+    /// in step with <c>SqlServerPhysicalSchemaDialect.IndexFilter</c>, which decides the filter itself.
+    /// </summary>
+    public override IReadOnlyList<string> HintedIndexNullExcludedColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index) =>
+        index.IsUnique ? RelationalPhysicalIndexNullExclusion.Columns(route, index) : [];
 
     public override string MutationQuerySource(string tableIdentifier, string alias, string? indexIdentifier)
     {

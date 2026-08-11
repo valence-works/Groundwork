@@ -101,6 +101,33 @@ identity operations is rejected with an explicit unsupported-shape diagnostic; t
 choose an automatic synthesized index order for that mixed demand, and automatic index synthesis
 otherwise remains unchanged.
 
+## Pinning an index that excludes null rows
+
+Some providers pin the planned index into the emitted statement — SQL Server as `WITH (INDEX(...))`,
+SQLite as `INDEXED BY`. Some indexes also exclude rows rather than merely ordering them: SQL Server
+gives a unique index over a nullable column a `WHERE column IS NOT NULL` filter, because its unique
+indexes treat nulls as equal to one another, so the filter is what keeps the declared uniqueness
+semantics portable. Where both hold, pinning is only sound for a predicate that cannot match the
+excluded rows.
+
+The pin is therefore decided per invocation, from the predicate rather than from the plan alone. A
+clause proves a column non-null only when *every* alternative in that disjunction rejects nulls on
+it. Equality against a non-null value, inequality, the range operations, `StartsWith` and `Contains`
+all reject nulls; equality against a null value renders `IS NULL` and does not, and `NotContains` does
+not, because it is defined to match a null or absent field.
+
+When the predicate proves every excluded column non-null, the query keeps its pin and carries an
+`IS NOT NULL` conjunct per excluded column. Those conjuncts are redundant by construction — they are
+only emitted where the predicate already rejects nulls — and exist so the provider can match the
+index's own filter. SQL Server's filtered-index matching reasons over simple comparison forms and
+cannot see through an expression such as `LOWER(column) LIKE @p`, so without the conjunct it refuses
+to produce a plan at all.
+
+When the predicate does not prove it, the index would drop rows the query can match. A scale-bearing
+query is refused by name rather than degraded to a scan; any other query drops the pin and leaves the
+choice to the optimizer. Providers that never pin an index, or never exclude nulls from one, are
+unaffected: PostgreSQL emits no pin and no index filter, and SQLite emits no partial index.
+
 ## Isolation and failure rules
 
 Every plan contains a mandatory scope field and the scoped/global-sentinel policy compiled from the

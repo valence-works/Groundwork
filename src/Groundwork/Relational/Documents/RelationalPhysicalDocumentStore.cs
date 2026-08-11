@@ -193,6 +193,15 @@ public abstract class RelationalPhysicalDocumentDialect
         $"{fieldExpression} {(direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}";
     public virtual string QuerySource(string tableIdentifier, string alias, string? indexIdentifier) =>
         $"{QuoteIdentifier(tableIdentifier)} {alias}";
+    /// <summary>
+    /// The key columns that <paramref name="index"/> excludes null rows from, when this provider pins
+    /// the index for a query. A pinned index that excludes nulls only serves predicates that provably
+    /// reject them; the query builder uses this to decide whether the pin is honourable. Providers that
+    /// never pin an index, or never exclude nulls from one, return the empty default.
+    /// </summary>
+    public virtual IReadOnlyList<string> HintedIndexNullExcludedColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index) => [];
     public virtual string MutationQuerySource(string tableIdentifier, string alias, string? indexIdentifier) =>
         QuerySource(tableIdentifier, alias, indexIdentifier);
     public virtual string CompleteMutationSelection(string selectSql, bool includesLinkedStorage) => selectSql;
@@ -938,6 +947,10 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         dialect.OrderExpression(field, direction);
     internal string PhysicalQuerySource(string table, string alias, string? index) =>
         dialect.QuerySource(table, alias, index);
+    internal IReadOnlyList<string> HintedIndexNullExcludedColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index) =>
+        dialect.HintedIndexNullExcludedColumns(route, index);
     internal string PhysicalMutationQuerySource(string table, string alias, string? index) =>
         dialect.MutationQuerySource(table, alias, index);
     internal string CompleteMutationSelection(string selectSql, bool includesLinkedStorage) =>
