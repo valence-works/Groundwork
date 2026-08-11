@@ -27,7 +27,8 @@ internal static class NullExcludedIndexScenario
         IProviderPhysicalNameNormalizer normalizer,
         bool unique,
         bool nullable,
-        DocumentQueryComparison comparison) =>
+        DocumentQueryComparison comparison,
+        MissingValueBehavior missingValues = MissingValueBehavior.Excluded) =>
         RelationalPhysicalStorageTestModels.Create(
             form,
             provider,
@@ -36,7 +37,10 @@ internal static class NullExcludedIndexScenario
             normalizer: normalizer,
             categoryUnique: unique,
             categoryNullable: nullable,
-            categoryOperations: Operations(comparison.Operator));
+            categoryOperations: Operations(comparison.Operator),
+            // Row exclusion is stated here rather than inferred from uniqueness, which is the whole
+            // point: uniqueness and row visibility are independent choices.
+            categoryMissingValues: missingValues);
 
     /// <summary>Equality is always declared so the route stays admissible; the operator under test joins it.</summary>
     private static IReadOnlySet<PortableQueryOperation> Operations(QueryComparisonOperator @operator) =>

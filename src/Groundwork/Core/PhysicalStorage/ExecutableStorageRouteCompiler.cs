@@ -1,3 +1,4 @@
+using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Scoping;
 using Groundwork.Core.Text;
@@ -33,8 +34,10 @@ public static class ExecutableStorageRouteCompiler
         foreach (var definition in definitions.OrderBy(x => x.Resolved.StorageUnit.Value, StringComparer.Ordinal))
         {
             var route = CompileOne(definition, diagnostics);
-            if (route is not null)
-                routes.Add(route);
+            if (route is null)
+                continue;
+            ValidateMissingValuePortability(route, diagnostics);
+            routes.Add(route);
         }
 
         return diagnostics.Any(diagnostic => diagnostic.IsError)
@@ -798,6 +801,33 @@ public static class ExecutableStorageRouteCompiler
 
     private static string PhysicalObjectIdentity(ProviderPhysicalObjectName name) =>
         $"{name.NamingOwner.Value}|{name.ObjectKind}|{name.FeatureDefaultLogicalName}|{name.LogicalName}";
+
+    /// <summary>
+    /// Rejects a uniqueness constraint whose meaning depends on which provider runs it.
+    /// </summary>
+    /// <remarks>
+    /// A unique index that keeps rows with no value has to decide whether two such rows collide, and the
+    /// providers disagree: SQL Server and MongoDB treat them as equal, so only one may exist, while
+    /// PostgreSQL and SQLite treat them as distinct and allow any number — and SQLite has no way to say
+    /// otherwise. Accepting the declaration would mean the same manifest enforces a constraint on one
+    /// deployment and not on another, which is exactly the class of divergence this rule exists to stop.
+    /// </remarks>
+    private static void ValidateMissingValuePortability(
+        ExecutableStorageRoute route,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        foreach (var index in route.Indexes.Where(index => PhysicalIndexNullExclusion.HasNonPortableUniqueness(route, index)))
+        {
+            diagnostics.Add(Error(
+                "GW-ROUTE-007",
+                $"Unique index '{index.Identity}' keys a nullable column and declares " +
+                $"'{nameof(MissingValueBehavior.IncludedAsNull)}', so whether two rows without a value " +
+                "collide would differ by provider. Declare " +
+                $"'{nameof(MissingValueBehavior.Excluded)}' to constrain only rows that have the value, " +
+                "make the column non-nullable, or drop the uniqueness.",
+                $"physicalRoutes.{route.StorageUnit.Value}.indexes.{index.Identity}"));
+        }
+    }
 
     private static GroundworkDiagnostic Error(string code, string message, string target) =>
         GroundworkDiagnostic.Error(code, message, target);

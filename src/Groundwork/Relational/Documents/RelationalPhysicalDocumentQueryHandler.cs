@@ -818,11 +818,11 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         {
             throw new InvalidOperationException(
                 $"Document query '{query.QueryIdentity}' is scale-bearing on physical index " +
-                $"'{plan.IndexName.Identifier}', which excludes rows whose " +
-                $"{string.Join(" or ", unproven.Select(column => $"'{column}'"))} is null. Its predicate can " +
-                "match those rows, so the index cannot serve the query without dropping them. Bind the " +
-                "query to an index that keys no nullable column, declare the index non-unique so it " +
-                "carries no null-excluding filter, or make the column non-nullable.");
+                $"'{plan.IndexName.Identifier}', which declares MissingValueBehavior.Excluded and so omits " +
+                $"rows whose {string.Join(" or ", unproven.Select(column => $"'{column}'"))} is null. Its " +
+                "predicate can match those rows, so the index cannot serve the query without dropping " +
+                "them. Declare the index MissingValueBehavior.IncludedAsNull so it keeps every row, bind " +
+                "the query to an index that keys no nullable column, or make the column non-nullable.");
         }
         return (null, []);
     }

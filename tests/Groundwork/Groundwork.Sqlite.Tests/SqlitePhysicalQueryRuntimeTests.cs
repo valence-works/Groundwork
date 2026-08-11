@@ -1091,7 +1091,7 @@ public sealed class SqlitePhysicalQueryRuntimeTests
             [new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "history-by-created-at",
             logicalIndex.Identity,
@@ -1146,7 +1146,8 @@ public sealed class SqlitePhysicalQueryRuntimeTests
                             0,
                             PhysicalSortDirection.Descending),
                         new PhysicalIndexColumnDefinition("id_lookup_key", 1)
-                    ])
+                    ],
+                    missingValueBehavior: MissingValueBehavior.IncludedAsNull)
             ]);
         var unit = template.StorageUnits.Single() with
         {

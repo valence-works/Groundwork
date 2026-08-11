@@ -1,4 +1,5 @@
 using Groundwork.Core.Capabilities;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Queries;
 using Groundwork.Core.SchemaEvolution;
@@ -704,7 +705,11 @@ internal static class RelationalPhysicalServerAssertions
             includePriority: false,
             normalizer: normalizer,
             categoryUnique: true,
-            categoryNullable: true);
+            categoryNullable: true,
+            // Null-distinct uniqueness is exactly what Excluded means: the constraint applies only to
+            // rows that have a value, so any number of rows may have none. It used to fall out of a
+            // SQL Server implementation detail; now it is declared, and portable because of that.
+            categoryMissingValues: MissingValueBehavior.Excluded);
         await PhysicalSchemaApplication.ApplyAsync(model.Target, createExecutor());
         var store = createStore(model.Manifest, model.Target.Routes);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(

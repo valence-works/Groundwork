@@ -221,16 +221,14 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
             : $"{QuoteIdentifier(tableIdentifier)} AS {alias} WITH (INDEX({QuoteIdentifier(indexIdentifier)}))";
 
     /// <summary>
-    /// A unique index over a nullable column carries a <c>WHERE column IS NOT NULL</c> filter, because
-    /// SQL Server unique indexes treat nulls as equal to one another. The filter is what makes the
-    /// uniqueness semantics portable, but it also removes those rows from the index — so pinning it is
-    /// only sound for a predicate that provably rejects nulls on every filtered column. This must stay
-    /// in step with <c>SqlServerPhysicalSchemaDialect.IndexFilter</c>, which decides the filter itself.
+    /// An index declared <see cref="MissingValueBehavior.Excluded"/> is emitted with a filter that drops
+    /// rows without a value, so pinning it is only sound for a predicate that provably rejects nulls on
+    /// every excluded column.
     /// </summary>
     public override IReadOnlyList<string> HintedIndexNullExcludedColumns(
         ExecutableStorageRoute route,
         ExecutablePhysicalIndexRoute index) =>
-        index.IsUnique ? RelationalPhysicalIndexNullExclusion.Columns(route, index) : [];
+        PhysicalIndexNullExclusion.Columns(route, index);
 
     public override string MutationQuerySource(string tableIdentifier, string alias, string? indexIdentifier)
     {

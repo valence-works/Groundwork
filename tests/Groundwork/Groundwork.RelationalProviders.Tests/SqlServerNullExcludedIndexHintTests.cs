@@ -34,21 +34,37 @@ public sealed class SqlServerNullExcludedIndexHintTests(
     : IClassFixture<SqlServerNullExcludedIndexContainer>
 {
     /// <summary>
-    /// The control. A non-unique index carries no filter, so the substring predicate is pinned exactly
-    /// as before and needs no implication conjunct. Proves the defect was never about sargability.
+    /// The control. An index declared <see cref="MissingValueBehavior.IncludedAsNull"/> carries no
+    /// filter, so the substring predicate is pinned exactly as before and needs no implication conjunct.
+    /// Proves the defect was never about sargability.
     /// </summary>
     [Theory]
     [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
     public Task Contains_on_an_unfiltered_index_is_pinned_without_an_implication_conjunct(
         PhysicalStorageForm form) =>
-        AssertPinnedAsync(form, unique: false, nullable: true, Contains(), expectFiltered: false);
+        AssertPinnedAsync(
+            form, unique: false, nullable: true, Contains(), expectFiltered: false,
+            missingValues: MissingValueBehavior.IncludedAsNull);
 
-    /// <summary>A unique index over a non-nullable column has nothing to exclude, so no filter exists.</summary>
+    /// <summary>
+    /// Uniqueness no longer decides whether rows are excluded, so a unique index that keeps every row
+    /// carries no filter either. This is the pairing that used to be impossible to express.
+    /// </summary>
     [Theory]
     [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
-    public Task Contains_on_a_unique_non_nullable_index_is_pinned_without_an_implication_conjunct(
+    public Task Contains_on_a_unique_index_that_keeps_every_row_carries_no_filter(
+        PhysicalStorageForm form) =>
+        AssertPinnedAsync(
+            form, unique: true, nullable: false, Contains(), expectFiltered: false,
+            missingValues: MissingValueBehavior.IncludedAsNull);
+
+    /// <summary>An index over a non-nullable column has nothing to exclude, whatever it declares.</summary>
+    [Theory]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    public Task Contains_on_a_non_nullable_index_is_pinned_without_an_implication_conjunct(
         PhysicalStorageForm form) =>
         AssertPinnedAsync(form, unique: true, nullable: false, Contains(), expectFiltered: false);
 
@@ -120,9 +136,10 @@ public sealed class SqlServerNullExcludedIndexHintTests(
         bool unique,
         bool nullable,
         DocumentQueryComparison comparison,
-        bool expectFiltered)
+        bool expectFiltered,
+        MissingValueBehavior missingValues = MissingValueBehavior.Excluded)
     {
-        var cell = await PrepareAsync(form, unique, nullable, comparison);
+        var cell = await PrepareAsync(form, unique, nullable, comparison, missingValues);
 
         // Read the filter off the catalog rather than assuming it. Together with the conjunct assertion
         // below this is the drift guard between the two sides that must agree: the schema executor
@@ -150,7 +167,8 @@ public sealed class SqlServerNullExcludedIndexHintTests(
         PhysicalStorageForm form,
         bool unique,
         bool nullable,
-        DocumentQueryComparison comparison)
+        DocumentQueryComparison comparison,
+        MissingValueBehavior missingValues = MissingValueBehavior.Excluded)
     {
         var model = NullExcludedIndexScenario.Create(
             form,
@@ -158,7 +176,8 @@ public sealed class SqlServerNullExcludedIndexHintTests(
             SqlServerGroundworkCapabilities.PhysicalNames,
             unique,
             nullable,
-            comparison);
+            comparison,
+            missingValues);
         var connectionString = fixture.Container.GetConnectionString();
         await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlServerPhysicalSchemaExecutor(connectionString));
         var store = new SqlServerPhysicalDocumentStore(
