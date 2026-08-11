@@ -13,7 +13,7 @@ The planner emits stable, content-addressed operations for:
 
 - primary, linked, and physical-entity storage creation;
 - projected-column addition;
-- physical-index creation;
+- physical-index creation and rebuilding;
 - canonical-JSON backfill for rebuildable projections and linked physical indexes;
 - target validation; and
 - applied-state recording.
@@ -24,6 +24,24 @@ column or index is therefore pending even when the manifest version did not chan
 target fingerprint produces no operations. Mutating or removing an already-applied semantic slot
 is rejected as a non-additive conflict in this slice; destructive authorization and semantic
 transforms remain later work.
+
+One in-slot change is admitted: an index whose `MissingValueBehavior` widens from `Excluded` to
+`IncludedAsNull`, along with the canonical-JSON backfill derived from it. A widened index keeps every
+row the applied one kept, so it serves every predicate the applied one served, and the narrowing
+direction stays a conflict because it removes rows. The match is payload-exact — an operation carries
+the payload it would have had under the narrower definition, and the applied operation must equal it —
+so a widening combined with any other change to the same index is still `GW-SCHEMA-003`. The
+predecessor is derived from the target alone, so operation identities and fingerprints still depend
+only on semantic payload, and it is never planned, executed, acknowledged, or recorded.
+
+Row exclusion is a filtered or partial index, so creation cannot reach a widening: the object already
+exists under the wrong predicate. The planner therefore emits `RebuildPhysicalIndexOperation` in place
+of the ordinary create, and only where the applied index actually carries a predicate — widening an
+index that keys no nullable column excludes nothing either way and needs no physical work. The drop is
+a plan step an operator authorizes rather than a repair hidden inside creation. An executor drops the
+index only after proving it is exactly what that executor emitted for the narrower definition; every
+other difference remains the rejection it is today, and the standalone validation path never converges
+anything.
 
 Every route-native column, index, backfill, and validation operation carries its immutable owning
 executable route (or complete ordered route set for target validation), including resolved primary

@@ -24,7 +24,9 @@ internal static class MongoDbPhysicalIndexSemantics
 
     /// <summary>
     /// The partial filter that realises <see cref="MissingValueBehavior.Excluded"/>, or
-    /// <see langword="null"/> when the index keeps every document.
+    /// <see langword="null"/> when the index keeps every document. <paramref name="missingValueBehavior"/>
+    /// overrides the declared behavior, which yields the filter the index carried under a definition it no
+    /// longer has.
     /// </summary>
     /// <remarks>
     /// Restricted to the same columns the relational providers filter on — the nullable ones. A
@@ -33,9 +35,10 @@ internal static class MongoDbPhysicalIndexSemantics
     /// </remarks>
     public static BsonDocument? PartialFilter(
         ExecutableStorageRoute route,
-        ExecutablePhysicalIndexRoute index)
+        ExecutablePhysicalIndexRoute index,
+        MissingValueBehavior? missingValueBehavior = null)
     {
-        var fields = PhysicalIndexNullExclusion.Columns(route, index);
+        var fields = PhysicalIndexNullExclusion.Columns(route, index, missingValueBehavior);
         if (fields.Length == 0)
             return null;
         var filter = new BsonDocument();

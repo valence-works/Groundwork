@@ -3310,6 +3310,43 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             actual["partialFilterExpression"].AsBsonDocument);
     }
 
+    /// <summary>
+    /// Widening an applied index to keep documents with no value is additive, but row exclusion is a
+    /// partial filter expression, so creating the index reports the change as a conflict rather than
+    /// applying it. The plan has to rebuild the index, and the filter has to be gone afterwards.
+    /// </summary>
+    [Fact]
+    public async Task Widening_a_partially_filtered_index_rebuilds_it_without_its_filter()
+    {
+        var database = Database();
+        var narrow = Model(PhysicalStorageForm.PhysicalEntityTable, isNullable: true);
+        var widened = Model(
+            PhysicalStorageForm.PhysicalEntityTable,
+            isNullable: true,
+            missingValueBehavior: MissingValueBehavior.IncludedAsNull);
+        await PhysicalSchemaApplication.ApplyAsync(narrow.Target, new MongoDbPhysicalSchemaExecutor(database));
+        var route = widened.Target.Routes.Single();
+        var index = Assert.Single(route.Indexes);
+        var collection = database.GetCollection<BsonDocument>(route.PrimaryStorage.Name.Identifier);
+        Assert.True((await ReadIndexAsync(collection, index.Name.Identifier))!.Contains("partialFilterExpression"));
+
+        var result = await PhysicalSchemaApplication.ApplyAsync(
+            widened.Target,
+            new MongoDbPhysicalSchemaExecutor(database));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Outcome);
+        Assert.Single(result.Plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.False((await ReadIndexAsync(collection, index.Name.Identifier))!.Contains("partialFilterExpression"));
+        var restart = await PhysicalSchemaApplication.ApplyAsync(
+            widened.Target,
+            new MongoDbPhysicalSchemaExecutor(database));
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, restart.Outcome);
+    }
+
+    private static async Task<BsonDocument?> ReadIndexAsync(IMongoCollection<BsonDocument> collection, string name) =>
+        (await (await collection.Indexes.ListAsync()).ToListAsync())
+        .SingleOrDefault(document => document["name"].AsString == name);
+
     [Fact]
     public async Task Included_as_null_omits_partial_membership_and_collapses_missing_with_null()
     {

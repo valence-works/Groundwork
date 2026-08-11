@@ -1074,9 +1074,19 @@ public static class PhysicalStorageResolver
                 continue;
             }
 
+            // Naming the disagreement matters most where the physical index exists and differs in one
+            // declared property: the generic wording sends the reader looking at columns and ordering,
+            // which is the one thing that is right.
+            var mismatch = physicalIndex is null
+                ? string.Empty
+                : physicalIndex.IsUnique != logicalIndex.IsUnique
+                    ? $" The physical index declares IsUnique {physicalIndex.IsUnique} where the logical index declares {logicalIndex.IsUnique}; both have to agree."
+                    : physicalIndex.MissingValueBehavior != logicalIndex.MissingValueBehavior
+                        ? $" The physical index declares MissingValueBehavior.{physicalIndex.MissingValueBehavior} where the logical index declares {logicalIndex.MissingValueBehavior}; both have to agree, so state it on each or let each take the default."
+                        : string.Empty;
             diagnostics.Add(GroundworkDiagnostic.Error(
                 "GW-PHYSICAL-025",
-                $"Scale-bearing logical index '{indexIdentity}' requires a matching ordered physical index.",
+                $"Scale-bearing logical index '{indexIdentity}' requires a matching ordered physical index.{mismatch}",
                 $"{target}.indexes"));
             valid = false;
         }

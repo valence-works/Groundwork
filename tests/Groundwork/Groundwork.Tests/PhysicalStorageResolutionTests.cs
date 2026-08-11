@@ -1798,6 +1798,61 @@ public sealed class PhysicalStorageResolutionTests
             diagnostic.Message.Contains("status", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The two declarations have to agree on row exclusion, and stating it on only one of them is the
+    /// easy way to get that wrong. Saying so beats sending the reader to look at columns and ordering,
+    /// which is the one part of the index that is already right.
+    /// </summary>
+    [Fact]
+    public void Disagreeing_missing_value_behavior_is_named_rather_than_reported_as_a_shape_mismatch()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-category",
+            [new IndexField("category")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.Excluded);
+        var query = new BoundedQueryDeclaration(
+            "list-by-category",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.None,
+            QueryPagingSupport.None,
+            BoundedQueryExecutionClass.ScaleBearing);
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "configurationDocument",
+            [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    "by-category",
+                    [
+                        new PhysicalIndexColumnDefinition("storage_scope", 0),
+                        new PhysicalIndexColumnDefinition("category", 1)
+                    ],
+                    missingValueBehavior: MissingValueBehavior.IncludedAsNull)
+            ]);
+        var manifest = WithPhysicalStorage(
+            SampleManifests.MetadataManifest(),
+            new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Explicit(definition),
+                [index],
+                [query]));
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        var diagnostic = Assert.Single(
+            result.Diagnostics,
+            candidate => candidate.Code == "GW-PHYSICAL-025");
+        Assert.Contains("MissingValueBehavior.IncludedAsNull", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Excluded", diagnostic.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ExplicitScaleBearingDemandRequiresMatchingOrderedPhysicalIndex()
     {

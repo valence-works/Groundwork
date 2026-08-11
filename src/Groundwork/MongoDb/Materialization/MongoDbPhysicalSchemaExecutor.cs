@@ -1,3 +1,4 @@
+using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using System.Globalization;
@@ -289,12 +290,12 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             ["kind"] = operation.Kind.ToString(),
             ["applied_at"] = appliedAt.UtcDateTime
         };
-        if (operation is CreatePhysicalIndexOperation index)
+        if (operation is IPhysicalIndexOperation index)
         {
             var partialFilter = MongoDbPhysicalIndexSemantics.PartialFilter(index.Route, index.Index);
             evidence["collection"] = index.Storage.Name.Identifier;
             evidence["index_name"] = index.Index.Name.Identifier;
-            evidence["index_keys"] = IndexKeys(index);
+            evidence["index_keys"] = IndexKeys(index.Index);
             evidence["unique"] = index.Index.IsUnique;
             evidence["missing_value_behavior"] = index.Index.MissingValueBehavior.ToString();
             evidence["collation"] = new BsonDocument("locale", "simple");
@@ -448,6 +449,9 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             case CreatePhysicalIndexOperation index:
                 await EnsureIndexAsync(index, cancellationToken);
                 break;
+            case RebuildPhysicalIndexOperation rebuild:
+                await RebuildIndexAsync(rebuild, cancellationToken);
+                break;
             case BackfillCanonicalJsonOperation backfill:
                 await BackfillAsync(backfill, cancellationToken);
                 break;
@@ -589,9 +593,42 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         await ValidateCollectionElementOwnerOrdinalIndexAsync(storage, cancellationToken);
     }
 
-    private async Task EnsureIndexAsync(CreatePhysicalIndexOperation operation, CancellationToken cancellationToken)
+    /// <summary>
+    /// Replaces the applied index that excludes documents with no value with the widened definition that
+    /// supersedes it.
+    /// </summary>
+    /// <remarks>
+    /// Row exclusion is a partial filter expression, so widening it means dropping the index and creating
+    /// it again; creation alone reports the difference as a conflict. The live index has to be exactly the
+    /// shape Groundwork emitted for the narrower definition before it is dropped — one carrying this name
+    /// but a shape Groundwork never wrote is drift, and dropping it would destroy something nobody asked
+    /// to replace. Anything else falls through to creation, which rejects it in its own words, and a retry
+    /// after a lost acknowledgement is a no-op because the index is already the widened shape.
+    /// MongoDB cannot rebuild an index atomically, so the index is briefly absent. That costs performance
+    /// and not correctness: a widened index is either not unique, or unique with its uniqueness already
+    /// implied by another unique index over a subset of its keys, which stays in place throughout —
+    /// <see cref="PhysicalIndexNullExclusion.HasNonPortableUniqueness"/> rejects every other combination
+    /// before a route compiles.
+    /// </remarks>
+    private async Task RebuildIndexAsync(RebuildPhysicalIndexOperation operation, CancellationToken cancellationToken)
     {
-        var keys = IndexKeys(operation);
+        var collection = database.GetCollection<BsonDocument>(operation.Storage.Name.Identifier);
+        var superseded = MongoDbPhysicalIndexSemantics.PartialFilter(
+            operation.Route,
+            operation.Index,
+            MissingValueBehavior.Excluded);
+        var actual = await ReadIndexAsync(collection, operation.Index.Name.Identifier, cancellationToken);
+        if (actual is not null &&
+            IndexMatches(actual, IndexKeys(operation.Index), operation.Index.IsUnique, superseded))
+        {
+            await collection.Indexes.DropOneAsync(operation.Index.Name.Identifier, cancellationToken);
+        }
+        await EnsureIndexAsync(operation, cancellationToken);
+    }
+
+    private async Task EnsureIndexAsync(IPhysicalIndexOperation operation, CancellationToken cancellationToken)
+    {
+        var keys = IndexKeys(operation.Index);
         var partialFilter = MongoDbPhysicalIndexSemantics.PartialFilter(operation.Route, operation.Index);
         var model = new CreateIndexModel<BsonDocument>(
             keys,
@@ -616,16 +653,23 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
                 exception);
         }
 
-        var actual = (await (await database.GetCollection<BsonDocument>(operation.Storage.Name.Identifier)
-                .Indexes.ListAsync(cancellationToken))
-            .ToListAsync(cancellationToken))
-            .SingleOrDefault(index => index.GetValue("name", "").AsString == operation.Index.Name.Identifier);
+        var actual = await ReadIndexAsync(
+            database.GetCollection<BsonDocument>(operation.Storage.Name.Identifier),
+            operation.Index.Name.Identifier,
+            cancellationToken);
         if (actual is null || !IndexMatches(actual, keys, operation.Index.IsUnique, partialFilter))
         {
             throw new InvalidOperationException(
                 $"MongoDB index '{operation.Index.Name.Identifier}' on collection '{operation.Storage.Name.Identifier}' conflicts with the resolved physical route. Actual: {actual?.ToJson() ?? "<missing>"}");
         }
     }
+
+    private static async Task<BsonDocument?> ReadIndexAsync(
+        IMongoCollection<BsonDocument> collection,
+        string name,
+        CancellationToken cancellationToken) =>
+        (await (await collection.Indexes.ListAsync(cancellationToken)).ToListAsync(cancellationToken))
+        .SingleOrDefault(index => index.GetValue("name", "").AsString == name);
 
     private async Task ValidateDurableEvidenceAsync(
         PhysicalSchemaAppliedState state,
@@ -688,8 +732,11 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
             }
         }
 
+        // A rebuilt index is the same durable object as a created one, evidenced identically, so both
+        // kinds are held to the same live shape.
         foreach (var operation in state.AppliedOperations.Where(operation =>
-                     operation.Kind == PhysicalSchemaOperationKind.CreatePhysicalIndex))
+                     operation.Kind is PhysicalSchemaOperationKind.CreatePhysicalIndex
+                         or PhysicalSchemaOperationKind.RebuildPhysicalIndex))
         {
             var evidence = evidenceByIdentity[operation.Identity];
             var expected = ReadExpectedIndex(state, operation);
@@ -789,9 +836,6 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
     private static bool IsSimpleCollation(BsonDocument collation) =>
         collation.ElementCount == 1 &&
         collation.GetValue("locale", "").AsString == "simple";
-
-    private static BsonDocument IndexKeys(CreatePhysicalIndexOperation operation) =>
-        IndexKeys(operation.Index);
 
     private static BsonDocument IndexKeys(ExecutablePhysicalIndexRoute index)
     {
