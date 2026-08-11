@@ -39,6 +39,7 @@ internal static class RelationalPhysicalStorageTestModels
         bool categoryNullable = false,
         IReadOnlySet<PortableQueryOperation>? categoryOperations = null,
         MissingValueBehavior categoryMissingValues = MissingValueBehavior.IncludedAsNull,
+        MissingValueBehavior compoundMissingValues = MissingValueBehavior.IncludedAsNull,
         string documentKind = "configurationDocument",
         Func<PhysicalNameContext, string>? namePolicy = null,
         RelationalMutationScenarioOptions? mutationOptions = null,
@@ -129,7 +130,7 @@ internal static class RelationalPhysicalStorageTestModels
                         compoundColumns.Count));
                 }
                 indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns,
-                    missingValueBehavior: MissingValueBehavior.IncludedAsNull));
+                    missingValueBehavior: compoundMissingValues));
             }
         }
         if (mutationOptions.IncludeTypedTransitions)
@@ -199,7 +200,7 @@ internal static class RelationalPhysicalStorageTestModels
                 [new IndexField("category"), new IndexField("priority", ToIndexValueKind(priorityType))],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.IncludedAsNull);
+                compoundMissingValues);
             logicalIndexes.Add(compound);
             var priorityOperations = mutationOptions.IncludeRangeDelete
                 ? new HashSet<PortableQueryOperation>
