@@ -36,13 +36,18 @@ internal static class NullExcludedIndexScenario
             normalizer: normalizer,
             categoryUnique: unique,
             categoryNullable: nullable,
-            categoryOperations: comparison.Operator == QueryComparisonOperator.Contains
-                ? new HashSet<PortableQueryOperation>
-                {
-                    PortableQueryOperation.Equal,
-                    PortableQueryOperation.Contains
-                }
-                : new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal });
+            categoryOperations: Operations(comparison.Operator));
+
+    /// <summary>Equality is always declared so the route stays admissible; the operator under test joins it.</summary>
+    private static IReadOnlySet<PortableQueryOperation> Operations(QueryComparisonOperator @operator) =>
+        @operator switch
+        {
+            QueryComparisonOperator.Contains =>
+                [PortableQueryOperation.Equal, PortableQueryOperation.Contains],
+            QueryComparisonOperator.In =>
+                [PortableQueryOperation.Equal, PortableQueryOperation.In],
+            _ => new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal }
+        };
 
     /// <summary>The physical identifier of the projected category column on the index's own object.</summary>
     public static string CategoryColumn(ExecutableStorageRoute route) =>

@@ -91,6 +91,30 @@ public sealed class SqlServerNullExcludedIndexHintTests(
         Assert.Contains(cell.CategoryColumn, failure.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// An empty membership set renders a contradiction, so the query returns nothing no matter which
+    /// index serves it. It must therefore keep its pin rather than be refused: a predicate that returns
+    /// no rows cannot drop any. Regressed once by reading the contradiction as "proves nothing".
+    /// </summary>
+    [Theory]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    public async Task Empty_membership_on_a_null_excluding_index_matches_nothing_without_refusal(
+        PhysicalStorageForm form)
+    {
+        var comparison = DocumentQueryComparison.In("category", []);
+        var cell = await PrepareAsync(form, unique: true, nullable: true, comparison);
+        Assert.True(await ReadHasFilterAsync(cell));
+
+        var rendered = cell.Render(comparison);
+        output.WriteLine($"[{form}] {rendered.CommandText}");
+        Assert.Contains($"WITH (INDEX([{cell.IndexName}]))", rendered.CommandText, StringComparison.Ordinal);
+
+        var result = await cell.Runtime.QueryAsync(NullExcludedIndexScenario.Query(comparison));
+
+        Assert.Empty(result.Documents);
+    }
+
     private async Task AssertPinnedAsync(
         PhysicalStorageForm form,
         bool unique,
