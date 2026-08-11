@@ -4,6 +4,19 @@ Groundwork is a provider-neutral persistence foundation. Modules describe storag
 
 ## Language
 
+**Contract Family**:
+One set of storage semantics with its own declaration model, store contract, and provider execution.
+Documents and diagnostic records are the two that exist. A contract family belongs to whoever needs
+it; Groundwork owns only the kernel facilities it builds on.
+_Avoid_: Module, provider package, storage contract
+
+**Kernel Facility**:
+Machinery reusable by more than one contract family: physical definitions, host naming and
+fingerprinting, schema evolution, provider session lifecycle, the capability registry, the operation
+ledger, and the conformance-suite pattern. A facility qualifies only if a second contract family can
+use it unmodified.
+_Avoid_: Core, shared infrastructure, base contract
+
 **Provider Capability**:
 The provider's runtime ability to serve a storage manifest's semantics, including query, index, concurrency, and workload requirements.
 _Avoid_: Materialization capability, schema capability
