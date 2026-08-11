@@ -1,6 +1,6 @@
 # Separate kernel facilities from contract families
 
-Status: proposed (2026-08-02).
+Status: accepted (2026-08-11; ratified after the seam-B evidence recorded on 2026-08-03).
 
 Date: 2026-08-02.
 
