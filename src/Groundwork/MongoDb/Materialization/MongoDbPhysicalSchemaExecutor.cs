@@ -739,26 +739,13 @@ public sealed class MongoDbPhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPh
         }
         var missingValueBehavior = Enum.Parse<Groundwork.Core.Indexing.MissingValueBehavior>(
             index.GetProperty("missingValueBehavior").GetString()!);
-        BsonDocument? partialFilter = null;
-        if (missingValueBehavior == Groundwork.Core.Indexing.MissingValueBehavior.Excluded)
-        {
-            var targetName = index.GetProperty("target").GetString();
-            var projectedIdentifiers = root.GetProperty("projectedColumns").EnumerateArray()
-                .Where(projection => projection.GetProperty("target").GetString() == targetName)
-                .Select(projection => projection.GetProperty("column").GetProperty("identifier").GetString()!)
-                .ToHashSet(StringComparer.Ordinal);
-            var valueFields = index.GetProperty("columns").EnumerateArray()
-                .OrderBy(column => column.GetProperty("order").GetInt32())
-                .Select(column => column.GetProperty("column").GetProperty("identifier").GetString()!)
-                .Where(projectedIdentifiers.Contains)
-                .ToArray();
-            if (valueFields.Length != 0)
-            {
-                partialFilter = new BsonDocument();
-                foreach (var field in valueFields)
-                    partialFilter[field] = new BsonDocument("$exists", true);
-            }
-        }
+        // Rebuild the route rather than re-deriving the partial filter from JSON. Drift detection has to
+        // expect exactly what index creation emits, and the only way to guarantee that is to run the same
+        // rule over the same shape — a second implementation here is what made this path disagree.
+        var deserialized = ExecutableStorageRouteSerializer.Deserialize(route.CanonicalRouteJson);
+        var partialFilter = MongoDbPhysicalIndexSemantics.PartialFilter(
+            deserialized,
+            deserialized.Indexes.Single(candidate => candidate.Identity == operation.SubjectIdentity));
         return new ExpectedIndex(
             storage.GetProperty("name").GetProperty("identifier").GetString()!,
             index.GetProperty("name").GetProperty("identifier").GetString()!,
