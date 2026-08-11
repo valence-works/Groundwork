@@ -616,6 +616,17 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         var columns = string.Join(", ", index.Columns.Select(column =>
             $"{Q(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"));
         var filter = IndexFilter(route, index);
+        var desired =
+            $"CREATE {unique}INDEX {Q(index.Name.Identifier)} ON {Q(table)} ({columns})" +
+            (filter is null ? string.Empty : $" WHERE {filter}");
+
+        // An index is derived state, so a changed definition is a rebuild rather than a conflict. SQLite
+        // keeps the original statement in sqlite_master, which is the definition to compare against; without
+        // the drop, CREATE ... IF NOT EXISTS is a no-op on the stale shape and validation would reject it.
+        var applied = await ReadIndexDefinitionAsync(index.Name.Identifier, transaction, ct);
+        if (applied is not null && !DefinitionsMatch(applied, desired))
+            await ExecuteAsync($"DROP INDEX IF EXISTS {Q(index.Name.Identifier)};", transaction, ct);
+
         await ExecuteAsync(
             $"CREATE {unique}INDEX IF NOT EXISTS {Q(index.Name.Identifier)} ON {Q(table)} ({columns})" +
             (filter is null ? string.Empty : $" WHERE {filter}") + ";",
@@ -624,6 +635,37 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         if (validateObjects)
             await ValidateIndexAsync(route, index, table, transaction, ct);
     }
+
+    /// <summary>Reads the statement SQLite recorded for an index, or null when it does not exist.</summary>
+    private async Task<string?> ReadIndexDefinitionAsync(
+        string index,
+        DbTransaction transaction,
+        CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = $name;";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "$name";
+        parameter.Value = index;
+        command.Parameters.Add(parameter);
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is string sql ? sql : null;
+    }
+
+    /// <summary>
+    /// Compares two index statements ignoring whitespace and the optional IF NOT EXISTS clause, which
+    /// SQLite does not retain in the stored definition.
+    /// </summary>
+    private static bool DefinitionsMatch(string applied, string desired) =>
+        string.Equals(NormalizeDefinition(applied), NormalizeDefinition(desired), StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeDefinition(string sql) =>
+        new string(sql
+            .Replace("IF NOT EXISTS", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .TrimEnd(';')
+            .Where(character => !char.IsWhiteSpace(character))
+            .ToArray());
 
     /// <summary>
     /// The partial-index predicate that realises <see cref="MissingValueBehavior.Excluded"/>, or
