@@ -428,7 +428,7 @@ public sealed class ExecutableStorageRouteCompilerTests
             [new IndexField("customerId"), new IndexField("createdAt")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "latest-by-customer",
             logicalIndex.Identity,
@@ -693,7 +693,7 @@ public sealed class ExecutableStorageRouteCompilerTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             logicalIndex.Identity,

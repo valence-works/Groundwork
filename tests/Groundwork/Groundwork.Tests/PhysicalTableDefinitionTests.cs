@@ -395,7 +395,7 @@ public sealed class PhysicalTableDefinitionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             logicalIndex.Identity,
@@ -487,7 +487,7 @@ public sealed class PhysicalTableDefinitionTests
                 [new IndexField("category")],
                 IndexValueKind.Keyword,
                 false,
-                MissingValueBehavior.Excluded),
+                MissingValueBehavior.IncludedAsNull),
             new LogicalIndexDeclaration(
                 "by-key",
                 [new IndexField("key")],

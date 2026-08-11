@@ -39,16 +39,23 @@ public enum IndexValueKind
 public enum MissingValueBehavior
 {
     /// <summary>
-    /// Rows without a value are absent from the index. A deliberate narrowing: the index becomes
+    /// Rows without a value are absent from the index. Opt in to this deliberately: the index becomes
     /// unable to serve any predicate that must return those rows — <c>NotContains</c>, a null equality,
     /// or a disjunction spanning another field — and a scale-bearing query bound to it is refused
     /// rather than silently under-served.
     /// </summary>
+    /// <remarks>
+    /// Note that this is not the zero value of the enum but it is also not the default any declaration
+    /// takes: both <see cref="Groundwork.Core.PhysicalStorage.LogicalIndexDeclaration"/> and
+    /// <see cref="Groundwork.Core.PhysicalStorage.PhysicalIndexDefinition"/> default to
+    /// <see cref="IncludedAsNull"/>, so a sparse index is always something someone asked for.
+    /// </remarks>
     Excluded,
 
     /// <summary>
-    /// Every row is indexed, with the missing value ordered as null. Required for any index that must
-    /// serve a predicate spanning optional fields, such as a search across several nullable columns.
+    /// Every row is indexed, with the missing value ordered as null. The default, because an index that
+    /// quietly omits rows is a sharp edge that should be chosen rather than inherited — and because the
+    /// narrowing is invisible until some query needs one of the omitted rows.
     /// </summary>
     IncludedAsNull
 }

@@ -456,7 +456,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("value")],
             IndexValueKind.Number,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var definition = PhysicalTableDefinition.PhysicalEntityTable(
             "decimal_entities",
             [new ProjectedColumnDefinition("value", "value", PortablePhysicalType.Decimal, Precision: precision, Scale: scale)],
@@ -546,7 +546,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField(path)],
             declared,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "by-envelope",
             logical.Identity,
@@ -590,7 +590,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("documentKind")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-document-kind",
             logicalIndex.Identity,
@@ -669,7 +669,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-id",
             index.Identity,
@@ -716,7 +716,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all",
             index.Identity,
@@ -769,7 +769,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("category"), new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all",
             index.Identity,
@@ -818,7 +818,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all",
             index.Identity,
@@ -2155,7 +2155,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all",
             index.Identity,
@@ -2439,12 +2439,15 @@ public sealed class PhysicalQueryPlanCompilerTests
             .Select(plan => BoundedMutationRequestFingerprint.Create(request, plan, "tenant-a"))
             .ToArray();
 
+        // These moved once, deliberately: MissingValueBehavior participates in the plan shape and the
+        // fixture's index now declares the default IncludedAsNull rather than Excluded. The values are
+        // pinned to catch accidental drift, so any future change to them wants the same justification.
         Assert.Equal(
             new[]
             {
-                "8f457d1772399abb094517c06321b8e45fb9349aa5da3d3a83db76f78a1d7137",
-                "ace0a876a8f749e9c3c7e6b667645aae919ea58e4f30a3dba090de86d35a9bc3",
-                "2aa9826fc204b0fc4b6762a3ed32e2f8211169d80273673eeabe9a6a8e8f5879"
+                "e9720b8a527b512f5d7fbcfda3e4f835c4b2fa7dfafb21231b621a77fed36651",
+                "6bcd4fd6febc6b1e08826b568dd53cc47c13fe3734b8cb0d73a44d4e35672116",
+                "c15968fc09bc28f5979d4169fc7f191d3668411022bbdd68f9c020ab6a682395"
             },
             fingerprints);
     }
@@ -3808,7 +3811,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("category")],
             IndexValueKind.String,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var categoryQuery = new BoundedQueryDeclaration(
             "list-by-category",
             categoryIndex.Identity,
@@ -3992,7 +3995,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("stimulusType"), new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "latest-by-stimulus-type",
             logicalIndex.Identity,
@@ -4057,7 +4060,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("stimulusType"), new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var declaration = new BoundedQueryDeclaration(
             "list-by-stimulus-created",
             logicalIndex.Identity,
@@ -4154,7 +4157,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "latest-by-stimulus",
             logicalIndex.Identity,
@@ -4257,7 +4260,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("stimulusType"), new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "valid-prefix",
             logicalIndex.Identity,
@@ -4309,7 +4312,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("stimulusType"), new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var routedQuery = new BoundedQueryDeclaration(
             "range-prefix",
             logicalIndex.Identity,
@@ -4367,7 +4370,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "page-by-tenant-category-created",
             logicalIndex.Identity,
@@ -4425,7 +4428,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var validQuery = new BoundedQueryDeclaration(
             "page-by-tenant-category-created",
             logicalIndex.Identity,
@@ -4508,7 +4511,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("stimulusType"), new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "latest-by-stimulus-type",
             logicalIndex.Identity,
@@ -4578,7 +4581,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("stimulusType"), new IndexField("createdAt", IndexValueKind.DateTime)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var queryDeclaration = new BoundedQueryDeclaration(
             "search-by-stimulus-created",
             logicalIndex.Identity,
@@ -4728,6 +4731,9 @@ public sealed class PhysicalQueryPlanCompilerTests
         return Resolve(storage, form == PhysicalStorageForm.SharedDocuments ? binding : null);
     }
 
+    private static MissingValueBehavior MissingValues(bool isUnique) =>
+        isUnique ? MissingValueBehavior.Excluded : MissingValueBehavior.IncludedAsNull;
+
     private static PlanningFixture CreateOffsetTieBreakFixture(
         bool includeTieBreak,
         PhysicalSortDirection tieBreakDirection = PhysicalSortDirection.Ascending,
@@ -4739,7 +4745,9 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("category"), new IndexField("rank", IndexValueKind.Number)],
             IndexValueKind.Keyword,
             isUnique,
-            MissingValueBehavior.Excluded);
+            // A unique index over nullable columns has to exclude the missing values, or whether two
+            // rows without a value collide would differ by provider.
+            MissingValues(isUnique));
         var columns = new List<PhysicalIndexColumnDefinition>
         {
             new("storage_scope", 0),
@@ -4754,7 +4762,8 @@ public sealed class PhysicalQueryPlanCompilerTests
                 new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String),
                 new ProjectedColumnDefinition("rank", "rank", PortablePhysicalType.Decimal, Precision: 18, Scale: 4)
             ],
-            indexes: [new PhysicalIndexDefinition(logicalIndex.Identity, columns, isUnique)]);
+            indexes: [new PhysicalIndexDefinition(
+                logicalIndex.Identity, columns, isUnique, missingValueBehavior: MissingValues(isUnique))]);
         BoundedQueryDeclaration Query(PortableQueryOperation operation) => new(
             "list-by-category-rank",
             logicalIndex.Identity,
@@ -4853,7 +4862,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField(path)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             $"list-by-{path}",
             index.Identity,
@@ -4907,7 +4916,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-id",
             index.Identity,
@@ -5032,7 +5041,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("values")],
             logicalValueKind,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-values",
             logicalIndex.Identity,
@@ -5102,7 +5111,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("value")],
             valueKind,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "find-by-value",
             logicalIndex.Identity,
@@ -5198,7 +5207,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var authorizationIdIndex = new LogicalIndexDeclaration(
             targetEqualityIndexIdentity,
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
@@ -5210,19 +5219,19 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var tokenReferenceIndex = new LogicalIndexDeclaration(
             sourceReferenceIndexIdentity,
             [new IndexField(sourceReferencePath)],
             sourceReferenceValueKind,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var nonLeadingAuthorizationStatusIndex = new LogicalIndexDeclaration(
             "authorization-by-status-after-id",
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var authorizationLogicalIndexes = nonLeadingTargetPredicate
             ? new[] { authorizationStatusIndex, authorizationIdIndex, nonLeadingAuthorizationStatusIndex }
             : new[] { authorizationStatusIndex, authorizationIdIndex };
@@ -5246,7 +5255,8 @@ public sealed class PhysicalQueryPlanCompilerTests
                 nonLeadingTargetIdentity
                     ? AuthorizationIndex("status", "id_comparison_key")
                     : AuthorizationIndex("id_comparison_key"),
-                isUnique: true)
+                isUnique: true,
+                missingValueBehavior: MissingValueBehavior.Excluded)
         };
         if (nonLeadingTargetPredicate)
         {
@@ -5497,7 +5507,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             [new IndexField("stimulusType")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
 
     private static LogicalIndexDeclaration SortResidualIndex() =>
         new(
@@ -5508,7 +5518,7 @@ public sealed class PhysicalQueryPlanCompilerTests
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
 
     private static BoundedQueryDeclaration SortResidualQuery(
         LogicalIndexDeclaration logicalIndex,

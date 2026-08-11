@@ -67,6 +67,6 @@ internal static class ClosedQueryManifests
             IndexValueKind.String,
             false,
             sortable,
-            MissingValueBehavior.Excluded,
+            MissingValueBehavior.IncludedAsNull,
             new HashSet<PortableQueryOperation>(operations));
 }

@@ -498,7 +498,7 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         IReadOnlyList<IndexField> fields,
         IndexValueKind valueKind,
         bool isUnique,
-        MissingValueBehavior missingValueBehavior)
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull)
     {
         Identity = identity;
         Fields = fields?.ToArray() ?? throw new ArgumentNullException(nameof(fields));

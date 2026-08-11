@@ -77,7 +77,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var ordinaryQuery = new BoundedQueryDeclaration(
             "by-status",
             index.Identity,
@@ -115,7 +115,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("status")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "by-status",
             index.Identity,
@@ -179,7 +179,7 @@ public sealed class PhysicalStorageResolutionTests
                     [new IndexField("tenantId")],
                     IndexValueKind.Keyword,
                     false,
-                    MissingValueBehavior.Excluded)
+                    MissingValueBehavior.IncludedAsNull)
             ],
             [
                 new BoundedQueryDeclaration(
@@ -266,7 +266,7 @@ public sealed class PhysicalStorageResolutionTests
                     [new IndexField("documentKind")],
                     IndexValueKind.Keyword,
                     false,
-                    MissingValueBehavior.Excluded)
+                    MissingValueBehavior.IncludedAsNull)
             ],
             [
                 new BoundedQueryDeclaration(
@@ -344,7 +344,7 @@ public sealed class PhysicalStorageResolutionTests
                     [new IndexField("category")],
                     IndexValueKind.Keyword,
                     false,
-                    MissingValueBehavior.Excluded)
+                    MissingValueBehavior.IncludedAsNull)
             ],
             [
                 new BoundedQueryDeclaration(
@@ -382,7 +382,7 @@ public sealed class PhysicalStorageResolutionTests
                     [new IndexField("value")],
                     IndexValueKind.Number,
                     false,
-                    MissingValueBehavior.Excluded)
+                    MissingValueBehavior.IncludedAsNull)
             ],
             [
                 new BoundedQueryDeclaration(
@@ -494,7 +494,7 @@ public sealed class PhysicalStorageResolutionTests
                     [new IndexField("customerId"), new IndexField("createdAt")],
                     IndexValueKind.Keyword,
                     false,
-                    MissingValueBehavior.Excluded)
+                    MissingValueBehavior.IncludedAsNull)
             ],
             [
                 new BoundedQueryDeclaration(
@@ -535,7 +535,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("customerId"), new IndexField("createdAt")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var forward = Query(
             "forward",
             PhysicalSortDirection.Ascending,
@@ -687,7 +687,7 @@ public sealed class PhysicalStorageResolutionTests
                     [new IndexField("category")],
                     IndexValueKind.Keyword,
                     false,
-                    MissingValueBehavior.Excluded)
+                    MissingValueBehavior.IncludedAsNull)
             ],
             [
                 new BoundedQueryDeclaration(
@@ -1182,7 +1182,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var definition = PhysicalTableDefinition.PhysicalEntityTable(
             "configurationDocument",
             [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
@@ -1247,7 +1247,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var omitted = new BoundedQueryDeclaration(
             "list-by-id",
             index.Identity,
@@ -1283,7 +1283,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category"), new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             index.Identity,
@@ -1367,7 +1367,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all",
             index.Identity,
@@ -1414,7 +1414,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-all",
             index.Identity,
@@ -1471,7 +1471,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         BoundedQueryDeclaration Query(string identity, QueryPagingSupport paging) => new(
             identity,
             index.Identity,
@@ -1512,7 +1512,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var manifest = WithPhysicalStorage(
             SampleManifests.MetadataManifest(),
             new StorageUnitPhysicalStorage(
@@ -1567,7 +1567,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             index.Identity,
@@ -1692,7 +1692,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             index.Identity,
@@ -1750,13 +1750,13 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var secondIndex = new LogicalIndexDeclaration(
             "by-owner",
             [new IndexField("owner")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         BoundedQueryDeclaration Query(
             string identity,
             string indexIdentity,
@@ -1806,7 +1806,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category"), new IndexField("createdAt")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             "by-category",
@@ -1908,7 +1908,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("customerId"), new IndexField("createdAt")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "latest-by-customer",
             "by-customer-created",
@@ -1962,7 +1962,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "list-by-category",
             logicalIndex.Identity,
@@ -2024,7 +2024,8 @@ public sealed class PhysicalStorageResolutionTests
                 new PhysicalIndexDefinition(
                     "by-customer",
                     [new PhysicalIndexColumnDefinition("customerId", 0)],
-                    isUnique: true)
+                    isUnique: true,
+                    missingValueBehavior: MissingValueBehavior.Excluded)
             ]);
         var template = SampleManifests.MetadataManifest();
         var tenantManifest = template with
@@ -2066,7 +2067,8 @@ public sealed class PhysicalStorageResolutionTests
                 new PhysicalIndexDefinition(
                     "unique-customer",
                     [new PhysicalIndexColumnDefinition("customerId", 0)],
-                    isUnique: true)
+                    isUnique: true,
+                    missingValueBehavior: MissingValueBehavior.Excluded)
             ]);
         var template = SampleManifests.MetadataManifest();
         var tenantManifest = template with
@@ -2123,7 +2125,8 @@ public sealed class PhysicalStorageResolutionTests
                         new PhysicalIndexColumnDefinition("tenant_scope", 0),
                         new PhysicalIndexColumnDefinition("customerId", 1)
                     ],
-                    isUnique: true)
+                    isUnique: true,
+                    missingValueBehavior: MissingValueBehavior.Excluded)
             ]);
         var template = SampleManifests.MetadataManifest();
         var tenantManifest = template with
@@ -2227,7 +2230,7 @@ public sealed class PhysicalStorageResolutionTests
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "browse-definitions",
             index.Identity,
@@ -2278,7 +2281,7 @@ public sealed class PhysicalStorageResolutionTests
             [new IndexField(PhysicalDocumentFieldPaths.Id)],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "find-by-id",
             logicalIndex.Identity,
@@ -2325,7 +2328,7 @@ public sealed class PhysicalStorageResolutionTests
             ],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var query = new BoundedQueryDeclaration(
             "page-by-tenant-category-created",
             index.Identity,
