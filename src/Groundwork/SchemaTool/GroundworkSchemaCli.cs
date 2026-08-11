@@ -92,7 +92,10 @@ public static class GroundworkSchemaCli
 
         try
         {
-            var source = ManifestSourceLoader.Load(parsedOptions.ManifestAssembly, parsedOptions.ManifestType);
+            var source = ManifestSourceLoader.Load(
+                parsedOptions.ManifestAssembly,
+                parsedOptions.ManifestType,
+                parsedOptions.ManifestOptions);
             var manifest = source.CreateManifest()
                 ?? throw new SchemaToolConfigurationException("GW-CLI-004", "Manifest source returned null.");
             var diagnosticSource = source as IDiagnosticRecordDeploymentManifestSource;
@@ -481,6 +484,7 @@ public static class GroundworkSchemaCli
 
         Source selection:
           --manifest-type <name>      Required when the assembly contains multiple sources
+          --manifest-option k=v       Passed to a source that accepts options; repeatable
 
         """;
 
