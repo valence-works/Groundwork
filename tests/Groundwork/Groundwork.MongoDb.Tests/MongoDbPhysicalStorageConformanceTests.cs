@@ -22,15 +22,10 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
-public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
+public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-rs")
-        .Build();
-
-    public Task InitializeAsync() => container.StartAsync();
-
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public async Task Collection_membership_and_contains_all_execute_from_typed_element_storage()

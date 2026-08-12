@@ -1300,12 +1300,10 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
     }
 }
 
-public sealed class MongoDbDiagnosticRecordStandaloneTests : IAsyncLifetime
+public sealed class MongoDbDiagnosticRecordStandaloneTests(MongoDbStandaloneTestContainer fixture)
+    : IClassFixture<MongoDbStandaloneTestContainer>
 {
-    private readonly MongoDbContainer _container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb).Build();
-
-    public async Task InitializeAsync() => await _container.StartAsync();
-    public async Task DisposeAsync() => await _container.DisposeAsync();
+    private readonly MongoDbContainer _container = fixture.Container;
 
     [Fact]
     public async Task Session_factory_rejects_standalone_deployments_before_exposing_a_non_atomic_store_or_mutating_schema()

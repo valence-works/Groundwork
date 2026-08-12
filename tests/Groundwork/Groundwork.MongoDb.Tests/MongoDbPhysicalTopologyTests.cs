@@ -15,19 +15,15 @@ using Xunit;
 namespace Groundwork.MongoDb.Tests;
 
 [CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class MongoDbPhysicalTopologyCollection
+public sealed class MongoDbPhysicalTopologyCollection : ICollectionFixture<MongoDbStandaloneTestContainer>
 {
     public const string Name = "MongoDB physical standalone topology";
 }
 
 [Collection(MongoDbPhysicalTopologyCollection.Name)]
-public sealed class MongoDbPhysicalTopologyTests : IAsyncLifetime
+public sealed class MongoDbPhysicalTopologyTests(MongoDbStandaloneTestContainer fixture)
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb).Build();
-
-    public Task InitializeAsync() => container.StartAsync();
-
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public async Task Physical_factory_rejects_a_fresh_standalone_before_creating_database_state()

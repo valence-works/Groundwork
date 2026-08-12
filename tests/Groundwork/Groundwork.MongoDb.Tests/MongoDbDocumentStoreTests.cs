@@ -15,15 +15,10 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
-public sealed class MongoDbDocumentStoreTests : IAsyncLifetime
+public sealed class MongoDbDocumentStoreTests(MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-rs")
-        .Build();
-
-    public async Task InitializeAsync() => await container.StartAsync();
-
-    public async Task DisposeAsync() => await container.DisposeAsync();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public void DocumentStoreConstructionRequiresFactoryAdmission() =>

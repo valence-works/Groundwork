@@ -36,15 +36,10 @@ namespace Groundwork.MongoDb.Tests;
 /// nothing, because every other document is in the index either way.
 /// </para>
 /// </remarks>
-public sealed class MongoDbNullExcludedIndexHintTests(ITestOutputHelper output) : IAsyncLifetime
+public sealed class MongoDbNullExcludedIndexHintTests(ITestOutputHelper output, MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-null-excluded-rs")
-        .Build();
-
-    public Task InitializeAsync() => container.StartAsync();
-
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    private readonly MongoDbContainer container = fixture.Container;
 
     /// <summary>
     /// The control. An index that keeps every document carries no partial filter, so the equality is

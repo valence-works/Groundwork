@@ -12,29 +12,32 @@ using Groundwork.SchemaTool;
 using Microsoft.Data.SqlClient;
 using MongoDB.Driver;
 using Npgsql;
-using Testcontainers.MongoDb;
-using Testcontainers.MsSql;
-using Testcontainers.PostgreSql;
 using Xunit;
 
 namespace Groundwork.SchemaTool.ProviderTests;
 
 [CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class SchemaToolProviderParityCollection
+public sealed class SchemaToolProviderParityCollection :
+    ICollectionFixture<SchemaToolMsSqlContainer>,
+    ICollectionFixture<SchemaToolPostgreSqlContainer>,
+    ICollectionFixture<SchemaToolMongoDbReplicaSetContainer>,
+    ICollectionFixture<SchemaToolMongoDbStandaloneContainer>
 {
     public const string Name = "schema-tool-provider-parity";
 }
 
 [Collection(SchemaToolProviderParityCollection.Name)]
-public sealed class SchemaToolProviderParityTests
+public sealed class SchemaToolProviderParityTests(
+    SchemaToolMsSqlContainer sqlServer,
+    SchemaToolPostgreSqlContainer postgreSql,
+    SchemaToolMongoDbReplicaSetContainer mongoReplicaSet,
+    SchemaToolMongoDbStandaloneContainer mongoStandalone)
 {
     [Fact]
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task SqlServer_combined_diagnostic_deployment_is_live_restart_safe_and_detects_drift()
     {
-        await using var container = new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
-        await container.StartAsync();
-        var connection = await CreateSqlServerDiagnosticDatabaseAsync(container.GetConnectionString());
+        var connection = await CreateSqlServerDatabaseAsync(sqlServer.ConnectionString);
         await ExerciseDiagnosticDeploymentAsync(
             "sqlserver",
             connection,
@@ -46,13 +49,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task PostgreSql_combined_diagnostic_deployment_is_live_restart_safe_and_detects_drift()
     {
-        await using var container = new PostgreSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.PostgreSql)
-            .WithDatabase("groundwork")
-            .WithUsername("groundwork")
-            .WithPassword("groundwork")
-            .Build();
-        await container.StartAsync();
-        var connection = container.GetConnectionString();
+        var connection = await CreatePostgreSqlDatabaseAsync(postgreSql.ConnectionString);
         await ExerciseDiagnosticDeploymentAsync(
             "postgresql",
             connection,
@@ -64,11 +61,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_combined_diagnostic_deployment_is_live_restart_safe_and_detects_drift()
     {
-        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-            .WithReplicaSet("groundwork-diag-rs")
-            .Build();
-        await container.StartAsync();
-        var connection = container.GetConnectionString();
+        var connection = mongoReplicaSet.ConnectionString;
         const string database = "groundwork_schema_tool_diagnostic_tests";
         await ExerciseDiagnosticDeploymentAsync(
             "mongodb",
@@ -81,9 +74,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task SqlServer_invalid_diagnostic_bounds_fail_preflight_without_document_mutation()
     {
-        await using var container = new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
-        await container.StartAsync();
-        var connection = await CreateSqlServerDiagnosticDatabaseAsync(container.GetConnectionString());
+        var connection = await CreateSqlServerDatabaseAsync(sqlServer.ConnectionString);
 
         var apply = await RunAsync(
             "apply",
@@ -105,9 +96,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_standalone_topology_fails_preflight_without_creating_locks_or_collections()
     {
-        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb).Build();
-        await container.StartAsync();
-        var connection = container.GetConnectionString();
+        var connection = mongoStandalone.ConnectionString;
         const string database = "groundwork_schema_tool_standalone_rejection";
 
         var apply = await RunAsync(
@@ -130,9 +119,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task SqlServer_cli_lifecycle_is_live_restart_safe_authorized_and_secret_safe()
     {
-        await using var container = new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
-        await container.StartAsync();
-        var connection = container.GetConnectionString();
+        var connection = await CreateSqlServerDatabaseAsync(sqlServer.ConnectionString);
         await ExerciseAsync(
             "sqlserver",
             connection,
@@ -147,13 +134,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task PostgreSql_cli_lifecycle_is_live_restart_safe_authorized_and_secret_safe()
     {
-        await using var container = new PostgreSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.PostgreSql)
-            .WithDatabase("groundwork")
-            .WithUsername("groundwork")
-            .WithPassword("groundwork")
-            .Build();
-        await container.StartAsync();
-        var connection = container.GetConnectionString();
+        var connection = await CreatePostgreSqlDatabaseAsync(postgreSql.ConnectionString);
         await ExerciseAsync(
             "postgresql",
             connection,
@@ -168,11 +149,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_cli_lifecycle_is_live_restart_safe_authorized_and_secret_safe()
     {
-        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-            .WithReplicaSet("groundwork-rs")
-            .Build();
-        await container.StartAsync();
-        var connection = container.GetConnectionString();
+        var connection = mongoReplicaSet.ConnectionString;
         const string database = "groundwork_schema_tool_provider_tests";
         await ExerciseAsync(
             "mongodb",
@@ -188,11 +165,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_cli_plans_applies_and_live_validates_bounded_mutation_bindings()
     {
-        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-            .WithReplicaSet("groundwork-mutation-cli-rs")
-            .Build();
-        await container.StartAsync();
-        var connection = container.GetConnectionString();
+        var connection = mongoReplicaSet.ConnectionString;
         const string database = "groundwork_schema_tool_mutation_tests";
         const string selectorIdentity = "schema_tool_provider_mutation_documents-by-category";
 
@@ -614,9 +587,9 @@ public sealed class SchemaToolProviderParityTests
             MongoDB.Driver.Builders<MongoDB.Bson.BsonDocument>.Update.Set("fingerprint", "drift"));
     }
 
-    private static async Task<string> CreateSqlServerDiagnosticDatabaseAsync(string connectionString)
+    private static async Task<string> CreateSqlServerDatabaseAsync(string connectionString)
     {
-        var database = $"groundwork_diag_cli_{Guid.NewGuid():N}";
+        var database = $"groundwork_cli_{Guid.NewGuid():N}";
         await using var connection = new SqlConnection(new SqlConnectionStringBuilder(connectionString)
         {
             InitialCatalog = "master"
@@ -626,6 +599,17 @@ public sealed class SchemaToolProviderParityTests
         command.CommandText = $"CREATE DATABASE [{database}]; ALTER DATABASE [{database}] SET READ_COMMITTED_SNAPSHOT ON;";
         await command.ExecuteNonQueryAsync();
         return new SqlConnectionStringBuilder(connectionString) { InitialCatalog = database }.ConnectionString;
+    }
+
+    private static async Task<string> CreatePostgreSqlDatabaseAsync(string connectionString)
+    {
+        var database = $"groundwork_cli_{Guid.NewGuid():N}";
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"CREATE DATABASE \"{database}\";";
+        await command.ExecuteNonQueryAsync();
+        return new NpgsqlConnectionStringBuilder(connectionString) { Database = database }.ConnectionString;
     }
 
     private static async Task<(bool AppliedIndexExists, bool PendingIndexExists)> ReadMongoDbIndexStateAsync(

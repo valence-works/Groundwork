@@ -7,15 +7,10 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
-public sealed class MongoDbGroundworkMaterializerTests : IAsyncLifetime
+public sealed class MongoDbGroundworkMaterializerTests(MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-materializer-rs")
-        .Build();
-
-    public async Task InitializeAsync() => await container.StartAsync();
-
-    public async Task DisposeAsync() => await container.DisposeAsync();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public async Task MaterializeCreatesCollectionIndexesAndSchemaHistoryIdempotently()

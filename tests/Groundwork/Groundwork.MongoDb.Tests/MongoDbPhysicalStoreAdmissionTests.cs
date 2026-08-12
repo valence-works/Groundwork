@@ -13,15 +13,10 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
-public sealed class MongoDbPhysicalStoreAdmissionTests : IAsyncLifetime
+public sealed class MongoDbPhysicalStoreAdmissionTests(MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-admission-rs")
-        .Build();
-
-    public Task InitializeAsync() => container.StartAsync();
-
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public async Task OpenPhysicalAsync_opens_an_exactly_applied_target_without_applying_schema()

@@ -22,15 +22,10 @@ namespace Groundwork.MongoDb.Tests;
 /// against the row set alone so the four answers can be compared rather than each described in its own
 /// terms.
 /// </remarks>
-public sealed class MongoDbNullExcludedIndexTests(ITestOutputHelper output) : IAsyncLifetime
+public sealed class MongoDbNullExcludedIndexTests(ITestOutputHelper output, MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-rs")
-        .Build();
-
-    public Task InitializeAsync() => container.StartAsync();
-
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Theory]
     [InlineData(PhysicalStorageForm.PhysicalEntityTable)]

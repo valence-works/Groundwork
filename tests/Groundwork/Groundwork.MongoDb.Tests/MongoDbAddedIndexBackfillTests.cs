@@ -13,15 +13,10 @@ namespace Groundwork.MongoDb.Tests;
 /// document content directly (rather than a separate projection collection), an index added to a unit that
 /// already holds documents covers those pre-existing documents implicitly.
 /// </summary>
-public sealed class MongoDbAddedIndexBackfillTests : IAsyncLifetime
+public sealed class MongoDbAddedIndexBackfillTests(MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-added-index-rs")
-        .Build();
-
-    public async Task InitializeAsync() => await container.StartAsync();
-
-    public async Task DisposeAsync() => await container.DisposeAsync();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public async Task AddedIndexCoversPreexistingDocumentsWithoutExplicitBackfill()
