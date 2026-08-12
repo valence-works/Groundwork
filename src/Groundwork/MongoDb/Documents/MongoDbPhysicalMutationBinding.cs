@@ -468,6 +468,17 @@ internal sealed class MongoDbPhysicalMutationSelector
 
     public string ScopeField { get; }
 
+    /// <summary>
+    /// The declared behavior, carried so that changing it invalidates this durable selector definition.
+    /// </summary>
+    /// <remarks>
+    /// It deliberately does not reach the selector's filter. Row exclusion is a property of the route's
+    /// own index, and this selector does not use that index: <see cref="IndexKeys"/> is applied as an
+    /// ordinary non-sparse index with no partial filter expression, and validation re-asserts that on
+    /// every apply. Excluding documents whose mirror is unset would therefore drop documents the
+    /// predicate matches, for no gain in what the pinned index can serve — see
+    /// valence-works/Groundwork#166.
+    /// </remarks>
     public MissingValueBehavior MissingValueBehavior { get; }
 
     public IReadOnlyList<MongoDbPhysicalMutationMirrorField> Fields { get; }

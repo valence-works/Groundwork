@@ -50,7 +50,6 @@ public sealed class MongoDbPhysicalStorageModelTests
             query,
             plan,
             DocumentScopeSelection.Global,
-            storage,
             route));
 
         var residual = plan.Predicates.Single(predicate => predicate.Path == "status");
@@ -79,9 +78,9 @@ public sealed class MongoDbPhysicalStorageModelTests
         var scope = DocumentScopeSelection.Global;
 
         var lower = Render(MongoDbPhysicalQueryHandler.BuildFilter(
-            IdentityQuery("metric-\U00010428-\u00e9"), plan, scope, storage, route));
+            IdentityQuery("metric-\U00010428-\u00e9"), plan, scope, route));
         var upper = Render(MongoDbPhysicalQueryHandler.BuildFilter(
-            IdentityQuery("METRIC-\U00010400-\u00c9"), plan, scope, storage, route));
+            IdentityQuery("METRIC-\U00010400-\u00c9"), plan, scope, route));
 
         Assert.Equal(lower, upper);
         Assert.Contains("61c4070c8bb733ab75c6a4366219266bcf058446787a62365c57dd598de56181", lower.ToJson(), StringComparison.Ordinal);
@@ -277,13 +276,11 @@ public sealed class MongoDbPhysicalStorageModelTests
             IdentityQuery("metric-\U00010428-\u00e9", operation),
             plan,
             DocumentScopeSelection.Global,
-            storage,
             route));
         var upper = Render(MongoDbPhysicalQueryHandler.BuildFilter(
             IdentityQuery("METRIC-\U00010400-\u00c9", operation),
             plan,
             DocumentScopeSelection.Global,
-            storage,
             route));
 
         Assert.Equal(lower, upper);
@@ -316,7 +313,6 @@ public sealed class MongoDbPhysicalStorageModelTests
             IdentityQuery(string.Empty, PortableQueryOperation.StartsWith),
             queryPlan,
             DocumentScopeSelection.Global,
-            storage,
             route));
         var mutationFilter = Render(MongoDbPhysicalDocumentMutationHandler.BuildIdentityMutationFilter(
             comparison,

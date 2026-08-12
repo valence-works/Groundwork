@@ -2506,7 +2506,10 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         var database = Database();
         // The keyed column has to be nullable for Excluded to produce a partial filter at all, which is
         // what the "partial-omitted" case exists to detect the absence of.
-        var model = Model(PhysicalStorageForm.PhysicalEntityTable, isNullable: true);
+        var model = Model(
+            PhysicalStorageForm.PhysicalEntityTable,
+            isNullable: true,
+            missingValueBehavior: MissingValueBehavior.Excluded);
         var materializer = new MongoDbGroundworkMaterializer(database);
         await materializer.MaterializeAsync(model);
         var route = Assert.Single(model.Routes);
@@ -3275,7 +3278,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 PortableQueryOperation.NotEqual
             },
             isNullable: true,
-            isUnique: true);
+            isUnique: true,
+            missingValueBehavior: MissingValueBehavior.Excluded);
         await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
         var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
 
@@ -3287,15 +3291,22 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             "workItem", "null-a", "1", """{"status":null,"rank":3}""", ExpectedVersion: 0))).Status);
         Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, (await store.SaveAsync(new SaveDocumentRequest(
             "workItem", "null-b", "1", """{"status":null,"rank":4}""", ExpectedVersion: 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "present", "1", """{"status":"ready","rank":5}""", ExpectedVersion: 0))).Status);
 
-        var equalNull = await store.QueryAsync(new DocumentQuery(
-            "workItem", "list-by-status",
-            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", null))]));
+        // An explicit null is a value the index keeps, so {$ne: null} is answerable from the index and
+        // still separates it from the documents that have no field at all.
         var notNull = await store.QueryAsync(new DocumentQuery(
             "workItem", "list-by-status",
             [DocumentQueryClause.Of(DocumentQueryComparison.NotEqual("status", null))]));
-        Assert.Equal(["null-a"], equalNull.Documents.Select(document => document.Id));
-        Assert.DoesNotContain(notNull.Documents, document => document.Id.StartsWith("missing-", StringComparison.Ordinal));
+        Assert.Equal(["present"], notNull.Documents.Select(document => document.Id));
+
+        // The mirror image is not answerable: {status: null} also matches every document with no field,
+        // and those are exactly the ones the partial index omits. See MongoDbNullExcludedIndexHintTests
+        // for the whole matrix — here it only has to be visible that the index cannot serve it.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.QueryAsync(new DocumentQuery(
+            "workItem", "list-by-status",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", null))])));
 
         var route = Assert.Single(model.Routes);
         var index = Assert.Single(route.Indexes);
@@ -3319,7 +3330,10 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     public async Task Widening_a_partially_filtered_index_rebuilds_it_without_its_filter()
     {
         var database = Database();
-        var narrow = Model(PhysicalStorageForm.PhysicalEntityTable, isNullable: true);
+        var narrow = Model(
+            PhysicalStorageForm.PhysicalEntityTable,
+            isNullable: true,
+            missingValueBehavior: MissingValueBehavior.Excluded);
         var widened = Model(
             PhysicalStorageForm.PhysicalEntityTable,
             isNullable: true,
@@ -3386,6 +3400,24 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             DocumentStoreAccess.Global);
 
         await SortOnlyResidualPredicateConformance.VerifyAsync(store, store);
+    }
+
+    /// <summary>
+    /// The MongoDB half of the settled inequality reading. It already matched documents with no value,
+    /// which is the behavior the relational providers were brought to; asserting it here is what stops
+    /// the two from drifting apart again.
+    /// </summary>
+    [Fact]
+    public async Task Not_equal_is_the_complement_of_equal_including_documents_with_no_value()
+    {
+        var database = Database();
+        var manifest = NotEqualNullSemanticsConformance.CreateManifest(
+            Guid.NewGuid().ToString("N")[..8]);
+        var model = MongoDbPhysicalStorageModel.Compile(manifest);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Global);
+
+        await NotEqualNullSemanticsConformance.VerifyAsync(store, store);
     }
 
     private IMongoDatabase Database() =>

@@ -224,7 +224,6 @@ public sealed class MongoDbPhysicalDocumentStore :
                 PhysicalQuerySourceKind.CollectionElements,
                 database,
                 route,
-                storage,
                 () => ResolveScope(Unit(route.StorageUnit.Value), StorageScopeOperation.Query, allowAcrossScopes: true),
                 collectionPlans.Select(Certification).ToArray(),
                 capabilities.NativeFieldIdentifiers,
@@ -237,7 +236,6 @@ public sealed class MongoDbPhysicalDocumentStore :
                 PhysicalQuerySourceKind.LinkedIndex,
                 database,
                 route,
-                storage,
                 () => ResolveScope(Unit(route.StorageUnit.Value), StorageScopeOperation.Query, allowAcrossScopes: true),
                 linkedPlans.Select(Certification).ToArray(),
                 capabilities.NativeFieldIdentifiers,
@@ -250,7 +248,6 @@ public sealed class MongoDbPhysicalDocumentStore :
                 PhysicalQuerySourceKind.NativeDocumentFields,
                 database,
                 route,
-                storage,
                 () => ResolveScope(Unit(route.StorageUnit.Value), StorageScopeOperation.Query, allowAcrossScopes: true),
                 nativePlans.Select(Certification).ToArray(),
                 capabilities.NativeFieldIdentifiers,
@@ -1219,20 +1216,29 @@ internal sealed record MongoDbPhysicalDocumentStoreExecutionHooks(
         static (_, _, _) => ValueTask.CompletedTask);
 }
 
+/// <summary>
+/// One bounded query's selector, the fields it reads, and the index pin it is entitled to.
+/// </summary>
+/// <remarks>
+/// The pin travels with the selector because it is decided from it. Keeping the two together is what
+/// stops execution and explain from reaching different conclusions about the same query.
+/// </remarks>
 internal sealed record MongoDbPhysicalQueryPredicate(
     FilterDefinition<BsonDocument> Filter,
-    IReadOnlyList<string> FieldIdentifiers);
+    IReadOnlyList<string> FieldIdentifiers,
+    BsonString? IndexHint);
 
 internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandler
 {
     internal const string LinkedIdentity = "Groundwork.MongoDb.LinkedIndex.v1";
     internal const string CollectionIdentity = "Groundwork.MongoDb.CollectionElements.v1";
     internal const string NativeIdentity = "Groundwork.MongoDb.NativeDocumentFields.v1";
+    /// <summary>The field no document carries, so that a selector naming it matches nothing.</summary>
+    private const string MatchNoneField = "_groundwork_match_none";
     internal static IReadOnlySet<PortableQueryOperation> Operations { get; } =
         Enum.GetValues<PortableQueryOperation>().ToFrozenSet();
     private readonly IMongoDatabase database;
     private readonly ExecutableStorageRoute route;
-    private readonly StorageUnitPhysicalStorage storage;
     private readonly Func<DocumentScopeSelection> scope;
     private readonly MongoDbPhysicalDocumentStoreOptions options;
     private readonly TimeProvider timeProvider;
@@ -1245,7 +1251,6 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         PhysicalQuerySourceKind source,
         IMongoDatabase database,
         ExecutableStorageRoute route,
-        StorageUnitPhysicalStorage storage,
         Func<DocumentScopeSelection> scope,
         IReadOnlyList<PhysicalQueryHandlerCertification> certifications,
         IReadOnlyDictionary<string, string> nativeFieldIdentifiers,
@@ -1258,7 +1263,6 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         Source = source;
         this.database = database;
         this.route = route;
-        this.storage = storage;
         this.scope = scope;
         this.options = options;
         this.timeProvider = timeProvider;
@@ -1267,7 +1271,6 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         explainer = new MongoDbPhysicalQueryExplainer(
             database,
             route,
-            storage,
             scope,
             transactionCapability);
         Certifications = Array.AsReadOnly(certifications.ToArray());
@@ -1297,10 +1300,10 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         var collection = database.GetCollection<BsonDocument>(plan.LookupObject.Identifier);
         var resolvedScope = scope();
         DocumentQueryContinuationCodec.ValidateScope(plan, resolvedScope);
-        var basePredicate = BuildPredicate(query, plan, resolvedScope, storage, route);
+        var basePredicate = BuildPredicate(query, plan, resolvedScope, route);
         var pagePredicate = BuildPagePredicate(query, plan, resolvedScope, basePredicate);
         var sort = BuildSort(query, plan);
-        var indexHint = PlanIndexHint(plan, route);
+        var indexHint = basePredicate.IndexHint;
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical snapshot query",
@@ -1597,8 +1600,9 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
             return result?.GetValue("total", 0).ToInt64() ?? 0;
         }
         var collection = database.GetCollection<BsonDocument>(plan.LookupObject.Identifier);
-        var filter = BuildFilter(query, plan, scope(), storage, route);
-        var indexHint = PlanIndexHint(plan, route);
+        var predicate = BuildPredicate(query, plan, scope(), route);
+        var filter = predicate.Filter;
+        var indexHint = predicate.IndexHint;
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical count query",
@@ -1655,14 +1659,13 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                 .Aggregate<BsonDocument>(CollectionMembershipPipeline(query, plan, route, scope()).ToArray())
                 .AnyAsync(cancellationToken);
         }
-        var filter = BuildFilter(query, plan, scope(), storage, route);
-        var indexHint = PlanIndexHint(plan, route);
+        var predicate = BuildPredicate(query, plan, scope(), route);
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical existence query",
             cancellationToken);
         return await database.GetCollection<BsonDocument>(plan.LookupObject.Identifier)
-            .Find(filter, new FindOptions { Hint = indexHint })
+            .Find(predicate.Filter, new FindOptions { Hint = predicate.IndexHint })
             .Limit(1)
             .AnyAsync(cancellationToken);
     }
@@ -1677,15 +1680,23 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         DocumentQuery query,
         PhysicalQueryPlan plan,
         DocumentScopeSelection scope,
-        StorageUnitPhysicalStorage storage,
         ExecutableStorageRoute route) =>
-        BuildPredicate(query, plan, scope, storage, route).Filter;
+        BuildPredicate(query, plan, scope, route).Filter;
 
+    /// <summary>
+    /// Builds the selector for one bounded query together with the index pin it may carry.
+    /// </summary>
+    /// <remarks>
+    /// The pin is decided from the predicate rather than from the plan alone, because an index that
+    /// declares <see cref="MissingValueBehavior.Excluded"/> is emitted as a partial index and therefore
+    /// holds fewer documents than the collection. MongoDB accepts a hint the predicate does not imply,
+    /// answers from the smaller index, and returns the short result set without complaint — unlike SQL
+    /// Server, which refuses the plan outright. Deciding here is what makes that silence impossible.
+    /// </remarks>
     internal static MongoDbPhysicalQueryPredicate BuildPredicate(
         DocumentQuery query,
         PhysicalQueryPlan plan,
         DocumentScopeSelection scope,
-        StorageUnitPhysicalStorage storage,
         ExecutableStorageRoute route)
     {
         var fieldIdentifiers = new HashSet<string>(StringComparer.Ordinal)
@@ -1701,40 +1712,64 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
             filters.Add(Builders<BsonDocument>.Filter.Eq(plan.Scope.Field.Identifier, scope.StorageKey));
             fieldIdentifiers.Add(plan.Scope.Field.Identifier);
         }
-        var logicalIndex = storage.LogicalIndexes.Single(index => index.Identity == plan.LogicalIndexIdentity);
-        if (logicalIndex.MissingValueBehavior == MissingValueBehavior.Excluded)
-        {
-            var physicalIndex = route.Indexes.SingleOrDefault(index => index.Identity == plan.LogicalIndexIdentity);
-            var membershipFields = physicalIndex is null
-                ? logicalIndex.Fields
-                    .Where(field => !PhysicalDocumentFieldPaths.IsEnvelope(field.Path))
-                    .Select(field => $"{MongoDbPhysicalStorageFields.NativeContent}.{field.Path}")
-                    .ToArray()
-                : MongoDbPhysicalIndexSemantics.ValueFields(route, physicalIndex);
-            filters.AddRange(membershipFields.Select(field => Builders<BsonDocument>.Filter.Exists(field, true)));
-            fieldIdentifiers.UnionWith(membershipFields);
-        }
+        var provenPresentFields = new HashSet<string>(StringComparer.Ordinal);
+        var matchesNoDocuments = false;
         foreach (var clause in query.Clauses)
         {
             if (clause.Comparisons.Count == 0)
             {
-                const string matchNone = "_groundwork_match_none";
+                // A clause admitting no document makes the whole conjunction one, and a predicate that
+                // returns nothing cannot omit anything — so it keeps the pin whatever the index excludes.
                 return new MongoDbPhysicalQueryPredicate(
-                    Builders<BsonDocument>.Filter.Eq(matchNone, true),
-                    [matchNone]);
+                    Builders<BsonDocument>.Filter.Eq(MatchNoneField, true),
+                    [MatchNoneField],
+                    PlanIndexHint(query, plan, route, provenPresentFields, matchesNoDocuments: true).Hint);
             }
-            fieldIdentifiers.UnionWith(clause.Comparisons.Select(comparison =>
-                plan.Predicates.Single(predicate => predicate.Path == comparison.Path).Field.Identifier));
-            filters.Add(Builders<BsonDocument>.Filter.Or(clause.Comparisons.Select(comparison =>
-                Comparison(
-                    comparison,
-                    plan,
-                    plan.Predicates.Single(predicate => predicate.Path == comparison.Path).Field,
-                    route))));
+            var alternatives = new List<FilterDefinition<BsonDocument>>();
+            HashSet<string>? clausePresent = null;
+            foreach (var comparison in clause.Comparisons)
+            {
+                var field = plan.Predicates.Single(predicate => predicate.Path == comparison.Path).Field;
+                fieldIdentifiers.Add(field.Identifier);
+                alternatives.Add(Comparison(comparison, plan, field, route));
+                // An alternative that matches nothing contributes no documents to the disjunction, so it
+                // neither widens what the clause can return nor constrains it. Folding it into the
+                // intersection below would wrongly read it as "proves nothing".
+                if (MatchesNoDocuments(comparison))
+                    continue;
+                var alternativePresent = new HashSet<string>(StringComparer.Ordinal);
+                // The identifier alone is the right key, without first proving it names a projected
+                // column: an index only ever excludes documents for its own projected columns, so a
+                // native path such as "native_content.name" simply never appears in that set. Asking the
+                // plan instead would be wrong here — MongoDB reads projected columns through its native
+                // field source, which reports the field as a native path while still naming the column.
+                if (RejectsMissingValues(comparison))
+                    alternativePresent.Add(field.Identifier);
+                // The clause is a disjunction, so it only proves a field present when every alternative
+                // does. One alternative that can match a document lacking the field is enough to make
+                // the whole clause able to.
+                if (clausePresent is null)
+                    clausePresent = alternativePresent;
+                else
+                    clausePresent.IntersectWith(alternativePresent);
+            }
+            filters.Add(Builders<BsonDocument>.Filter.Or(alternatives));
+            if (clausePresent is null)
+                matchesNoDocuments = true;
+            else
+                provenPresentFields.UnionWith(clausePresent);
+        }
+        var (indexHint, presentFields) =
+            PlanIndexHint(query, plan, route, provenPresentFields, matchesNoDocuments);
+        foreach (var field in presentFields)
+        {
+            filters.Add(Builders<BsonDocument>.Filter.Exists(field, true));
+            fieldIdentifiers.Add(field);
         }
         return new MongoDbPhysicalQueryPredicate(
             Builders<BsonDocument>.Filter.And(filters),
-            fieldIdentifiers.Order(StringComparer.Ordinal).ToArray());
+            fieldIdentifiers.Order(StringComparer.Ordinal).ToArray(),
+            indexHint);
     }
 
     internal static MongoDbPhysicalQueryPredicate BuildPagePredicate(
@@ -1747,6 +1782,8 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
             return basePredicate;
         var values = DocumentQueryContinuationCodec.Decode(query.Continuation, query, plan, scope);
         var order = DocumentQueryOrderResolver.Resolve(query, plan);
+        // The continuation only narrows the page, so it can never reach a document the base predicate
+        // already excluded. The pin decided for that predicate therefore still holds.
         return new MongoDbPhysicalQueryPredicate(
             Builders<BsonDocument>.Filter.And(
                 basePredicate.Filter,
@@ -1755,7 +1792,8 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                 .Concat(order.Select(item => item.Field.Identifier))
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
-                .ToArray());
+                .ToArray(),
+            basePredicate.IndexHint);
     }
 
     internal static SortDefinition<BsonDocument> BuildSort(DocumentQuery query, PhysicalQueryPlan plan)
@@ -1767,7 +1805,57 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                 : Builders<BsonDocument>.Sort.Descending(order.Field.Identifier)));
     }
 
-    internal static BsonString? PlanIndexHint(PhysicalQueryPlan plan, ExecutableStorageRoute route)
+    /// <summary>
+    /// Decides whether the planned index may be pinned for the predicate just built, and returns the
+    /// fields whose presence the selector has to state alongside it.
+    /// </summary>
+    /// <remarks>
+    /// A pinned partial index can only serve a predicate that provably matches none of the documents it
+    /// omits. Where that holds, the presence conjuncts are redundant by construction and exist so the
+    /// selector spells out the implication the index filter assumes. Where it does not, pinning would
+    /// drop documents the predicate can match, so a scale-bearing query is refused by name rather than
+    /// silently under-served, and any other query falls back to letting MongoDB choose an index.
+    /// </remarks>
+    private static (BsonString? Hint, IReadOnlyList<string> PresentFields) PlanIndexHint(
+        DocumentQuery query,
+        PhysicalQueryPlan plan,
+        ExecutableStorageRoute route,
+        IReadOnlySet<string> provenPresentFields,
+        bool matchesNoDocuments)
+    {
+        var index = PlanIndex(plan, route);
+        if (index is null)
+            return (null, []);
+        var hint = new BsonString(index.Name.Identifier);
+        if (matchesNoDocuments)
+            return (hint, []);
+        // The one definition of what the index omits, shared with the schema side that emits the partial
+        // filter and the validation that compares them. A second copy here is how they start to disagree.
+        var excluded = PhysicalIndexNullExclusion.Columns(route, index);
+        if (excluded.Length == 0)
+            return (hint, []);
+        var unproven = excluded.Where(column => !provenPresentFields.Contains(column)).ToArray();
+        if (unproven.Length == 0)
+            return (hint, excluded);
+        if (plan.IsScaleBearing)
+        {
+            throw new InvalidOperationException(
+                $"Document query '{query.QueryIdentity}' is scale-bearing on physical index " +
+                $"'{index.Name.Identifier}', which declares MissingValueBehavior.Excluded and so omits " +
+                $"documents whose {string.Join(" or ", unproven.Select(column => $"'{column}'"))} is " +
+                "absent. Its predicate can match those documents, so the index cannot serve the query " +
+                "without dropping them — and MongoDB drops them silently rather than refusing the hint. " +
+                "Declare the index MissingValueBehavior.IncludedAsNull so it keeps every document — an " +
+                "already-applied index is rebuilt under it, which is additive. A unique index that keys a " +
+                "nullable column cannot take that route, because null-distinct uniqueness is not portable " +
+                "(GW-ROUTE-007); bind the query to an index that keys no nullable column, make the column " +
+                "non-nullable, or declare a new index identity for the shape the query needs.");
+        }
+        return (null, []);
+    }
+
+    /// <summary>The route index the plan pins, or <see langword="null"/> when the plan pins none.</summary>
+    private static ExecutablePhysicalIndexRoute? PlanIndex(PhysicalQueryPlan plan, ExecutableStorageRoute route)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(route);
@@ -1784,8 +1872,43 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
                 $"'{plan.IndexName.Identifier}' for logical index '{plan.LogicalIndexIdentity}'.");
         }
 
-        return new BsonString(routeIndex.Name.Identifier);
+        return routeIndex;
     }
+
+    /// <summary>
+    /// Whether the comparison, as rendered by <see cref="Comparison"/>, can only match documents that
+    /// carry the field.
+    /// </summary>
+    /// <remarks>
+    /// Presence, not non-nullness: a document may hold an explicit null and the partial filter keeps it,
+    /// so what has to be proved is only that the field is there. The reading is MongoDB's, and it parts
+    /// company with SQL on <c>NotEqual</c>: <c>{$ne: v}</c> also matches a document that has no such
+    /// field, so it proves nothing, where relational <c>&lt;&gt; @p</c> is unknown for null and therefore
+    /// does. Only <c>{$ne: null}</c> excludes the absent case, which is why the value decides
+    /// <c>NotEqual</c> in the opposite direction from every other operator. <c>NotContains</c> proves
+    /// nothing either way — it is defined to match a null or absent field — and <c>Equal</c> to null
+    /// renders <c>{field: null}</c>, which matches the absent documents together with the null ones.
+    /// </remarks>
+    private static bool RejectsMissingValues(DocumentQueryComparison comparison) => comparison.Operator switch
+    {
+        QueryComparisonOperator.NotEqual => comparison.Values.Count == 0 || comparison.Values[0] is null,
+        QueryComparisonOperator.NotContains => false,
+        QueryComparisonOperator.In =>
+            comparison.Values.Count > 0 && comparison.Values.All(value => value is not null),
+        QueryComparisonOperator.Equal or
+            QueryComparisonOperator.GreaterThan or QueryComparisonOperator.GreaterThanOrEqual or
+            QueryComparisonOperator.LessThan or QueryComparisonOperator.LessThanOrEqual or
+            QueryComparisonOperator.Contains or QueryComparisonOperator.StartsWith =>
+            comparison.Values[0] is not null,
+        _ => false
+    };
+
+    /// <summary>
+    /// Whether the comparison renders the match-nothing sentinel. An empty membership set is the only
+    /// shape that does, on the projected and the identity path alike.
+    /// </summary>
+    private static bool MatchesNoDocuments(DocumentQueryComparison comparison) =>
+        comparison.Operator == QueryComparisonOperator.In && comparison.Values.Count == 0;
 
     internal static IReadOnlyList<BsonDocument> LatestPerKeyPagePipeline(
         BsonDocument renderedFilter,
@@ -1903,7 +2026,7 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         {
             return order.Direction == PhysicalSortDirection.Ascending
                 ? Builders<BsonDocument>.Filter.Ne(field, BsonNull.Value)
-                : Builders<BsonDocument>.Filter.Eq("_groundwork_match_none", true);
+                : Builders<BsonDocument>.Filter.Eq(MatchNoneField, true);
         }
 
         var boundary = ToBsonValue(value);
@@ -2070,7 +2193,7 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
             QueryComparisonOperator.Equal => Builders<BsonDocument>.Filter.Eq(field, value),
             QueryComparisonOperator.NotEqual => Builders<BsonDocument>.Filter.Ne(field, value),
             QueryComparisonOperator.In => comparison.Values.Count == 0
-                ? Builders<BsonDocument>.Filter.Eq("_groundwork_match_none", true)
+                ? Builders<BsonDocument>.Filter.Eq(MatchNoneField, true)
                 : Builders<BsonDocument>.Filter.In(field, comparison.Values.Select(ToValue).ToArray()),
             QueryComparisonOperator.Contains => Builders<BsonDocument>.Filter.Regex(field, new BsonRegularExpression(Regex.Escape(comparison.Values[0]!), "i")),
             QueryComparisonOperator.NotContains => Builders<BsonDocument>.Filter.Not(

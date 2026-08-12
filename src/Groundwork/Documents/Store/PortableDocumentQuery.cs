@@ -16,6 +16,18 @@ public enum QueryComparisonOperator
     /// <summary>Case-insensitive substring match (SQL <c>LIKE '%v%'</c>). A null/absent field yields no match.</summary>
     Contains,
 
+    /// <summary>
+    /// The exact complement of <see cref="Equal"/>: a document matches this precisely when it does not
+    /// match <see cref="Equal"/> for the same value. A null/absent field therefore matches a non-null
+    /// value, and matches nothing when the value is <see langword="null"/>.
+    /// </summary>
+    /// <remarks>
+    /// This is deliberately not SQL's three-valued <c>&lt;&gt;</c>, which is unknown for null and drops
+    /// those rows. Taking the complement keeps <see cref="Equal"/> and <see cref="NotEqual"/> a partition
+    /// of the documents for every value, matches the reading <see cref="NotContains"/> already has, and
+    /// means no document can fall through both halves of a two-branch query. Relational providers render
+    /// the null branch explicitly to get there.
+    /// </remarks>
     NotEqual,
     StartsWith,
     GreaterThan,

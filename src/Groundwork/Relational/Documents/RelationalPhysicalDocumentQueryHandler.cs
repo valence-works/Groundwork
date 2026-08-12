@@ -834,14 +834,15 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
     /// Whether the comparison, as rendered, can only match rows whose field is non-null.
     /// </summary>
     /// <remarks>
-    /// Note the asymmetry between the two negations: <c>NotEqual</c> qualifies, because both
-    /// <c>&lt;&gt; @p</c> and its null form <c>IS NOT NULL</c> drop nulls, while <c>NotContains</c> does
-    /// not, because it is defined to match a null or absent field. <c>Equal</c> depends on the value —
-    /// a null one renders <c>IS NULL</c>, which matches precisely the rows an excluding index omits.
+    /// Both negations behave the same way, and the value is what separates them from the rest:
+    /// <c>NotEqual</c> and <c>NotContains</c> are complements, so they match a null row unless the value
+    /// is itself null — <c>NotEqual</c> to null renders <c>IS NOT NULL</c>, which is the one negation
+    /// that drops nulls. <c>Equal</c> runs the other way: a null value renders <c>IS NULL</c>, which
+    /// matches precisely the rows an excluding index omits.
     /// </remarks>
     private static bool RejectsNulls(DocumentQueryComparison comparison) => comparison.Operator switch
     {
-        QueryComparisonOperator.NotEqual => true,
+        QueryComparisonOperator.NotEqual => comparison.Values.Count == 0 || comparison.Values[0] is null,
         QueryComparisonOperator.NotContains => false,
         QueryComparisonOperator.In =>
             comparison.Values.Count > 0 && comparison.Values.All(value => value is not null),
@@ -997,7 +998,11 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             Convert(comparison.Values[0]),
             parameters,
             predicateFieldIdentifiers,
-            ref parameterIndex);
+            ref parameterIndex,
+            // Only a projected column declares whether it can be absent. A canonical-JSON path reads as
+            // NULL when the document omits it and says nothing about that in the schema, so anything
+            // else has to be treated as nullable.
+            isAlwaysPresent: projection is { Definition.IsNullable: false });
     }
 
     private sealed class PhysicalQueryValueComparer : IEqualityComparer<object>
@@ -1103,6 +1108,11 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             _ => throw new ArgumentOutOfRangeException(nameof(value), value, null)
         };
 
+    /// <summary>
+    /// Renders one scalar comparison. <paramref name="isAlwaysPresent"/> states that the field cannot be
+    /// null, which lets inequality keep its sargable form; it defaults to false so an unproven field
+    /// gets the null-safe rendering rather than silently dropping rows.
+    /// </summary>
     private string ScalarComparison(
         PhysicalQueryField queryField,
         string field,
@@ -1110,7 +1120,8 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         object? value,
         List<(string Name, object? Value)> parameters,
         ISet<string> predicateFieldIdentifiers,
-        ref int parameterIndex)
+        ref int parameterIndex,
+        bool isAlwaysPresent = false)
     {
         predicateFieldIdentifiers.Add(queryField.Identifier);
         if (value is null)
@@ -1134,7 +1145,14 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         return operation switch
         {
             QueryComparisonOperator.Equal => $"{field} = {parameter}",
-            QueryComparisonOperator.NotEqual => $"{field} <> {parameter}",
+            // NotEqual is the complement of Equal, so a row with no value matches a non-null one — the
+            // same total-complement reading NotContains already carries. Bare <> is unknown for NULL and
+            // would drop exactly those rows, which is how a row could fall through both halves of a
+            // two-branch query. Where the field cannot be null the two forms agree, so the sargable one
+            // is kept: document identity columns and non-nullable projected columns.
+            QueryComparisonOperator.NotEqual => isAlwaysPresent || IsDocumentIdentityField(queryField)
+                ? $"{field} <> {parameter}"
+                : $"({field} IS NULL OR {field} <> {parameter})",
             QueryComparisonOperator.GreaterThan => $"{field} > {parameter}",
             QueryComparisonOperator.GreaterThanOrEqual => $"{field} >= {parameter}",
             QueryComparisonOperator.LessThan => $"{field} < {parameter}",
