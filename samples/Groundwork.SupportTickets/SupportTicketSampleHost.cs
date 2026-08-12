@@ -91,10 +91,6 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
             case SupportTicketProvider.Sqlite:
                 {
                     var provider = Provider("groundwork-sqlite");
-                    var target = PhysicalSchemaTargetCompiler.Compile(
-                        manifest,
-                        provider,
-                        SqliteGroundworkCapabilities.PhysicalNames);
                     var builder = new SqliteConnectionStringBuilder(options.ConnectionString);
                     SqlitePhysicalDocumentStore store;
                     if (builder.Mode == SqliteOpenMode.Memory || builder.DataSource == ":memory:")
@@ -130,17 +126,13 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
 
                     return (
                         store,
-                        SqlitePhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.DocumentKind), provider),
-                        SqlitePhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.CommentDocumentKind), provider),
+                        SqlitePhysicalQueryRuntime.Create(store, manifest, Route(store.Routes, SupportTicketManifest.DocumentKind), provider),
+                        SqlitePhysicalQueryRuntime.Create(store, manifest, Route(store.Routes, SupportTicketManifest.CommentDocumentKind), provider),
                         disposables);
                 }
             case SupportTicketProvider.PostgreSql:
                 {
                     var provider = Provider("groundwork-postgresql");
-                    var target = PhysicalSchemaTargetCompiler.Compile(
-                        manifest,
-                        provider,
-                        PostgreSqlGroundworkCapabilities.PhysicalNames);
                     var store = await PostgreSqlDocumentStoreFactory.OpenPhysicalAsync(
                         options.ConnectionString,
                         manifest,
@@ -150,17 +142,13 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
                         cancellationToken: cancellationToken);
                     return (
                         store,
-                        PostgreSqlPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.DocumentKind), provider),
-                        PostgreSqlPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.CommentDocumentKind), provider),
+                        PostgreSqlPhysicalQueryRuntime.Create(store, manifest, Route(store.Routes, SupportTicketManifest.DocumentKind), provider),
+                        PostgreSqlPhysicalQueryRuntime.Create(store, manifest, Route(store.Routes, SupportTicketManifest.CommentDocumentKind), provider),
                         disposables);
                 }
             case SupportTicketProvider.SqlServer:
                 {
                     var provider = Provider("groundwork-sqlserver");
-                    var target = PhysicalSchemaTargetCompiler.Compile(
-                        manifest,
-                        provider,
-                        SqlServerGroundworkCapabilities.PhysicalNames);
                     var store = await SqlServerDocumentStoreFactory.OpenPhysicalAsync(
                         options.ConnectionString,
                         manifest,
@@ -170,8 +158,8 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
                         cancellationToken: cancellationToken);
                     return (
                         store,
-                        SqlServerPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.DocumentKind), provider),
-                        SqlServerPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.CommentDocumentKind), provider),
+                        SqlServerPhysicalQueryRuntime.Create(store, manifest, Route(store.Routes, SupportTicketManifest.DocumentKind), provider),
+                        SqlServerPhysicalQueryRuntime.Create(store, manifest, Route(store.Routes, SupportTicketManifest.CommentDocumentKind), provider),
                         disposables);
                 }
             case SupportTicketProvider.MongoDb:
@@ -210,6 +198,6 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
 
     private static GroundworkRuntimeSchemaAdmissionOptions AutoApplyOnStartup() => new() { AutoApplyOnStartup = true };
 
-    private static ExecutableStorageRoute Route(PhysicalSchemaTarget target, string documentKind) =>
-        target.Routes.Single(route => route.StorageUnit.Value == documentKind);
+    private static ExecutableStorageRoute Route(IReadOnlyList<ExecutableStorageRoute> routes, string documentKind) =>
+        routes.Single(route => route.StorageUnit.Value == documentKind);
 }

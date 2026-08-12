@@ -520,9 +520,8 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
     public MissingValueBehavior MissingValueBehavior { get; }
 
     /// <summary>
-    /// Declaration-default maximum count of UTF-16 code units for String and Keyword fields, overridden
-    /// per field by <see cref="IndexField.Length"/>. Bounds the synthesized projected column so providers
-    /// with finite index-key budgets (SQL Server) can certify declared-mode indexes.
+    /// Default maximum UTF-16 code-unit count for <see cref="IndexValueKind.String"/> and
+    /// <see cref="IndexValueKind.Keyword"/> fields.
     /// </summary>
     public int? Length { get; }
 
@@ -535,17 +534,10 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
     public IndexValueKind GetValueKind(string path) =>
         GetValueKind(Fields.Single(field => field.Path == path));
 
-    /// <summary>
-    /// The effective declared length for one field. The declaration default only reaches String and
-    /// Keyword fields; an explicit field-level length is always surfaced so validation can reject it
-    /// on kinds that cannot be bounded.
-    /// </summary>
     public int? GetLength(IndexField field)
     {
         ArgumentNullException.ThrowIfNull(field);
-        return GetValueKind(field) is IndexValueKind.String or IndexValueKind.Keyword
-            ? field.Length ?? Length
-            : field.Length;
+        return field.Length ?? Length;
     }
 
     public bool Equals(LogicalIndexDeclaration? other) =>

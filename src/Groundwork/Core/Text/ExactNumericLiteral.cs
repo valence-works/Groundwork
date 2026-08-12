@@ -1,9 +1,14 @@
 using System.Globalization;
 
-namespace Groundwork.Relational.Physicalization;
+namespace Groundwork.Core.Text;
 
-/// <summary>Exact base-ten lexical value used before any CLR numeric conversion can round it.</summary>
-internal sealed class ExactNumericLiteral
+/// <summary>
+/// Exact base-ten lexical value used before any CLR or provider numeric conversion can round it.
+/// Shared by the relational and MongoDB physicalization layers; public only because those
+/// consumers live in other assemblies and Groundwork.Core grants them no InternalsVisibleTo.
+/// Not intended as a general-purpose numeric type.
+/// </summary>
+public sealed class ExactNumericLiteral
 {
     private const string DecimalMaximumCoefficient = "79228162514264337593543950335";
 
@@ -21,6 +26,12 @@ internal sealed class ExactNumericLiteral
     private string Digits { get; }
     private int FractionalDigits { get; }
     private int Exponent { get; }
+
+    /// <summary>The source lexeme with surrounding whitespace removed, otherwise byte-for-byte as parsed.</summary>
+    public string OriginalText => Original.Trim();
+
+    /// <summary>Whether the literal is numerically zero regardless of its spelling ("0", "0.00", "0e5").</summary>
+    public bool IsZero => Digits == "0";
 
     public static ExactNumericLiteral Parse(string value)
     {
@@ -107,6 +118,11 @@ internal sealed class ExactNumericLiteral
         ? value
         : throw IntegerOverflow();
 
+    /// <summary>
+    /// Converts to <see cref="decimal"/> without declared precision/scale. The scale &gt; 28 and
+    /// coefficient guards here protect CLR decimal representability only; validation against
+    /// declared schema metadata goes through <see cref="ValidateScaledDigits"/> instead.
+    /// </summary>
     public decimal ToDecimal()
     {
         if (Digits == "0")
@@ -134,47 +150,21 @@ internal sealed class ExactNumericLiteral
         return DecimalFromCoefficient(coefficient, (int)scale);
     }
 
-    public decimal ToDecimal(int precision, int scale, string logicalName)
+    public decimal ToDecimal(int precision, int scale, string logicalName) =>
+        DecimalFromCoefficient(ValidateScaledDigits(precision, scale, logicalName), scale);
+
+    /// <summary>
+    /// Validates the literal against a declared decimal precision and scale and returns the
+    /// unsigned coefficient at that scale ("0" when the value is zero). Providers that persist
+    /// the lexeme as text (for example BSON Decimal128) call this for validation alone and store
+    /// <see cref="OriginalText"/>. The precision 1..28 guard applies to every provider: Core's
+    /// physical-storage resolver rejects Decimal columns declared with precision above 28
+    /// (GW-PHYSICAL-018), so Decimal128's wider exponent range is never reachable here.
+    /// </summary>
+    public string ValidateScaledDigits(int precision, int scale, string logicalName)
     {
         if (precision is < 1 or > 28 || scale < 0 || scale > precision)
             throw new InvalidOperationException("A Decimal projection requires precision 1..28 and scale 0..precision.");
-        var coefficient = ToScaledDigits(precision, scale, logicalName);
-        return DecimalFromCoefficient(coefficient, scale);
-    }
-
-    private string ToIntegerDigits(int maximumDigits)
-    {
-        if (Digits == "0")
-            return "0";
-        var coefficient = Digits;
-        long shift = (long)Exponent - FractionalDigits;
-        if (shift < 0)
-        {
-            var removedDigits = -shift;
-            if (removedDigits > coefficient.Length ||
-                coefficient.AsSpan(coefficient.Length - (int)removedDigits).ContainsAnyExcept('0'))
-            {
-                throw IntegerOverflow();
-            }
-            coefficient = coefficient[..^(int)removedDigits];
-        }
-        else if (shift > 0)
-        {
-            if (coefficient.Length + shift > maximumDigits)
-                throw IntegerOverflow();
-            coefficient += new string('0', (int)shift);
-        }
-
-        coefficient = coefficient.TrimStart('0');
-        if (coefficient.Length == 0)
-            return "0";
-        if (coefficient.Length > maximumDigits)
-            throw IntegerOverflow();
-        return coefficient;
-    }
-
-    private string ToScaledDigits(int precision, int scale, string logicalName)
-    {
         if (Digits == "0")
             return "0";
         var coefficient = Digits;
@@ -208,6 +198,37 @@ internal sealed class ExactNumericLiteral
             throw new InvalidDataException(
                 $"Decimal value '{Original}' exceeds declared precision {precision} for '{logicalName}'.");
         }
+        return coefficient;
+    }
+
+    private string ToIntegerDigits(int maximumDigits)
+    {
+        if (Digits == "0")
+            return "0";
+        var coefficient = Digits;
+        long shift = (long)Exponent - FractionalDigits;
+        if (shift < 0)
+        {
+            var removedDigits = -shift;
+            if (removedDigits > coefficient.Length ||
+                coefficient.AsSpan(coefficient.Length - (int)removedDigits).ContainsAnyExcept('0'))
+            {
+                throw IntegerOverflow();
+            }
+            coefficient = coefficient[..^(int)removedDigits];
+        }
+        else if (shift > 0)
+        {
+            if (coefficient.Length + shift > maximumDigits)
+                throw IntegerOverflow();
+            coefficient += new string('0', (int)shift);
+        }
+
+        coefficient = coefficient.TrimStart('0');
+        if (coefficient.Length == 0)
+            return "0";
+        if (coefficient.Length > maximumDigits)
+            throw IntegerOverflow();
         return coefficient;
     }
 

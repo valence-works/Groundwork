@@ -22,19 +22,6 @@ public sealed class SqlitePhysicalNameNormalizer : IProviderPhysicalNameNormaliz
         _ => context.LogicalName
     };
 
-    public string GetCollisionScope(ProviderPhysicalNameContext context) => context.ObjectKind switch
-    {
-        PhysicalObjectKind.PrimaryStorage or
-        PhysicalObjectKind.LinkedIndexStorage or
-        PhysicalObjectKind.CollectionElementStorage or
-        PhysicalObjectKind.PhysicalIndex or
-        PhysicalObjectKind.SchemaHistory => "schema-objects",
-        PhysicalObjectKind.EnvelopeField or PhysicalObjectKind.ProjectedField =>
-            $"{context.StorageUnit.Value}:columns",
-        PhysicalObjectKind.LinkedIndexField or PhysicalObjectKind.LinkedProjectedField =>
-            $"{context.StorageUnit.Value}:linked-columns",
-        PhysicalObjectKind.CollectionElementField =>
-            $"{context.StorageUnit.Value}:collection-element-columns",
-        _ => throw new ArgumentOutOfRangeException(nameof(context), context.ObjectKind, null)
-    };
+    public string GetCollisionScope(ProviderPhysicalNameContext context) =>
+        ProviderPhysicalNameNormalizerDefaults.GetCollisionScope(context, "schema-objects");
 }

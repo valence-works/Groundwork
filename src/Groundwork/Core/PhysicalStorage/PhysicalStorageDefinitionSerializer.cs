@@ -51,6 +51,8 @@ public static class PhysicalStorageDefinitionSerializer
                 writer.WriteString("path", demand.Path);
                 writer.WriteString("sortDirection", demand.SortDirection.ToString());
                 writer.WriteString("valueKind", demand.ValueKind.ToString());
+                if (demand.Length is not null)
+                    writer.WriteNumber("length", demand.Length.Value);
                 writer.WriteString("missingValueBehavior", demand.MissingValueBehavior.ToString());
                 writer.WritePropertyName("operations");
                 writer.WriteStartArray();
@@ -83,6 +85,8 @@ public static class PhysicalStorageDefinitionSerializer
                     writer.WriteStartObject();
                     writer.WriteString("path", predicate.Path);
                     writer.WriteString("valueKind", predicate.ValueKind.ToString());
+                    if (predicate.Length is not null)
+                        writer.WriteNumber("length", predicate.Length.Value);
                     writer.WriteBoolean("required", predicate.IsRequired);
                     writer.WritePropertyName("operations");
                     writer.WriteStartArray();

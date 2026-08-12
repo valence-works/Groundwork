@@ -106,14 +106,6 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
             .Replace("::name", string.Empty, StringComparison.OrdinalIgnoreCase)
             .ToLowerInvariant();
 
-    public override string? NormalizeDefault(ProjectedColumnDefinition definition) =>
-        definition.DefaultValue is null ? null : DefaultSql(definition);
-
-    public override string EnvelopeColumn(string name, RelationalEnvelopeColumnKind kind) =>
-        $"{QuoteIdentifier(name)} {EnvelopeType(kind)}" +
-        (EnvelopeCollation(kind) is { } collation ? $" COLLATE {CollationToken(collation)}" : string.Empty) +
-        " NOT NULL";
-
     public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey) =>
         $"CREATE TABLE {QuoteIdentifier(table)} ({string.Join(", ", columns)}, PRIMARY KEY ({string.Join(", ", primaryKey.Select(QuoteIdentifier))}));";
 
@@ -122,11 +114,6 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
 
     public override string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
         $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} SET NOT NULL;";
-
-    public override string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
-        excludedColumns.Count > 0
-            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{QuoteIdentifier(column)} IS NOT NULL"))})"
-            : null;
 
     public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
         $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)} " +
@@ -276,11 +263,9 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
             throw new InvalidOperationException($"PostgreSQL physical-schema fence {fence} is no longer owned for target '{target}'.");
     }
 
-    public override async Task EnsureInfrastructureAsync(DbConnection connection, CancellationToken cancellationToken)
-    {
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        await EnsureInfrastructureHashFunctionAsync(connection, transaction, cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_locks", """
+    protected override IReadOnlyList<InfrastructureTable> InfrastructureTables =>
+    [
+        new("groundwork_physical_schema_locks", """
             CREATE TABLE groundwork_physical_schema_locks (
                 manifest_id text COLLATE pg_catalog."C" NOT NULL,
                 provider_name text COLLATE pg_catalog."C" NOT NULL,
@@ -288,8 +273,14 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
                 fence bigint NOT NULL,
                 PRIMARY KEY (manifest_id, provider_name)
             );
-            """, cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_operations", """
+            """,
+        [
+            new("manifest_id", "text", false, "C", 1),
+            new("provider_name", "text", false, "C", 2),
+            new("owner_id", "text", false, "C"),
+            new("fence", "bigint", false, null)
+        ]),
+        new("groundwork_physical_schema_operations", """
             CREATE TABLE groundwork_physical_schema_operations (
                 manifest_id text COLLATE pg_catalog."C" NOT NULL,
                 provider_name text COLLATE pg_catalog."C" NOT NULL,
@@ -298,8 +289,15 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
                 applied_utc timestamp with time zone NOT NULL,
                 PRIMARY KEY (manifest_id, provider_name, operation_id)
             );
-            """, cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_state", """
+            """,
+        [
+            new("manifest_id", "text", false, "C", 1),
+            new("provider_name", "text", false, "C", 2),
+            new("operation_id", "text", false, "C", 3),
+            new("operation_fingerprint", "text", false, "C"),
+            new("applied_utc", "timestamp with time zone", false, null)
+        ]),
+        new("groundwork_physical_schema_state", """
             CREATE TABLE groundwork_physical_schema_state (
                 manifest_id text COLLATE pg_catalog."C" NOT NULL,
                 provider_name text COLLATE pg_catalog."C" NOT NULL,
@@ -307,8 +305,14 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
                 applied_state_json text COLLATE pg_catalog."C" NOT NULL,
                 PRIMARY KEY (manifest_id, provider_name)
             );
-            """, cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, RelationalPhysicalStorageColumns.MutationOperationsTable, """
+            """,
+        [
+            new("manifest_id", "text", false, "C", 1),
+            new("provider_name", "text", false, "C", 2),
+            new("target_fingerprint", "text", false, "C"),
+            new("applied_state_json", "text", false, "C")
+        ]),
+        new(RelationalPhysicalStorageColumns.MutationOperationsTable, """
             CREATE TABLE groundwork_document_mutation_operations (
                 manifest_id text COLLATE pg_catalog."C" NOT NULL,
                 provider_name text COLLATE pg_catalog."C" NOT NULL,
@@ -326,31 +330,7 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
                 operation_key bytea GENERATED ALWAYS AS (groundwork_utf8_sha256(operation_id)) STORED NOT NULL,
                 PRIMARY KEY (manifest_key, provider_key, storage_unit_key, storage_scope_key, operation_key)
             );
-            """, cancellationToken);
-
-        await ValidateInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_locks",
-        [
-            new("manifest_id", "text", false, "C", 1),
-            new("provider_name", "text", false, "C", 2),
-            new("owner_id", "text", false, "C"),
-            new("fence", "bigint", false, null)
-        ], cancellationToken);
-        await ValidateInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_operations",
-        [
-            new("manifest_id", "text", false, "C", 1),
-            new("provider_name", "text", false, "C", 2),
-            new("operation_id", "text", false, "C", 3),
-            new("operation_fingerprint", "text", false, "C"),
-            new("applied_utc", "timestamp with time zone", false, null)
-        ], cancellationToken);
-        await ValidateInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_state",
-        [
-            new("manifest_id", "text", false, "C", 1),
-            new("provider_name", "text", false, "C", 2),
-            new("target_fingerprint", "text", false, "C"),
-            new("applied_state_json", "text", false, "C")
-        ], cancellationToken);
-        await ValidateInfrastructureTableAsync(connection, transaction, RelationalPhysicalStorageColumns.MutationOperationsTable,
+            """,
         [
             new("manifest_id", "text", false, "C"),
             new("provider_name", "text", false, "C"),
@@ -366,11 +346,11 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
             HashColumn("storage_unit_key", "storage_unit", 3),
             HashColumn("storage_scope_key", "storage_scope", 4),
             HashColumn("operation_key", "operation_id", 5)
-        ], cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-    }
+        ])
+    ];
 
-    private static async Task EnsureInfrastructureHashFunctionAsync(
+    /// <summary>The generated hash-key columns require the UTF-8 SHA-256 helper function.</summary>
+    protected override async Task EnsureInfrastructurePrerequisitesAsync(
         DbConnection connection,
         DbTransaction transaction,
         CancellationToken cancellationToken)
@@ -428,7 +408,7 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
         }
     }
 
-    private static async Task EnsureInfrastructureTableAsync(
+    protected override async Task EnsureInfrastructureTableAsync(
         DbConnection connection,
         DbTransaction transaction,
         string table,
@@ -517,52 +497,26 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
         return result;
     }
 
-    public override async Task<RelationalPhysicalIndexMetadata?> ReadIndexAsync(
-        DbConnection connection, DbTransaction transaction, string table, string index, CancellationToken cancellationToken)
-    {
-        await using var command = Command(connection, transaction, """
-            SELECT i.indisunique, a.attname,
-                   pg_index_column_has_property(ix.oid, key.ordinality::integer, 'desc'),
-                   pg_get_expr(i.indpred, i.indrelid)
-            FROM pg_catalog.pg_class t
-            JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
-            JOIN pg_catalog.pg_index i ON i.indrelid = t.oid
-            JOIN pg_catalog.pg_class ix ON ix.oid = i.indexrelid
-            JOIN LATERAL unnest(i.indkey) WITH ORDINALITY key(attnum, ordinality) ON key.ordinality <= i.indnkeyatts
-            JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = key.attnum
-            WHERE n.nspname = current_schema() AND t.relname = @table AND ix.relname = @index
-            ORDER BY key.ordinality;
-            """);
-        Add(command, "table", table);
-        Add(command, "index", index);
-        bool? unique = null;
-        string? filter = null;
-        var columns = new List<RelationalPhysicalIndexColumnMetadata>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            unique ??= reader.GetBoolean(0);
-            filter ??= reader.IsDBNull(3) ? null : reader.GetString(3);
-            columns.Add(new RelationalPhysicalIndexColumnMetadata(
-                reader.GetString(1),
-                reader.GetBoolean(2) ? PhysicalSortDirection.Descending : PhysicalSortDirection.Ascending));
-        }
-        return unique is null ? null : new RelationalPhysicalIndexMetadata(unique.Value, columns, filter);
-    }
+    protected override string IndexMetadataSql => """
+        SELECT i.indisunique, a.attname,
+               pg_index_column_has_property(ix.oid, key.ordinality::integer, 'desc'),
+               pg_get_expr(i.indpred, i.indrelid)
+        FROM pg_catalog.pg_class t
+        JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_catalog.pg_index i ON i.indrelid = t.oid
+        JOIN pg_catalog.pg_class ix ON ix.oid = i.indexrelid
+        JOIN LATERAL unnest(i.indkey) WITH ORDINALITY key(attnum, ordinality) ON key.ordinality <= i.indnkeyatts
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = key.attnum
+        WHERE n.nspname = current_schema() AND t.relname = @table AND ix.relname = @index
+        ORDER BY key.ordinality;
+        """;
 
-    public override string ProjectedColumnSql(string column, ProjectedColumnDefinition definition) =>
-        $"{QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} {(definition.IsNullable ? "NULL" : "NOT NULL")}" +
-        (DefaultSql(definition) is { } value ? $" DEFAULT {value}" : string.Empty);
-
-    private string CollationSql(ProjectedColumnDefinition definition) =>
-        ProjectedCollation(definition) is { } value ? $" COLLATE {CollationToken(value)}" : string.Empty;
-
-    private string CollationToken(string value) =>
+    protected override string CollationToken(string value) =>
         string.Equals(value, "C", StringComparison.Ordinal)
             ? $"{QuoteIdentifier("pg_catalog")}.{QuoteIdentifier("C")}"
             : QuoteIdentifier(value);
 
-    private static string? DefaultSql(ProjectedColumnDefinition definition)
+    protected override string? DefaultSql(ProjectedColumnDefinition definition)
     {
         if (definition.DefaultValue is null)
             return null;
@@ -588,21 +542,5 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
                 return normalized[..^suffix.Length];
         }
         return normalized;
-    }
-
-    private static DbCommand Command(DbConnection connection, DbTransaction transaction, string sql)
-    {
-        var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        return command;
-    }
-
-    private static void Add(DbCommand command, string name, object value)
-    {
-        var parameter = command.CreateParameter();
-        parameter.ParameterName = $"@{name}";
-        parameter.Value = value;
-        command.Parameters.Add(parameter);
     }
 }

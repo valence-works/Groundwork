@@ -274,29 +274,8 @@ public static class PhysicalStorageResolver
                 valid = false;
             }
 
-            if (index.Length is < 1 || index.Fields.Any(field => field.Length is < 1))
-            {
-                diagnostics.Add(GroundworkDiagnostic.Error(
-                    "GW-PHYSICAL-038",
-                    $"Logical index '{index.Identity}' requires declared lengths to be at least one UTF-16 code unit.",
-                    $"{target}.logicalIndexes.{index.Identity}"));
+            if (!ValidateDeclaredKeyLength(index, target, diagnostics))
                 valid = false;
-            }
-
-            var nonStringBoundedPaths = index.Fields
-                .Where(field => index.GetLength(field) is not null &&
-                    index.GetValueKind(field) is not (IndexValueKind.String or IndexValueKind.Keyword))
-                .Select(field => field.Path)
-                .Order(StringComparer.Ordinal)
-                .ToArray();
-            if (nonStringBoundedPaths.Length != 0)
-            {
-                diagnostics.Add(GroundworkDiagnostic.Error(
-                    "GW-PHYSICAL-038",
-                    $"Logical index '{index.Identity}' can only declare lengths for String or Keyword paths: {string.Join(", ", nonStringBoundedPaths)}.",
-                    $"{target}.logicalIndexes.{index.Identity}"));
-                valid = false;
-            }
         }
 
         var queryGroups = storage.BoundedQueries
@@ -380,13 +359,19 @@ public static class PhysicalStorageResolver
 
             foreach (var residual in query.ResidualPredicateFields)
             {
-                if (residual.Length is < 1 ||
-                    residual.Length is not null &&
-                    residual.ValueKind is not (IndexValueKind.String or IndexValueKind.Keyword))
+                if (residual.Length is not null && !IsStringKind(residual.ValueKind))
                 {
                     diagnostics.Add(GroundworkDiagnostic.Error(
-                        "GW-PHYSICAL-038",
-                        $"Residual predicate path '{residual.Path}' on bounded query '{query.Identity}' requires a declared length to be at least one UTF-16 code unit on a String or Keyword path.",
+                        "GW-PHYSICAL-039",
+                        $"Residual predicate path '{residual.Path}' on bounded query '{query.Identity}' declares a key length on a non-string value kind.",
+                        $"{target}.boundedQueries.{query.Identity}.residualPredicateFields"));
+                    valid = false;
+                }
+                else if (residual.Length is <= 0)
+                {
+                    diagnostics.Add(GroundworkDiagnostic.Error(
+                        "GW-PHYSICAL-039",
+                        $"Residual predicate path '{residual.Path}' on bounded query '{query.Identity}' requires a declared key length of at least 1.",
                         $"{target}.boundedQueries.{query.Identity}.residualPredicateFields"));
                     valid = false;
                 }
@@ -518,6 +503,59 @@ public static class PhysicalStorageResolver
         return valid;
     }
 
+    /// <summary>
+    /// Validates the declared key length of string index fields. Length belongs only to
+    /// <see cref="IndexValueKind.String"/> and <see cref="IndexValueKind.Keyword"/> fields and is a
+    /// positive maximum count of UTF-16 code units.
+    /// </summary>
+    private static bool ValidateDeclaredKeyLength(
+        LogicalIndexDeclaration index,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        var valid = true;
+        var indexTarget = $"{target}.logicalIndexes.{index.Identity}";
+        if (index.Length is not null &&
+            index.Fields.All(field => !IsStringKind(index.GetValueKind(field))))
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-PHYSICAL-039",
+                $"Logical index '{index.Identity}' declares a default key length without any String or Keyword field.",
+                indexTarget));
+            valid = false;
+        }
+
+        foreach (var field in index.Fields)
+        {
+            if (!IsStringKind(index.GetValueKind(field)))
+            {
+                if (field.Length is null)
+                    continue;
+
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-039",
+                    $"Logical index '{index.Identity}' field '{field.Path}' declares a key length on a non-string value kind.",
+                    indexTarget));
+                valid = false;
+                continue;
+            }
+
+            if (index.GetLength(field) is <= 0)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-039",
+                    $"Logical index '{index.Identity}' field '{field.Path}' requires a declared key length of at least 1.",
+                    indexTarget));
+                valid = false;
+            }
+        }
+
+        return valid;
+    }
+
+    private static bool IsStringKind(IndexValueKind kind) =>
+        kind is IndexValueKind.String or IndexValueKind.Keyword;
+
     private static IReadOnlyList<ScaleBearingPathDemand> ResolveScaleBearingDemand(
         StorageUnitPhysicalStorage storage,
         StorageUnitIdentity unitIdentity,
@@ -551,13 +589,14 @@ public static class PhysicalStorageResolver
                     continue;
                 }
 
+                var valueKind = matching[0].GetValueKind(field);
                 demand.Add(new ScaleBearingPathDemand(
                     query.Identity,
                     query.IndexIdentity,
                     field.Path,
                     sortDirections[order],
-                    matching[0].GetValueKind(field),
-                    matching[0].GetLength(field),
+                    valueKind,
+                    IsStringKind(valueKind) ? matching[0].GetLength(field) : null,
                     matching[0].MissingValueBehavior,
                     Array.AsReadOnly(query.Operations.Order().ToArray()),
                     query.SortSupport,
@@ -591,23 +630,27 @@ public static class PhysicalStorageResolver
         // An omitted length is an unbounded contract, not a missing opinion: mixing it with a declared
         // length for the same path would silently narrow the shared projected column and reject writes
         // the unbounded declaration permits. Every typed declaration site for a path participates —
-        // fields of all logical indexes, queried or not, and scale-bearing residual predicates.
-        var conflictingLengths = storage.LogicalIndexes
-            .SelectMany(index => index.Fields.Select(field => (field.Path, Length: index.GetLength(field))))
+        // string-kind fields of all logical indexes, queried or not, and scale-bearing residual
+        // predicates.
+        var conflictingKeyLengths = storage.LogicalIndexes
+            .SelectMany(index => index.Fields
+                .Where(field => IsStringKind(index.GetValueKind(field)))
+                .Select(field => (field.Path, Length: index.GetLength(field))))
             .Concat(storage.BoundedQueries
                 .Where(query => query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing)
                 .SelectMany(query => query.ResidualPredicateFields)
+                .Where(field => IsStringKind(field.ValueKind))
                 .Select(field => (field.Path, field.Length)))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Where(group => group.Select(x => x.Length).Distinct().Count() > 1)
             .Select(group => group.Key)
             .Order(StringComparer.Ordinal)
             .ToArray();
-        if (conflictingLengths.Length != 0)
+        if (conflictingKeyLengths.Length != 0)
         {
             diagnostics.Add(GroundworkDiagnostic.Error(
-                "GW-PHYSICAL-038",
-                $"Scale-bearing paths must declare one length, or none, per storage unit: {string.Join(", ", conflictingLengths)}.",
+                "GW-PHYSICAL-039",
+                $"Scale-bearing string paths must declare one key length, or none, per storage unit: {string.Join(", ", conflictingKeyLengths)}.",
                 $"storageUnits.{unitIdentity.Value}.physicalStorage"));
         }
 
@@ -703,7 +746,7 @@ public static class PhysicalStorageResolver
                 FeatureDefaultColumnName(group.Key),
                 group.Key,
                 ToPortableType(group.First().ValueKind),
-                Length: group.Max(x => x.Length)))
+                Length: group.Select(x => x.Length).FirstOrDefault(length => length is not null)))
             .OrderBy(x => x.Path, StringComparer.Ordinal)
             .ToArray();
 

@@ -35,6 +35,12 @@ public static class SupportTicketManifest
     public const string ListCommentsByTicket = "list-comments-by-ticket";
     public const string ListCommentsByAuthor = "list-comments-by-author";
 
+    // Maximum UTF-16 code units per keyword key column, so providers with sized index keys
+    // (SQL Server) can bound the synthesized physical indexes: the widest key — one keyword
+    // column plus the provider-applied identity tie-break column — stays inside the provider's
+    // 1700-byte budget: 128 * 2 + 1350 (id_comparison_key) = 1606 bytes.
+    public const int KeywordKeyLength = 128;
+
     // Stable serialized paths addressed by runtime DocumentQuery comparisons.
     public const string TicketNumberPath = "ticketNumber";
     public const string CustomerIdPath = "customerId";
@@ -104,10 +110,6 @@ public static class SupportTicketManifest
                 logicalIndexes,
                 boundedQueries));
 
-    // Keyword paths are bounded so providers with finite index-key budgets (SQL Server) can certify
-    // the synthesized physical indexes.
-    private const int KeywordLength = 128;
-
     private static LogicalIndexDeclaration Keyword(string identity, string path, bool isUnique = false) =>
         new(
             identity,
@@ -115,7 +117,7 @@ public static class SupportTicketManifest
             IndexValueKind.Keyword,
             isUnique,
             MissingValueBehavior.Excluded,
-            KeywordLength);
+            length: KeywordKeyLength);
 
     private static readonly IReadOnlySet<PortableQueryOperation> EqualOnly =
         new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };

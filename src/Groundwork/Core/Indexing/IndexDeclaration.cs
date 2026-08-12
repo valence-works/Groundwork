@@ -15,13 +15,15 @@ public sealed record IndexDeclaration(
 
 /// <summary>
 /// One stable serialized index path. <see cref="ValueKind"/> overrides the declaration default for
-/// heterogeneous compound indexes; homogeneous declarations can omit it. <see cref="Length"/> is a
-/// maximum count of UTF-16 code units for <see cref="IndexValueKind.String"/> and
-/// <see cref="IndexValueKind.Keyword"/> paths; it overrides the declaration default and bounds the
-/// synthesized projected column so providers with finite index-key budgets (SQL Server) can certify
-/// declared-mode indexes.
+/// heterogeneous compound indexes; homogeneous declarations can omit it. <see cref="Length"/>
+/// declares the maximum UTF-16 code-unit count of a <see cref="IndexValueKind.String"/> or
+/// <see cref="IndexValueKind.Keyword"/> field so default resolution can synthesize a bounded
+/// projected column instead of an unbounded one that providers with sized index keys must reject.
 /// </summary>
-public sealed record IndexField(string Path, IndexValueKind? ValueKind = null, int? Length = null);
+public sealed record IndexField(
+    string Path,
+    IndexValueKind? ValueKind = null,
+    int? Length = null);
 
 public enum IndexValueKind
 {
