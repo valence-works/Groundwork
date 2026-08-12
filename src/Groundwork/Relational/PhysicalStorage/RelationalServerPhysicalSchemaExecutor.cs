@@ -118,24 +118,25 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         PhysicalSchemaTargetIdentity target,
         IPhysicalSchemaApplicationLock applicationLock,
         CancellationToken cancellationToken) =>
-        await RequireApplicationLock(applicationLock, target).ExecuteAsync(async (connection, ct) =>
-        {
-            await using var transaction = await connection.BeginTransactionAsync(ct);
-            var lease = RequireApplicationLock(applicationLock, target);
-            await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, ct);
-            await using var command = Command(connection, transaction, """
-                SELECT applied_state_json
-                FROM groundwork_physical_schema_state
-                WHERE manifest_id = @manifestId AND provider_name = @providerName;
-                """);
-            Add(command, "manifestId", target.ManifestIdentity.Value);
-            Add(command, "providerName", target.ProviderName);
-            var json = await command.ExecuteScalarAsync(ct) as string;
-            await transaction.CommitAsync(ct);
-            return json is null
-                ? PhysicalSchemaHistoryState.Empty
-                : PhysicalSchemaHistoryState.FromApplied(PhysicalSchemaAppliedStateSerializer.Deserialize(json));
-        }, cancellationToken);
+        await RequireApplicationLock(applicationLock, target).ExecuteAsync(
+            (connection, ct) => RelationalTransactionScope.ExecuteAsync(connection, async (transaction, innerCt) =>
+            {
+                var lease = RequireApplicationLock(applicationLock, target);
+                await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, innerCt);
+                await using var command = Command(connection, transaction, """
+                    SELECT applied_state_json
+                    FROM groundwork_physical_schema_state
+                    WHERE manifest_id = @manifestId AND provider_name = @providerName;
+                    """);
+                Add(command, "manifestId", target.ManifestIdentity.Value);
+                Add(command, "providerName", target.ProviderName);
+                var json = await command.ExecuteScalarAsync(innerCt) as string;
+                await transaction.CommitAsync(innerCt);
+                return json is null
+                    ? PhysicalSchemaHistoryState.Empty
+                    : PhysicalSchemaHistoryState.FromApplied(PhysicalSchemaAppliedStateSerializer.Deserialize(json));
+            }, ct),
+            cancellationToken);
 
     public async ValueTask<PhysicalSchemaInspectionResult> InspectHistoryAsync(
         PhysicalSchemaTarget target,
@@ -146,46 +147,48 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             ?? throw new InvalidOperationException("The physical-schema inspection connection factory returned null.");
         if (connection.State != ConnectionState.Open)
             await connection.OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        if (!await dialect.TableExistsAsync(
-                connection,
-                transaction,
-                "groundwork_physical_schema_state",
-                cancellationToken))
+        return await RelationalTransactionScope.ExecuteAsync(connection, async (transaction, ct) =>
         {
-            await transaction.CommitAsync(cancellationToken);
-            return new PhysicalSchemaInspectionResult(PhysicalSchemaHistoryState.Empty, IsAppliedSchemaValid: true);
-        }
-
-        await using var command = Command(connection, transaction, """
-            SELECT applied_state_json
-            FROM groundwork_physical_schema_state
-            WHERE manifest_id = @manifestId AND provider_name = @providerName;
-            """);
-        Add(command, "manifestId", target.ManifestIdentity.Value);
-        Add(command, "providerName", target.Provider.Name);
-        var json = await command.ExecuteScalarAsync(cancellationToken) as string;
-        var history = json is null
-            ? PhysicalSchemaHistoryState.Empty
-            : PhysicalSchemaHistoryState.FromApplied(PhysicalSchemaAppliedStateSerializer.Deserialize(json));
-        var isAppliedSchemaValid = true;
-        if (history.AppliedState is { } appliedState)
-        {
-            try
-            {
-                await ValidateAsync(
+            if (!await dialect.TableExistsAsync(
                     connection,
                     transaction,
-                    ValidatePhysicalSchemaOperation.ForAppliedState(appliedState),
-                    cancellationToken);
-            }
-            catch (InvalidOperationException)
+                    "groundwork_physical_schema_state",
+                    ct))
             {
-                isAppliedSchemaValid = false;
+                await transaction.CommitAsync(ct);
+                return new PhysicalSchemaInspectionResult(PhysicalSchemaHistoryState.Empty, IsAppliedSchemaValid: true);
             }
-        }
-        await transaction.CommitAsync(cancellationToken);
-        return new PhysicalSchemaInspectionResult(history, isAppliedSchemaValid);
+
+            await using var command = Command(connection, transaction, """
+                SELECT applied_state_json
+                FROM groundwork_physical_schema_state
+                WHERE manifest_id = @manifestId AND provider_name = @providerName;
+                """);
+            Add(command, "manifestId", target.ManifestIdentity.Value);
+            Add(command, "providerName", target.Provider.Name);
+            var json = await command.ExecuteScalarAsync(ct) as string;
+            var history = json is null
+                ? PhysicalSchemaHistoryState.Empty
+                : PhysicalSchemaHistoryState.FromApplied(PhysicalSchemaAppliedStateSerializer.Deserialize(json));
+            var isAppliedSchemaValid = true;
+            if (history.AppliedState is { } appliedState)
+            {
+                try
+                {
+                    await ValidateAsync(
+                        connection,
+                        transaction,
+                        ValidatePhysicalSchemaOperation.ForAppliedState(appliedState),
+                        ct);
+                }
+                catch (InvalidOperationException)
+                {
+                    isAppliedSchemaValid = false;
+                }
+            }
+            await transaction.CommitAsync(ct);
+            return new PhysicalSchemaInspectionResult(history, isAppliedSchemaValid);
+        }, cancellationToken);
     }
 
     public async ValueTask<PhysicalSchemaOperationAcknowledgement> ApplyOperationAsync(
@@ -197,40 +200,48 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         {
             ArgumentNullException.ThrowIfNull(operation);
             var lease = RequireApplicationLock(applicationLock, target);
-            await using var transaction = await connection.BeginTransactionAsync(ct);
-            var prior = await ReadOperationAsync(connection, transaction, target, operation.Identity, ct);
-            if (prior is not null)
+            // A replayed operation is acknowledged from inside the transaction; a fresh one returns null
+            // so its durable read happens after the commit, outside the transaction scope.
+            var replayed = await RelationalTransactionScope.ExecuteAsync(connection, async (transaction, innerCt) =>
             {
-                if (!string.Equals(prior.Value.Fingerprint, operation.Fingerprint, StringComparison.Ordinal))
-                    throw new PhysicalSchemaFingerprintConflictException(operation.Identity, operation.Fingerprint, prior.Value.Fingerprint);
-                if (operation is ValidatePhysicalSchemaOperation ||
-                    operation is BackfillCanonicalJsonOperation &&
-                    !await IsOperationPublishedAsync(connection, transaction, target, operation, ct))
-                    await ApplyOperationCoreAsync(connection, transaction, operation, ct);
-                await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, ct);
-                await transaction.CommitAsync(ct);
-                return new PhysicalSchemaOperationAcknowledgement(operation.Identity, prior.Value.Fingerprint, prior.Value.AppliedAt);
-            }
+                var prior = await ReadOperationAsync(connection, transaction, target, operation.Identity, innerCt);
+                if (prior is not null)
+                {
+                    if (!string.Equals(prior.Value.Fingerprint, operation.Fingerprint, StringComparison.Ordinal))
+                        throw new PhysicalSchemaFingerprintConflictException(operation.Identity, operation.Fingerprint, prior.Value.Fingerprint);
+                    if (operation is ValidatePhysicalSchemaOperation ||
+                        operation is BackfillCanonicalJsonOperation &&
+                        !await IsOperationPublishedAsync(connection, transaction, target, operation, innerCt))
+                        await ApplyOperationCoreAsync(connection, transaction, operation, innerCt);
+                    await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, innerCt);
+                    await transaction.CommitAsync(innerCt);
+                    return new PhysicalSchemaOperationAcknowledgement(operation.Identity, prior.Value.Fingerprint, prior.Value.AppliedAt);
+                }
 
-            await ApplyOperationCoreAsync(connection, transaction, operation, ct);
-            if (beforeOperationEvidence is not null)
-                await beforeOperationEvidence(operation, ct);
-            await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, ct);
-            var appliedAt = DateTimeOffset.UtcNow;
-            await using (var command = Command(connection, transaction, """
-                INSERT INTO groundwork_physical_schema_operations
-                    (manifest_id, provider_name, operation_id, operation_fingerprint, applied_utc)
-                VALUES (@manifestId, @providerName, @identity, @fingerprint, @appliedUtc);
-                """))
-            {
-                Add(command, "manifestId", target.ManifestIdentity.Value);
-                Add(command, "providerName", target.ProviderName);
-                Add(command, "identity", operation.Identity);
-                Add(command, "fingerprint", operation.Fingerprint);
-                Add(command, "appliedUtc", appliedAt);
-                await command.ExecuteNonQueryAsync(ct);
-            }
-            await transaction.CommitAsync(ct);
+                await ApplyOperationCoreAsync(connection, transaction, operation, innerCt);
+                if (beforeOperationEvidence is not null)
+                    await beforeOperationEvidence(operation, innerCt);
+                await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, innerCt);
+                var appliedAt = DateTimeOffset.UtcNow;
+                await using (var command = Command(connection, transaction, """
+                    INSERT INTO groundwork_physical_schema_operations
+                        (manifest_id, provider_name, operation_id, operation_fingerprint, applied_utc)
+                    VALUES (@manifestId, @providerName, @identity, @fingerprint, @appliedUtc);
+                    """))
+                {
+                    Add(command, "manifestId", target.ManifestIdentity.Value);
+                    Add(command, "providerName", target.ProviderName);
+                    Add(command, "identity", operation.Identity);
+                    Add(command, "fingerprint", operation.Fingerprint);
+                    Add(command, "appliedUtc", appliedAt);
+                    await command.ExecuteNonQueryAsync(innerCt);
+                }
+                await transaction.CommitAsync(innerCt);
+                return null;
+            }, ct);
+            if (replayed is not null)
+                return replayed;
+
             var durable = await ReadOperationAsync(connection, null, target, operation.Identity, ct)
                 ?? throw new InvalidOperationException($"Physical operation '{operation.Identity}' was not durably recorded.");
             if (!string.Equals(durable.Fingerprint, operation.Fingerprint, StringComparison.Ordinal))
@@ -252,51 +263,53 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             var lease = RequireApplicationLock(
                 applicationLock,
                 new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name));
-            await using var transaction = await connection.BeginTransactionAsync(ct);
-            if (beforeAppliedStateFence is not null)
-                await beforeAppliedStateFence(state, ct);
-            await dialect.AssertFenceAsync(
-                connection,
-                transaction,
-                new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name),
-                lease.Owner,
-                lease.Fence,
-                ct);
-            var current = await ReadTargetFingerprintAsync(connection, transaction, state.ManifestIdentity.Value, state.Provider.Name, ct);
-            if (current == state.TargetFingerprint)
+            return await RelationalTransactionScope.ExecuteAsync(connection, async (transaction, innerCt) =>
             {
-                await transaction.CommitAsync(ct);
-                return true;
-            }
-            if (!string.Equals(current, expectedAppliedTargetFingerprint, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Physical schema applied-state compare-and-swap failed. Expected '{expectedAppliedTargetFingerprint ?? "<empty>"}', found '{current ?? "<empty>"}'.");
-            }
+                if (beforeAppliedStateFence is not null)
+                    await beforeAppliedStateFence(state, innerCt);
+                await dialect.AssertFenceAsync(
+                    connection,
+                    transaction,
+                    new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name),
+                    lease.Owner,
+                    lease.Fence,
+                    innerCt);
+                var current = await ReadTargetFingerprintAsync(connection, transaction, state.ManifestIdentity.Value, state.Provider.Name, innerCt);
+                if (current == state.TargetFingerprint)
+                {
+                    await transaction.CommitAsync(innerCt);
+                    return true;
+                }
+                if (!string.Equals(current, expectedAppliedTargetFingerprint, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Physical schema applied-state compare-and-swap failed. Expected '{expectedAppliedTargetFingerprint ?? "<empty>"}', found '{current ?? "<empty>"}'.");
+                }
 
-            var sql = current is null
-                ? """
-                  INSERT INTO groundwork_physical_schema_state
-                      (manifest_id, provider_name, target_fingerprint, applied_state_json)
-                  VALUES (@manifestId, @providerName, @fingerprint, @json);
-                  """
-                : """
-                  UPDATE groundwork_physical_schema_state
-                  SET target_fingerprint = @fingerprint, applied_state_json = @json
-                  WHERE manifest_id = @manifestId AND provider_name = @providerName
-                    AND target_fingerprint = @expected;
-                  """;
-            await using var command = Command(connection, transaction, sql);
-            Add(command, "manifestId", state.ManifestIdentity.Value);
-            Add(command, "providerName", state.Provider.Name);
-            Add(command, "fingerprint", state.TargetFingerprint);
-            Add(command, "json", PhysicalSchemaAppliedStateSerializer.Serialize(state));
-            if (current is not null)
-                Add(command, "expected", expectedAppliedTargetFingerprint!);
-            if (await command.ExecuteNonQueryAsync(ct) != 1)
-                throw new InvalidOperationException("Physical schema applied-state compare-and-swap lost a concurrent update.");
-            await transaction.CommitAsync(ct);
-            return true;
+                var sql = current is null
+                    ? """
+                      INSERT INTO groundwork_physical_schema_state
+                          (manifest_id, provider_name, target_fingerprint, applied_state_json)
+                      VALUES (@manifestId, @providerName, @fingerprint, @json);
+                      """
+                    : """
+                      UPDATE groundwork_physical_schema_state
+                      SET target_fingerprint = @fingerprint, applied_state_json = @json
+                      WHERE manifest_id = @manifestId AND provider_name = @providerName
+                        AND target_fingerprint = @expected;
+                      """;
+                await using var command = Command(connection, transaction, sql);
+                Add(command, "manifestId", state.ManifestIdentity.Value);
+                Add(command, "providerName", state.Provider.Name);
+                Add(command, "fingerprint", state.TargetFingerprint);
+                Add(command, "json", PhysicalSchemaAppliedStateSerializer.Serialize(state));
+                if (current is not null)
+                    Add(command, "expected", expectedAppliedTargetFingerprint!);
+                if (await command.ExecuteNonQueryAsync(innerCt) != 1)
+                    throw new InvalidOperationException("Physical schema applied-state compare-and-swap lost a concurrent update.");
+                await transaction.CommitAsync(innerCt);
+                return true;
+            }, ct);
         }, cancellationToken);
     }
 

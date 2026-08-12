@@ -9,6 +9,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Groundwork.Relational" />
     <InternalsVisibleTo Include="Groundwork.SqlServer" />
+    <InternalsVisibleTo Include="Groundwork.Sqlite.Tests" />
   </ItemGroup>
 
 </Project>
