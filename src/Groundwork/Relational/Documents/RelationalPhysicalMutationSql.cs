@@ -69,9 +69,6 @@ internal sealed class RelationalPhysicalMutationSql
         ArgumentNullException.ThrowIfNull(dialect);
         ArgumentNullException.ThrowIfNull(route);
 
-        string Q(string identifier) => dialect.QuoteIdentifier(identifier);
-        string P(string name) => dialect.Parameter(name);
-
         var primaryProjections = route.ProjectedColumns
             .Where(column =>
                 column.Target == ExecutableStorageObjectRole.PrimaryStorage &&
@@ -83,12 +80,12 @@ internal sealed class RelationalPhysicalMutationSql
             .Concat([RelationalPhysicalStorageColumns.CreatedUtc, RelationalPhysicalStorageColumns.UpdatedUtc])
             .Concat(primaryProjections.Select(column => column.Column.Identifier))
             .ToArray();
-        var insertParameters = insertColumns.Select((_, index) => P($"v{index}")).ToArray();
+        var insertParameters = insertColumns.Select((_, index) => dialect.Parameter($"v{index}")).ToArray();
         var lookupIdentity = new RelationalPhysicalIdentityPredicatePart[]
         {
-            new(route.Discriminator.Column.Identifier, null, P("kind")),
-            new(route.ScopeKey.Column.Identifier, null, P("scope")),
-            new(route.Envelope.Identity.LookupKey.Identifier, null, P("idLookup"))
+            new(route.Discriminator.Column.Identifier, null, dialect.Parameter("kind")),
+            new(route.ScopeKey.Column.Identifier, null, dialect.Parameter("scope")),
+            new(route.Envelope.Identity.LookupKey.Identifier, null, dialect.Parameter("idLookup"))
         };
         var insertPrimary = dialect.InsertPrimaryIfAbsent(
             route.PrimaryStorage.Name.Identifier,
@@ -107,24 +104,24 @@ internal sealed class RelationalPhysicalMutationSql
         };
         updateColumns.AddRange(primaryProjections.Select(column => column.Column.Identifier));
         var updateHead =
-            $"UPDATE {Q(route.PrimaryStorage.Name.Identifier)} SET " +
-            string.Join(", ", updateColumns.Select((column, index) => $"{Q(column)} = {P($"v{index}")}")) +
+            $"UPDATE {dialect.QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} SET " +
+            string.Join(", ", updateColumns.Select((column, index) => $"{dialect.QuoteIdentifier(column)} = {dialect.Parameter($"v{index}")}")) +
             " WHERE ";
         var updateWithout = updateHead + IdentityPredicate(dialect, route, includeVersion: false) + ";";
         var updateWith = updateHead + IdentityPredicate(dialect, route, includeVersion: true) + ";";
 
         // DELETE FROM primary WHERE <identity>[ AND version = @expectedVersion]
-        var deleteHead = $"DELETE FROM {Q(route.PrimaryStorage.Name.Identifier)} WHERE ";
+        var deleteHead = $"DELETE FROM {dialect.QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} WHERE ";
         var deleteWithout = deleteHead + IdentityPredicate(dialect, route, includeVersion: false) + ";";
         var deleteWith = deleteHead + IdentityPredicate(dialect, route, includeVersion: true) + ";";
 
         // SELECT envelope FROM primary WHERE <lookup identity>  (read and locking variants)
         var selectionColumns = string.Join(
             ", ",
-            RelationalPhysicalEnvelopeRowLayout.SelectionColumns(route).Select(Q));
+            RelationalPhysicalEnvelopeRowLayout.SelectionColumns(route).Select(dialect.QuoteIdentifier));
         var lookupPredicate = IdentityLookupPredicate(dialect, route);
         var loadForRead =
-            $"SELECT {selectionColumns} FROM {Q(route.PrimaryStorage.Name.Identifier)} " +
+            $"SELECT {selectionColumns} FROM {dialect.QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} " +
             $"WHERE {lookupPredicate};";
         var lockingSelect =
             $"SELECT {selectionColumns} FROM " +
@@ -154,26 +151,26 @@ internal sealed class RelationalPhysicalMutationSql
                 relationship.Identity.LookupKey.Identifier
             }.Concat(linkedProjections.Select(column => column.Column.Identifier)).ToArray();
             linkedInsert =
-                $"INSERT INTO {Q(route.LinkedIndexStorage.Name.Identifier)} " +
-                $"({string.Join(", ", linkedColumns.Select(Q))}) " +
-                $"VALUES ({string.Join(", ", linkedColumns.Select((_, index) => P($"v{index}")))});";
+                $"INSERT INTO {dialect.QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier)} " +
+                $"({string.Join(", ", linkedColumns.Select(dialect.QuoteIdentifier))}) " +
+                $"VALUES ({string.Join(", ", linkedColumns.Select((_, index) => dialect.Parameter($"v{index}")))});";
             linkedDelete =
-                $"DELETE FROM {Q(route.LinkedIndexStorage.Name.Identifier)} WHERE " +
+                $"DELETE FROM {dialect.QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier)} WHERE " +
                 dialect.ExactIdentityPredicate(
                 [
-                    new(relationship.DocumentKind.Identifier, null, P("kind")),
-                    new(relationship.StorageScope.Identifier, null, P("scope")),
-                    new(relationship.Identity.LookupKey.Identifier, null, P("idLookup")),
-                    new(relationship.Identity.ComparisonKey.Identifier, null, P("idComparison"))
+                    new(relationship.DocumentKind.Identifier, null, dialect.Parameter("kind")),
+                    new(relationship.StorageScope.Identifier, null, dialect.Parameter("scope")),
+                    new(relationship.Identity.LookupKey.Identifier, null, dialect.Parameter("idLookup")),
+                    new(relationship.Identity.ComparisonKey.Identifier, null, dialect.Parameter("idComparison"))
                 ]) + ";";
             linkedEvidenceSelect =
-                $"SELECT {Q(relationship.DocumentId.Identifier)}, {Q(relationship.Identity.ComparisonKey.Identifier)} " +
-                $"FROM {Q(route.LinkedIndexStorage.Name.Identifier)} WHERE " +
+                $"SELECT {dialect.QuoteIdentifier(relationship.DocumentId.Identifier)}, {dialect.QuoteIdentifier(relationship.Identity.ComparisonKey.Identifier)} " +
+                $"FROM {dialect.QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier)} WHERE " +
                 dialect.ExactIdentityPredicate(
                 [
-                    new(relationship.DocumentKind.Identifier, null, P("kind")),
-                    new(relationship.StorageScope.Identifier, null, P("scope")),
-                    new(relationship.Identity.LookupKey.Identifier, null, P("idLookup"))
+                    new(relationship.DocumentKind.Identifier, null, dialect.Parameter("kind")),
+                    new(relationship.StorageScope.Identifier, null, dialect.Parameter("scope")),
+                    new(relationship.Identity.LookupKey.Identifier, null, dialect.Parameter("idLookup"))
                 ]) + ";";
         }
 

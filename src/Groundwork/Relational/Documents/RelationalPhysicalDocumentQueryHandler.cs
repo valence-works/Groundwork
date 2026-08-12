@@ -278,8 +278,8 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         return new RelationalPhysicalQueryCommand(
             store.ApplyOffsetPage(
                 $"SELECT {selection} {built.FromAndWhere} {OrderBy(query, plan)}",
-                store.P("take"),
-                store.P("skip")),
+                store.Parameter("take"),
+                store.Parameter("skip")),
             parameters,
             built.PredicateFieldIdentifiers,
             PageReadLimit(query, plan),
@@ -316,8 +316,8 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             .ToArray();
         var limitedLookup = WithoutTerminator(store.ApplyOffsetPage(
             $"SELECT l.* {lookup.FromAndWhere} {LinkedOrderBy(query, plan, route, "l")}",
-            store.P("take"),
-            store.P("skip")));
+            store.Parameter("take"),
+            store.Parameter("skip")));
         var selection = EnvelopeSelection(route);
         if (plan.PagingSupport == QueryPagingSupport.Cursor)
         {
@@ -487,9 +487,9 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         var relationship = route.LinkedRelationship!;
         return new RelationalPhysicalQueryCommand(
             store.ApplyFirst(
-                $"SELECT l.{store.Q(relationship.DocumentId.Identifier)}, " +
-                $"p.{store.Q(route.Envelope.Id.Identifier)}, " +
-                $"l.{store.Q(relationship.Identity.LookupKey.Identifier)} {built.FromAndWhere}"),
+                $"SELECT l.{store.QuoteIdentifier(relationship.DocumentId.Identifier)}, " +
+                $"p.{store.QuoteIdentifier(route.Envelope.Id.Identifier)}, " +
+                $"l.{store.QuoteIdentifier(relationship.Identity.LookupKey.Identifier)} {built.FromAndWhere}"),
             built.Parameters,
             built.PredicateFieldIdentifiers,
             1);
@@ -519,7 +519,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
     {
         var group = LatestPerKeyField(query, plan);
         return new RelationalPhysicalQueryCommand(
-            $"SELECT COUNT(*) FROM (SELECT 1 AS {store.Q("groundwork_latest_group")} {built.FromAndWhere} GROUP BY {Field(group)}) AS {store.Q("groundwork_latest_groups")};",
+            $"SELECT COUNT(*) FROM (SELECT 1 AS {store.QuoteIdentifier("groundwork_latest_group")} {built.FromAndWhere} GROUP BY {Field(group)}) AS {store.QuoteIdentifier("groundwork_latest_groups")};",
             built.Parameters,
             built.PredicateFieldIdentifiers
                 .Append(group.Identifier)
@@ -544,20 +544,20 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         var envelopeColumns = RelationalPhysicalEnvelopeRowLayout.SelectionColumns(route);
         var envelopeSelection = envelopeColumns
             .Select((column, index) =>
-                $"p.{store.Q(column)} AS {store.Q(LatestEnvelopeAlias(index))}")
+                $"p.{store.QuoteIdentifier(column)} AS {store.QuoteIdentifier(LatestEnvelopeAlias(index))}")
             .ToArray();
         var orderSelection = order
             .Select((item, index) =>
-                $"{Field(item.Field)} AS {store.Q(LatestOrderAlias(index))}")
+                $"{Field(item.Field)} AS {store.QuoteIdentifier(LatestOrderAlias(index))}")
             .ToArray();
         var winnerOrder = string.Join(", ", order.Select(item =>
             store.OrderPhysicalQueryExpression(Field(item.Field), item.Direction)));
         var pageOrder = string.Join(", ", order.Select((item, index) =>
-            store.OrderPhysicalQueryExpression(store.Q(LatestOrderAlias(index)), item.Direction)));
-        var rows = store.Q("groundwork_latest_rows");
-        var rank = store.Q("groundwork_latest_rank");
+            store.OrderPhysicalQueryExpression(store.QuoteIdentifier(LatestOrderAlias(index)), item.Direction)));
+        var rows = store.QuoteIdentifier("groundwork_latest_rows");
+        var rank = store.QuoteIdentifier("groundwork_latest_rank");
         var select = $"""
-            SELECT {string.Join(", ", envelopeColumns.Select((_, index) => store.Q(LatestEnvelopeAlias(index))))}
+            SELECT {string.Join(", ", envelopeColumns.Select((_, index) => store.QuoteIdentifier(LatestEnvelopeAlias(index))))}
             FROM (
                 SELECT {string.Join(", ", envelopeSelection.Concat(orderSelection))},
                        ROW_NUMBER() OVER (PARTITION BY {Field(group)} ORDER BY {winnerOrder}) AS {rank}
@@ -574,7 +574,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             })
             .ToArray();
         return new RelationalPhysicalQueryCommand(
-            store.ApplyOffsetPage(select, store.P("take"), store.P("skip")),
+            store.ApplyOffsetPage(select, store.Parameter("take"), store.Parameter("skip")),
             parameters,
             built.PredicateFieldIdentifiers
                 .Concat(order.Select(item => item.Field.Identifier))
@@ -605,17 +605,17 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             continuation: continuation);
         var order = DocumentQueryOrderResolver.Resolve(query, plan);
         var group = LatestPerKeyField(query, plan);
-        var rows = store.Q("groundwork_latest_rows");
+        var rows = store.QuoteIdentifier("groundwork_latest_rows");
         var winnerOrder = string.Join(", ", order.Select(item =>
             store.OrderPhysicalQueryExpression(LinkedField(route, item.Field, "l"), item.Direction)));
         var pageOrder = string.Join(", ", order.Select(item =>
             store.OrderPhysicalQueryExpression(LinkedField(route, item.Field, rows), item.Direction)));
-        var rank = store.Q("groundwork_latest_rank");
+        var rank = store.QuoteIdentifier("groundwork_latest_rank");
         var winners = WithoutTerminator(store.ApplyOffsetPage(
             $"SELECT {rows}.* FROM (SELECT l.*, ROW_NUMBER() OVER (PARTITION BY {LinkedField(route, group, "l")} ORDER BY {winnerOrder}) AS {rank} {lookup.FromAndWhere}) AS {rows} " +
             $"WHERE {rank} = 1 ORDER BY {pageOrder}",
-            store.P("take"),
-            store.P("skip")));
+            store.Parameter("take"),
+            store.Parameter("skip")));
         var outerOrder = string.Join(", ", order.Select(item =>
             store.OrderPhysicalQueryExpression(LinkedField(route, item.Field, "s"), item.Direction)));
         return new RelationalPhysicalQueryCommand(
@@ -674,20 +674,20 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (!scope.AcrossScopes)
         {
             predicates.Add(store.ExactPhysicalIdentityPredicate(
-                [new(plan.Scope.Field.Identifier, Alias(plan.Scope.Field), store.P("scope"))]));
+                [new(plan.Scope.Field.Identifier, Alias(plan.Scope.Field), store.Parameter("scope"))]));
             parameters.Add(("scope", scope.StorageKey));
             predicateFieldIdentifiers.Add(plan.Scope.Field.Identifier);
         }
         predicates.Add(store.ExactPhysicalIdentityPredicate(
-            [new(plan.Discriminator.Identifier, Alias(plan.Discriminator), store.P("kind"))]));
+            [new(plan.Discriminator.Identifier, Alias(plan.Discriminator), store.Parameter("kind"))]));
         parameters.Add(("kind", route.Discriminator.Value));
         predicateFieldIdentifiers.Add(plan.Discriminator.Identifier);
 
         if (detectIdentityCollision)
         {
             predicates.Add(
-                $"p.{store.Q(route.Envelope.Identity.ComparisonKey.Identifier)} <> " +
-                $"l.{store.Q(route.LinkedRelationship!.Identity.ComparisonKey.Identifier)}");
+                $"p.{store.QuoteIdentifier(route.Envelope.Identity.ComparisonKey.Identifier)} <> " +
+                $"l.{store.QuoteIdentifier(route.LinkedRelationship!.Identity.ComparisonKey.Identifier)}");
             predicateFieldIdentifiers.Add(route.Envelope.Identity.ComparisonKey.Identifier);
             predicateFieldIdentifiers.Add(route.LinkedRelationship.Identity.ComparisonKey.Identifier);
         }
@@ -812,7 +812,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             var alias = Alias(index.Target);
             return (
                 plan.IndexName.Identifier,
-                excluded.Select(column => $"{alias}.{store.Q(column)} IS NOT NULL").ToArray());
+                excluded.Select(column => $"{alias}.{store.QuoteIdentifier(column)} IS NOT NULL").ToArray());
         }
         if (plan.IsScaleBearing)
         {
@@ -945,11 +945,11 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
                 predicateFieldIdentifiers.Add(collection.Value.Column.Identifier);
                 membershipPredicates.Add(
                     $"EXISTS (SELECT 1 FROM {store.PhysicalQuerySource(collection.Storage.Name.Identifier, "c", collection.MembershipKey.Name.Identifier)} " +
-                    $"WHERE c.{store.Q(collection.Value.Column.Identifier)} = {store.P(name)} AND " +
-                    $"c.{store.Q(collection.DocumentKind.Column.Identifier)} = p.{store.Q(route.Discriminator.Column.Identifier)} AND " +
-                    $"c.{store.Q(collection.StorageScope.Column.Identifier)} = p.{store.Q(route.ScopeKey.Column.Identifier)} AND " +
-                    $"c.{store.Q(collection.IdLookupKey.Column.Identifier)} = p.{store.Q(route.Envelope.Identity.LookupKey.Identifier)} AND " +
-                    $"c.{store.Q(collection.IdComparisonKey.Column.Identifier)} = p.{store.Q(route.Envelope.Identity.ComparisonKey.Identifier)})");
+                    $"WHERE c.{store.QuoteIdentifier(collection.Value.Column.Identifier)} = {store.Parameter(name)} AND " +
+                    $"c.{store.QuoteIdentifier(collection.DocumentKind.Column.Identifier)} = p.{store.QuoteIdentifier(route.Discriminator.Column.Identifier)} AND " +
+                    $"c.{store.QuoteIdentifier(collection.StorageScope.Column.Identifier)} = p.{store.QuoteIdentifier(route.ScopeKey.Column.Identifier)} AND " +
+                    $"c.{store.QuoteIdentifier(collection.IdLookupKey.Column.Identifier)} = p.{store.QuoteIdentifier(route.Envelope.Identity.LookupKey.Identifier)} AND " +
+                    $"c.{store.QuoteIdentifier(collection.IdComparisonKey.Column.Identifier)} = p.{store.QuoteIdentifier(route.Envelope.Identity.ComparisonKey.Identifier)})");
             }
             return comparison.Operator switch
             {
@@ -1130,7 +1130,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (IsDocumentIdentityField(queryField))
             parameterValue = store.ConvertDocumentIdentityQueryValue(queryField, (string)parameterValue);
         parameters.Add((name, parameterValue));
-        var parameter = store.NormalizeQueryExpression(store.P(name), queryField.Source, queryField.ValueKind);
+        var parameter = store.NormalizeQueryExpression(store.Parameter(name), queryField.Source, queryField.ValueKind);
         return operation switch
         {
             QueryComparisonOperator.Equal => $"{field} = {parameter}",
@@ -1156,12 +1156,12 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         var range = store.ConvertDocumentIdentityPrefix(comparisonKey);
         var lowerName = $"q{parameterIndex++}";
         parameters.Add((lowerName, range.Lower));
-        var lower = store.NormalizeQueryExpression(store.P(lowerName), queryField.Source, queryField.ValueKind);
+        var lower = store.NormalizeQueryExpression(store.Parameter(lowerName), queryField.Source, queryField.ValueKind);
         if (range.Upper is null)
             return $"{field} >= {lower}";
         var upperName = $"q{parameterIndex++}";
         parameters.Add((upperName, range.Upper));
-        var upper = store.NormalizeQueryExpression(store.P(upperName), queryField.Source, queryField.ValueKind);
+        var upper = store.NormalizeQueryExpression(store.Parameter(upperName), queryField.Source, queryField.ValueKind);
         return $"({field} >= {lower} AND {field} < {upper})";
     }
 
@@ -1181,7 +1181,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
     private string Field(PhysicalQueryField field, string? alias = null)
     {
         var resolvedAlias = alias ?? Alias(field);
-        var expression = $"{resolvedAlias}.{store.Q(field.Identifier)}";
+        var expression = $"{resolvedAlias}.{store.QuoteIdentifier(field.Identifier)}";
         var value = field.Source == PhysicalQueryFieldSource.CanonicalJsonPath
             ? store.JsonValue(expression, field.Path)
             : expression;
@@ -1235,7 +1235,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
                         ? route.LinkedRelationship!.Identity.LookupKey.Identifier
                         : throw new InvalidOperationException(
                             $"Linked projection cannot provide physical query field '{field.Path}'.");
-        var expression = $"{alias}.{store.Q(identifier)}";
+        var expression = $"{alias}.{store.QuoteIdentifier(identifier)}";
         var value = field.Source == PhysicalQueryFieldSource.CanonicalJsonPath
             ? store.JsonValue(expression, field.Path)
             : expression;
@@ -1259,7 +1259,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
 
     private string EnvelopeSelection(ExecutableStorageRoute route) => string.Join(", ",
         RelationalPhysicalEnvelopeRowLayout.SelectionColumns(route)
-            .Select(column => $"p.{store.Q(column)}"));
+            .Select(column => $"p.{store.QuoteIdentifier(column)}"));
 
     private void AddParameters(DbCommand command, IEnumerable<(string Name, object? Value)> parameters)
     {
@@ -1365,7 +1365,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (IsDocumentIdentityField(field) && parameterValue is string identityValue)
             parameterValue = store.ConvertDocumentIdentityQueryValue(field, identityValue);
         parameters.Add((name, parameterValue));
-        return store.NormalizeQueryExpression(store.P(name), field.Source, field.ValueKind);
+        return store.NormalizeQueryExpression(store.Parameter(name), field.Source, field.ValueKind);
     }
 
     private IReadOnlyList<DocumentQueryContinuationValue> ReadContinuationValues(

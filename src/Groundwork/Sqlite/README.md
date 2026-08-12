@@ -12,7 +12,6 @@
 - Enforces optimistic concurrency with expected document versions.
 - Rejects queries for undeclared indexes.
 - Enforces unique declared indexes through SQLite constraints.
-- Provides a durable Groundwork migration executor backed by `groundwork_migration_history`.
 - Adds and backfills new optimized physicalized projection columns during materialization.
 - Applies typed physical-schema diffs for shared+linked, dedicated+optional-linked, and entity
   routes with durable operation acknowledgements and canonical applied-state compare-and-swap.

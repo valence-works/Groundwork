@@ -285,7 +285,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {Q(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
+        command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
         Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
     }
 
@@ -375,9 +375,9 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using (var connection = new NpgsqlConnection(container.GetConnectionString()))
         {
             await connection.OpenAsync();
-            var table = Q(storage.Storage.Name.Identifier);
-            var value = Q(storage.Value.Column.Identifier);
-            var key = string.Join(", ", storage.OwnerOrdinalKey.Columns.Reverse().Select(column => Q(column.Column.Identifier)));
+            var table = QuoteIdentifier(storage.Storage.Name.Identifier);
+            var value = QuoteIdentifier(storage.Value.Column.Identifier);
+            var key = string.Join(", ", storage.OwnerOrdinalKey.Columns.Reverse().Select(column => QuoteIdentifier(column.Column.Identifier)));
             var sql = drift switch
             {
                 CollectionElementDrift.WrongType =>
@@ -387,7 +387,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                 CollectionElementDrift.WrongDefault =>
                     $"ALTER TABLE {table} ALTER COLUMN {value} SET DEFAULT 'unexpected';",
                 CollectionElementDrift.WrongPrimaryKeyOrder =>
-                    $"ALTER TABLE {table} DROP CONSTRAINT {Q(await PrimaryKeyAsync(connection, storage.Storage.Name.Identifier))}; " +
+                    $"ALTER TABLE {table} DROP CONSTRAINT {QuoteIdentifier(await PrimaryKeyAsync(connection, storage.Storage.Name.Identifier))}; " +
                     $"ALTER TABLE {table} ADD PRIMARY KEY ({key});",
                 _ => throw new ArgumentOutOfRangeException(nameof(drift), drift, null)
             };
@@ -428,10 +428,10 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
             command.CommandText =
-                $"DROP INDEX {Q(storage.MembershipKey.Name.Identifier)}; " +
-                $"CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {Q(storage.Storage.Name.Identifier)} (" +
-                $"{string.Join(", ", storage.MembershipKey.OwnerColumns.Select(column => Q(column.Column.Identifier))
-                    .Append(Q(storage.MembershipKey.Value.Column.Identifier)))});";
+                $"DROP INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)}; " +
+                $"CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)} (" +
+                $"{string.Join(", ", storage.MembershipKey.OwnerColumns.Select(column => QuoteIdentifier(column.Column.Identifier))
+                    .Append(QuoteIdentifier(storage.MembershipKey.Value.Column.Identifier)))});";
             await command.ExecuteNonQueryAsync();
         }
 
@@ -445,7 +445,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var database = $"groundwork_startup_{suffix}";
-        await ExecuteAdminAsync($"CREATE DATABASE {Q(database)};");
+        await ExecuteAdminAsync($"CREATE DATABASE {QuoteIdentifier(database)};");
         var connectionString = new NpgsqlConnectionStringBuilder(container.GetConnectionString())
         {
             Database = database
@@ -948,7 +948,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var schema = $"groundwork_bootstrap_{suffix}";
-        await ExecuteAdminAsync($"CREATE SCHEMA {Q(schema)};");
+        await ExecuteAdminAsync($"CREATE SCHEMA {QuoteIdentifier(schema)};");
         var connectionString = new NpgsqlConnectionStringBuilder(container.GetConnectionString())
         {
             SearchPath = schema
@@ -975,7 +975,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         finally
         {
             NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync($"DROP SCHEMA {Q(schema)} CASCADE;");
+            await ExecuteAdminAsync($"DROP SCHEMA {QuoteIdentifier(schema)} CASCADE;");
         }
     }
 
@@ -996,7 +996,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var schema = $"groundwork_infrastructure_{suffix}";
-        await ExecuteAdminAsync($"CREATE SCHEMA {Q(schema)};");
+        await ExecuteAdminAsync($"CREATE SCHEMA {QuoteIdentifier(schema)};");
         var connectionString = new NpgsqlConnectionStringBuilder(container.GetConnectionString())
         {
             SearchPath = schema
@@ -1029,7 +1029,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         finally
         {
             NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync($"DROP SCHEMA {Q(schema)} CASCADE;");
+            await ExecuteAdminAsync($"DROP SCHEMA {QuoteIdentifier(schema)} CASCADE;");
         }
     }
 
@@ -1176,7 +1176,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
-            command.CommandText = $"CREATE TABLE {Q(model.Target.Routes.Single().PrimaryStorage.Name.Identifier)} (\"wrong\" integer NOT NULL);";
+            command.CommandText = $"CREATE TABLE {QuoteIdentifier(model.Target.Routes.Single().PrimaryStorage.Name.Identifier)} (\"wrong\" integer NOT NULL);";
             await command.ExecuteNonQueryAsync();
         }
 
@@ -1512,8 +1512,8 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using (var statistics = connection.CreateCommand())
         {
             statistics.CommandText = route.LinkedIndexStorage is null
-                ? $"ANALYZE {Q(route.PrimaryStorage.Name.Identifier)};"
-                : $"ANALYZE {Q(route.PrimaryStorage.Name.Identifier)}; ANALYZE {Q(route.LinkedIndexStorage.Name.Identifier)};";
+                ? $"ANALYZE {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)};"
+                : $"ANALYZE {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)}; ANALYZE {QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier)};";
             await statistics.ExecuteNonQueryAsync();
         }
     }
@@ -1771,17 +1771,17 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var seed = connection.CreateCommand();
         var sourceIdentityPredicate = sourceId is null
             ? string.Empty
-            : $" AND {Q(id)} = @sourceId";
+            : $" AND {QuoteIdentifier(id)} = @sourceId";
         seed.CommandText = $"""
             WITH source AS (
-                SELECT * FROM {Q(table)}
-                WHERE {Q(category.Column.Identifier)} = @category{sourceIdentityPredicate}
+                SELECT * FROM {QuoteIdentifier(table)}
+                WHERE {QuoteIdentifier(category.Column.Identifier)} = @category{sourceIdentityPredicate}
                 LIMIT 1
             )
-            INSERT INTO {Q(table)} ({string.Join(", ", columns.Select(Q))})
+            INSERT INTO {QuoteIdentifier(table)} ({string.Join(", ", columns.Select(QuoteIdentifier))})
             SELECT {string.Join(", ", columns.Select(column => identityColumns.Contains(column)
-                ? $"s.{Q(column)} || '-noise-' || n::text"
-                : column == category.Column.Identifier ? "'noise'" : $"s.{Q(column)}"))}
+                ? $"s.{QuoteIdentifier(column)} || '-noise-' || n::text"
+                : column == category.Column.Identifier ? "'noise'" : $"s.{QuoteIdentifier(column)}"))}
             FROM source s CROSS JOIN generate_series(1, 4096) AS n;
             """;
         seed.Parameters.AddWithValue("category", categoryValue);
@@ -1858,16 +1858,16 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var copy = connection.CreateCommand();
         copy.CommandText = $"""
             WITH source AS (
-                SELECT * FROM {Q(table)} LIMIT 1
+                SELECT * FROM {QuoteIdentifier(table)} LIMIT 1
             )
-            INSERT INTO {Q(table)} ({string.Join(", ", columns.Select(Q))})
+            INSERT INTO {QuoteIdentifier(table)} ({string.Join(", ", columns.Select(QuoteIdentifier))})
             SELECT {string.Join(", ", columns.Select(column => column switch
             {
                 var value when value == idColumn => $"'{prefix}-id-' || n::text",
                 var value when value == comparisonColumn => $"'{prefix}-comparison-' || n::text",
                 var value when value == lookupColumn => $"'{prefix}-lookup-' || n::text",
                 var value when value == overrideColumn => $"'{overrideValue}'",
-                _ => $"s.{Q(column)}"
+                _ => $"s.{QuoteIdentifier(column)}"
             }))}
             FROM source s CROSS JOIN generate_series(1, @count) AS n;
             """;
@@ -1881,8 +1881,8 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText =
-            $"UPDATE {Q(route.PrimaryStorage.Name.Identifier)} SET " +
-            $"{Q(route.Envelope.Identity.LookupKey.Identifier)} = @lookupKey;";
+            $"UPDATE {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} SET " +
+            $"{QuoteIdentifier(route.Envelope.Identity.LookupKey.Identifier)} = @lookupKey;";
         command.Parameters.AddWithValue("lookupKey", lookupKey);
         await command.ExecuteNonQueryAsync();
     }
@@ -1896,9 +1896,9 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText =
-            $"UPDATE {Q(route.LinkedIndexStorage!.Name.Identifier)} SET " +
-            $"{Q(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
-            $"{Q(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey;";
+            $"UPDATE {QuoteIdentifier(route.LinkedIndexStorage!.Name.Identifier)} SET " +
+            $"{QuoteIdentifier(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
+            $"{QuoteIdentifier(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey;";
         command.Parameters.AddWithValue("retainedId", retainedId);
         command.Parameters.AddWithValue("comparisonKey", comparisonKey);
         await command.ExecuteNonQueryAsync();
@@ -1914,10 +1914,10 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText =
-            $"UPDATE {Q(route.LinkedIndexStorage!.Name.Identifier)} SET " +
-            $"{Q(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
-            $"{Q(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey " +
-            $"WHERE {Q(route.LinkedRelationship.Identity.LookupKey.Identifier)} = @lookupKey;";
+            $"UPDATE {QuoteIdentifier(route.LinkedIndexStorage!.Name.Identifier)} SET " +
+            $"{QuoteIdentifier(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
+            $"{QuoteIdentifier(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey " +
+            $"WHERE {QuoteIdentifier(route.LinkedRelationship.Identity.LookupKey.Identifier)} = @lookupKey;";
         command.Parameters.AddWithValue("retainedId", retainedId);
         command.Parameters.AddWithValue("comparisonKey", comparisonKey);
         command.Parameters.AddWithValue("lookupKey", lookupKey);
@@ -1932,7 +1932,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var connection = new NpgsqlConnection(container.GetConnectionString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT {Q(column)} FROM {Q(table)} ORDER BY {Q(orderBy)};";
+        command.CommandText = $"SELECT {QuoteIdentifier(column)} FROM {QuoteIdentifier(table)} ORDER BY {QuoteIdentifier(orderBy)};";
         var values = new List<int?>();
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -2001,10 +2001,10 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                     ? ExecutableStorageObjectRole.LinkedIndexStorage
                     : ExecutableStorageObjectRole.PrimaryStorage) &&
                 index.Columns.Any(column => column.Column.Identifier == comparison))
-            .Select(index => $"DROP INDEX {Q(index.Name.Identifier)}; ");
+            .Select(index => $"DROP INDEX {QuoteIdentifier(index.Name.Identifier)}; ");
         command.CommandText =
             string.Concat(dependentIndexes) +
-            $"ALTER TABLE {Q(table)} DROP COLUMN {Q(comparison)};";
+            $"ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(comparison)};";
         await command.ExecuteNonQueryAsync();
     }
 
@@ -2044,7 +2044,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var connection = new NpgsqlConnection(container.GetConnectionString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"CREATE DATABASE {Q(database)} TEMPLATE template0 ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'und-u-ks-level1';";
+        command.CommandText = $"CREATE DATABASE {QuoteIdentifier(database)} TEMPLATE template0 ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'und-u-ks-level1';";
         await command.ExecuteNonQueryAsync();
         return new NpgsqlConnectionStringBuilder(container.GetConnectionString()) { Database = database }.ConnectionString;
     }
@@ -2054,7 +2054,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var connection = new NpgsqlConnection(container.GetConnectionString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"DROP DATABASE IF EXISTS {Q(database)} WITH (FORCE);";
+        command.CommandText = $"DROP DATABASE IF EXISTS {QuoteIdentifier(database)} WITH (FORCE);";
         await command.ExecuteNonQueryAsync();
     }
 
@@ -2073,8 +2073,8 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             constraint = (string)(await read.ExecuteScalarAsync())!;
         }
         await using var tamper = connection.CreateCommand();
-        tamper.CommandText = $"ALTER TABLE {Q(table)} DROP CONSTRAINT {Q(constraint)}; " +
-                             $"ALTER TABLE {Q(table)} ALTER COLUMN {Q(column)} TYPE text COLLATE gw_nondeterministic;";
+        tamper.CommandText = $"ALTER TABLE {QuoteIdentifier(table)} DROP CONSTRAINT {QuoteIdentifier(constraint)}; " +
+                             $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} TYPE text COLLATE gw_nondeterministic;";
         await tamper.ExecuteNonQueryAsync();
     }
 
@@ -2105,7 +2105,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         await using var connection = new NpgsqlConnection(container.GetConnectionString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {Q(table)} WHERE {Q(column)} IS NOT NULL;";
+        command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(table)} WHERE {QuoteIdentifier(column)} IS NOT NULL;";
         return Convert.ToInt64(await command.ExecuteScalarAsync());
     }
 
@@ -2143,17 +2143,17 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             InfrastructureTamper.WrongLockOwnerType =>
                 "ALTER TABLE groundwork_physical_schema_locks ALTER COLUMN owner_id TYPE character varying(32);",
             InfrastructureTamper.WrongStateCollation => $"""
-                CREATE COLLATION {Q(schema)}.gw_nondeterministic
+                CREATE COLLATION {QuoteIdentifier(schema)}.gw_nondeterministic
                     (provider = icu, locale = 'und-u-ks-level1', deterministic = false);
                 ALTER TABLE groundwork_physical_schema_state ALTER COLUMN target_fingerprint
-                    TYPE text COLLATE {Q(schema)}.gw_nondeterministic;
+                    TYPE text COLLATE {QuoteIdentifier(schema)}.gw_nondeterministic;
                 """,
             InfrastructureTamper.SameNameCShadowCollation => $"""
-                CREATE COLLATION {Q(schema)}.{Q("C")}
+                CREATE COLLATION {QuoteIdentifier(schema)}.{QuoteIdentifier("C")}
                     (provider = icu, locale = 'und-u-ks-level1', deterministic = false);
                 ALTER TABLE groundwork_physical_schema_locks DROP CONSTRAINT groundwork_physical_schema_locks_pkey;
                 ALTER TABLE groundwork_physical_schema_locks ALTER COLUMN manifest_id
-                    TYPE text COLLATE {Q(schema)}.{Q("C")};
+                    TYPE text COLLATE {QuoteIdentifier(schema)}.{QuoteIdentifier("C")};
                 ALTER TABLE groundwork_physical_schema_locks ADD PRIMARY KEY (manifest_id, provider_name);
                 """,
             InfrastructureTamper.MissingStatePrimaryKey =>
@@ -2261,7 +2261,7 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             $"PostgreSQL session {blockedSessionId} was not observed waiting on session {blockerSessionId}.");
     }
 
-    private static string Q(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+    private static string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
     public enum InfrastructureTamper
     {

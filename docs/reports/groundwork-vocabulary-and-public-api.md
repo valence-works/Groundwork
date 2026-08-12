@@ -1,6 +1,12 @@
 # Groundwork vocabulary and public API reconciliation
 
-Status: source-verified design follow-up under accepted [ADR 0003](../adr/0003-adopt-three-physical-storage-forms.md); this report does not reopen the governing storage-form decision.
+Status: **superseded in part.** This is the pre-runtime review (issue #28) and remains the record of the
+surface before any of ADR 0003's physical storage forms had a provider runtime. Its forward-looking
+decisions are superseded by the
+[post-runtime reconciliation](groundwork-vocabulary-and-public-api-post-runtime.md) (issue #63);
+where the two disagree, that one governs. Source-verified design follow-up under accepted
+[ADR 0003](../adr/0003-adopt-three-physical-storage-forms.md); this report does not reopen the
+governing storage-form decision.
 
 Date: 2026-07-12.
 
@@ -49,7 +55,7 @@ The current relational "optimized" form does not move canonical JSON. [`Relation
 | [`MaterializationOperation`](../../src/Groundwork/Materialization/MaterializationOperation.cs) | Compatibility operations for storage-unit creation, index creation, optimized projection creation, and schema-history recording; canonical-JSON backfill now uses the Core schema-evolution operation directly. | Preserve only as a compatibility surface through #46–#48; do not declare another backfill authority. |
 | [`MaterializationPlanner`](../../src/Groundwork/Materialization/MaterializationPlanner.cs) | Validates a manifest and provider reports, derives all current create operations, and emits schema history. It does not yet diff a recorded resolved definition. | Keep and extend to plan from resolved definitions plus history. |
 | [`Groundwork.Materialization.SchemaHistoryEntry`](../../src/Groundwork/Materialization/SchemaHistoryEntry.cs) | Carries manifest identity/version, provider, planning time, and operation targets. Provider ledgers currently persist a narrower identity/version/provider record. | Keep the concept, expand its durable shape to prove the resolved definition and names that were applied. |
-| [`Groundwork.Core.Materialization`](../../src/Groundwork/Core/Materialization/MaterializationPlan.cs) plan, operation, enum, and schema-history records | No repository runtime usage outside their own declarations. They duplicate the active `Groundwork.Materialization` names with different shapes. | Remove at the breaking boundary. They contradict ADR 0001's ownership decision. |
+| `Groundwork.Core.Materialization` plan, operation, enum, and schema-history records | No repository runtime usage outside their own declarations. They duplicate the active `Groundwork.Materialization` names with different shapes. | Remove at the breaking boundary. They contradict ADR 0001's ownership decision. |
 | [`DocumentPlan`](../../src/Groundwork/Documents/Planning/DocumentPlan.cs) / [`RelationalPlan`](../../src/Groundwork/Relational/Planning/RelationalPlan.cs) | Public projections over the manifest plus the same materialization plan. Repository consumers are planner tests; provider factories execute `MaterializationPlan` directly. | Do not grow these into competing plans. Make them internal diagnostics/read models or replace them with one resolved-storage plan. |
 
 `Materialization` retains its meaning from [`CONTEXT.md`](../../CONTEXT.md): preparing provider storage for a manifest. It is not synonymous with projecting JSON values, and it is not limited to first-time creation.
@@ -77,7 +83,7 @@ No current host policy can transform all logical database-object names, and no s
 
 ### Migrations
 
-[`GroundworkMigration`](../../src/Groundwork/Core/Migrations/GroundworkMigration.cs) is a second, imperative public pipeline. It declares create/drop/index/projection/backfill/transform/provider-SQL operations, while [`GroundworkMigrationRunner`](../../src/Groundwork/Core/Migrations/GroundworkMigrationRunner.cs) delegates to an executor. The only repository executor is SQLite, and its practical escape hatch is provider SQL. By contrast, declarative additive-index and projection backfills already execute through `MaterializationPlanner` and provider materializers under ADR 0002.
+`GroundworkMigration` was a second, imperative public pipeline. It declares create/drop/index/projection/backfill/transform/provider-SQL operations, while `GroundworkMigrationRunner` delegated to an executor. The only repository executor is SQLite, and its practical escape hatch is provider SQL. By contrast, declarative additive-index and projection backfills already execute through `MaterializationPlanner` and provider materializers under ADR 0002.
 
 The two pipelines overlap in name and operation kinds but do not share a desired-state diff, plan, or durable definition. They should not both grow into general schema evolution systems.
 
@@ -206,6 +212,12 @@ The existing public migration family has this complete target disposition:
 This yields one direction of dependency:
 
 `BoundedQueryDeclaration + DocumentQuery + ProviderPhysicalTableDefinition + executable provider capabilities -> PhysicalQueryPlan`
+
+> **Post-runtime note (2026-08-12, issue #63).** The duplicate `Groundwork.Core.Materialization`
+> records and the whole `GroundworkMigration` family were removed in the pre-1.0 cleanup, so the
+> source links to them are dropped above. The dispositions this report proposed for them stand; they
+> are simply no longer pending. See the
+> [post-runtime reconciliation](groundwork-vocabulary-and-public-api-post-runtime.md).
 
 ## Compatibility and migration strategy
 

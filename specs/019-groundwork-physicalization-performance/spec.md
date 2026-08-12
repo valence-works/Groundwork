@@ -4,7 +4,14 @@
 
 **Created**: 2026-06-10
 
-**Status**: In Progress
+**Status**: Delivered as G7; its vocabulary is now legacy.
+
+> "Optimized physicalization" here is the shared-document-plus-linked-projection feature that shipped,
+> not ADR 0003's physical entity table. The declarations it introduced are obsolete under GW0001,
+> GW0002, and GW0004 and retire with the legacy document lane. The acceptance criteria below are left
+> unedited as implemented history. See
+> [ADR 0003](../../docs/adr/0003-adopt-three-physical-storage-forms.md) and the
+> [post-runtime vocabulary reconciliation](../../docs/reports/groundwork-vocabulary-and-public-api-post-runtime.md).
 
 **Input**: User description: "Groundwork G7 physicalization and performance. Add opt-in optimized physicalization for hot storage units while preserving the portable document-store contract and portable default. Providers should materialize optimized physical structures from manifest intent, route eligible equality queries through those structures, and prove at least one relational provider plus MongoDB can use the optimized path without changing caller APIs."
 

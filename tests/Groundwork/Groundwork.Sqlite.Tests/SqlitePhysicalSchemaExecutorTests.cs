@@ -1262,10 +1262,10 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         await using (var corruptEvidence = connection.CreateCommand())
         {
             corruptEvidence.CommandText =
-                $"UPDATE {Q(route.LinkedIndexStorage!.Name.Identifier)} SET " +
-                $"{Q(route.LinkedRelationship!.DocumentId.Identifier)} = 'Retained-Collision-Id', " +
-                $"{Q(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = 'different-comparison' " +
-                $"WHERE {Q(route.LinkedRelationship.DocumentId.Identifier)} = 'z-collision';";
+                $"UPDATE {QuoteIdentifier(route.LinkedIndexStorage!.Name.Identifier)} SET " +
+                $"{QuoteIdentifier(route.LinkedRelationship!.DocumentId.Identifier)} = 'Retained-Collision-Id', " +
+                $"{QuoteIdentifier(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = 'different-comparison' " +
+                $"WHERE {QuoteIdentifier(route.LinkedRelationship.DocumentId.Identifier)} = 'z-collision';";
             await corruptEvidence.ExecuteNonQueryAsync();
         }
 
@@ -1284,7 +1284,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             priority.Column.Identifier,
             await ColumnNamesAsync(connection, route.LinkedIndexStorage.Name.Identifier));
         await using var count = connection.CreateCommand();
-        count.CommandText = $"SELECT COUNT(*) FROM {Q(route.LinkedIndexStorage.Name.Identifier)};";
+        count.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier)};";
         Assert.Equal(2L, Convert.ToInt64(await count.ExecuteScalarAsync()));
     }
 
@@ -1882,7 +1882,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
 
         Assert.Null(await store.LoadAsync("configurationDocument", "failed"));
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {Q(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
+        command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
         Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
     }
 
@@ -1973,7 +1973,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         var definitions = ownerColumns
             .Where(column => drift != "missing-owner-column" || column.Identifier != storage.IdComparisonKey.Column.Identifier)
             .Select(column =>
-                $"{Q(column.Identifier)} {(column.Identifier == storage.Ordinal.Column.Identifier ? "INTEGER" : "TEXT")} NOT NULL")
+                $"{QuoteIdentifier(column.Identifier)} {(column.Identifier == storage.Ordinal.Column.Identifier ? "INTEGER" : "TEXT")} NOT NULL")
             .ToList();
         var value = drift switch
         {
@@ -1983,20 +1983,20 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             "wrong-value-collation" => "TEXT COLLATE BINARY NOT NULL",
             _ => "TEXT COLLATE NOCASE NOT NULL"
         };
-        definitions.Add($"{Q(storage.Value.Column.Identifier)} {value}");
+        definitions.Add($"{QuoteIdentifier(storage.Value.Column.Identifier)} {value}");
         var key = drift == "wrong-owner-ordinal-key-order"
             ? storage.OwnerOrdinalKey.Columns.Reverse().Select(column => column.Column)
             : storage.OwnerOrdinalKey.Columns.Select(column => column.Column);
-        definitions.Add($"PRIMARY KEY ({string.Join(", ", key.Select(column => Q(column.Identifier)))})");
-        var table = $"CREATE TABLE {Q(storage.Storage.Name.Identifier)} ({string.Join(", ", definitions)});";
+        definitions.Add($"PRIMARY KEY ({string.Join(", ", key.Select(column => QuoteIdentifier(column.Identifier)))})");
+        var table = $"CREATE TABLE {QuoteIdentifier(storage.Storage.Name.Identifier)} ({string.Join(", ", definitions)});";
         if (drift != "wrong-membership-index-order")
             return table;
         var wrongColumns = storage.MembershipKey.OwnerColumns
             .Select(column => column.Column.Identifier)
             .Append(storage.MembershipKey.Value.Column.Identifier);
         return table +
-            $" CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {Q(storage.Storage.Name.Identifier)} " +
-            $"({string.Join(", ", wrongColumns.Select(Q))});";
+            $" CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)} " +
+            $"({string.Join(", ", wrongColumns.Select(QuoteIdentifier))});";
     }
 
     private static async Task ExecuteSqlAsync(SqliteConnection connection, string sql)
@@ -2011,7 +2011,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         string index)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = $"PRAGMA index_xinfo({Q(index)});";
+        command.CommandText = $"PRAGMA index_xinfo({QuoteIdentifier(index)});";
         var columns = new List<string>();
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -2027,7 +2027,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         string table)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = $"PRAGMA table_info({Q(table)});";
+        command.CommandText = $"PRAGMA table_info({QuoteIdentifier(table)});";
         var columns = new List<CollectionTableColumn>();
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -2041,7 +2041,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         return columns;
     }
 
-    private static string Q(string identifier) =>
+    private static string QuoteIdentifier(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
     internal static (StorageManifest Manifest, PhysicalSchemaTarget Target) CreateModel(

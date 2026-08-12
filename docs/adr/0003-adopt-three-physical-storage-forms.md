@@ -6,7 +6,12 @@ Date: 2026-07-12.
 
 Tracking: [PRD #25](https://github.com/valence-works/Groundwork/issues/25).
 
-Follow-up: [Groundwork vocabulary and public API reconciliation](../reports/groundwork-vocabulary-and-public-api.md).
+Follow-up: [Groundwork vocabulary and public API reconciliation](../reports/groundwork-vocabulary-and-public-api.md)
+(pre-runtime, issue #28) and its successor
+[post-runtime reconciliation](../reports/groundwork-vocabulary-and-public-api-post-runtime.md)
+(issue #63), which ratifies the vocabulary after the provider runtimes shipped. Where the two reports
+disagree, the post-runtime one governs. Neither reopens this decision: the three forms below needed no
+fourth value across #46–#48.
 
 ## Context
 

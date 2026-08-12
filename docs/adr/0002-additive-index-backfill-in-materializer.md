@@ -8,6 +8,14 @@ When a storage manifest adds an index to a unit that already holds documents, th
 
 The declarative materializer is the established home for projection maintenance: optimized projections are already backfilled there (`BackfillPhysicalizedAsync`), and per ADR-0001 provider materializers execute a self-contained `MaterializationPlan`. Additive-index backfill shares that lifecycle exactly, so it lives alongside the existing projection backfill. Issue #44 makes this stage explicit after index creation using the Core schema-evolution `BackfillCanonicalJsonOperation`; compatibility materialization and route-native physical schema diffs now share that single semantic operation authority rather than declaring parallel backfill types. The imperative `BackfillDocuments`/`BackfillOptimizedProjection` kinds remain reserved for future hand-authored migrations.
 
+> **Historical note (2026-08-12, issue #63).** The imperative pipeline this section argues against —
+> `IGroundworkMigrationExecutor`, `GroundworkMigrationRunner`, and the whole `GroundworkMigration`
+> family, including the two reserved backfill kinds — was removed in the pre-1.0 vocabulary cleanup.
+> `Core.SchemaEvolution` and the schema tool now own the semantic-migration lifecycle end to end. The
+> reasoning below is preserved because it explains why the declarative materializer owns backfill; the
+> identifiers it names no longer exist. See the
+> [post-runtime vocabulary reconciliation](../reports/groundwork-vocabulary-and-public-api-post-runtime.md).
+
 ## Relational providers (SQLite, PostgreSQL, SQL Server)
 
 Portable indexes are stored in the shared `groundwork_document_indexes` projection table, which is otherwise only written at document save time. `RelationalMaterializerBase` rebuilds the projection for an added index by deleting the rows for `(document_kind, index_name)` and re-inserting one row per existing document whose content yields a value. Value extraction is shared with the save-time path via `RelationalIndexValues` so runtime and backfill semantics cannot drift. The rebuild is idempotent, so re-materializing a manifest is safe.

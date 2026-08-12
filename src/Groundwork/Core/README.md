@@ -1,6 +1,6 @@
 # Groundwork Core
 
-Groundwork Core defines provider-neutral persistence intent: manifests, storage units, storage intent, logical indexes, bounded queries, physical table definitions, deterministic name resolution, executable storage routes, provider capabilities, materialization plan concepts, schema-history records, migration contracts, and validation diagnostics.
+Groundwork Core defines provider-neutral persistence intent: manifests, storage units, storage intent, logical indexes, bounded queries, physical table definitions, deterministic name resolution, executable storage routes, provider capabilities, materialization plan concepts, schema-evolution and schema-history records, and validation diagnostics.
 
 This package is generic infrastructure. It does not reference host-specific packages or provider-specific database libraries.
 
@@ -19,8 +19,8 @@ This package is generic infrastructure. It does not reference host-specific pack
   default; an optional callback can route the start, applied-operation count, and blocking
   diagnostics into a host logger.
 - `PhysicalQueryPlanCompiler` selects one executable server-side source from the route and a provider handler profile, injects mandatory scope and identity tie-breaking, and fails unsupported bounded declarations without client fallback. See [`docs/bounded-physical-query-plans.md`](../../../docs/bounded-physical-query-plans.md).
-- Storage intent declares whether a unit is a portable document, benchmark-gated, or provider-specialized.
+- Storage intent declares the provider capabilities a unit requires; provider fit is computed from those requirements.
 - Provider capability reports describe what a provider can materialize.
 - Validators return structured diagnostics for preview and startup checks.
 - Materialization concepts provide the shared language for later provider packages.
-- Migration contracts provide an Orchard-style runner/executor boundary without taking a dependency on provider-specific migration frameworks.
+- Schema evolution derives additive diffs from executable routes and durable applied state, and applies them through one executor lifecycle. Semantic migrations are declared, not hand-authored as an imperative pipeline.

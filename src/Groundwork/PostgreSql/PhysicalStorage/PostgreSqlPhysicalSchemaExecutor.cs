@@ -41,7 +41,7 @@ public sealed class PostgreSqlPhysicalSchemaExecutor : RelationalServerPhysicalS
 internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysicalSchemaDialect
 {
     public override string ProviderDisplayName => "PostgreSQL";
-    public override string Q(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+    public override string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
     public override string EnvelopeType(RelationalEnvelopeColumnKind kind) => kind switch
     {
@@ -110,32 +110,32 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
         definition.DefaultValue is null ? null : DefaultSql(definition);
 
     public override string EnvelopeColumn(string name, RelationalEnvelopeColumnKind kind) =>
-        $"{Q(name)} {EnvelopeType(kind)}" +
+        $"{QuoteIdentifier(name)} {EnvelopeType(kind)}" +
         (EnvelopeCollation(kind) is { } collation ? $" COLLATE {CollationToken(collation)}" : string.Empty) +
         " NOT NULL";
 
     public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey) =>
-        $"CREATE TABLE {Q(table)} ({string.Join(", ", columns)}, PRIMARY KEY ({string.Join(", ", primaryKey.Select(Q))}));";
+        $"CREATE TABLE {QuoteIdentifier(table)} ({string.Join(", ", columns)}, PRIMARY KEY ({string.Join(", ", primaryKey.Select(QuoteIdentifier))}));";
 
     public override string AddColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
-        $"ALTER TABLE {Q(table)} ADD COLUMN {ProjectedColumnSql(column, definition)};";
+        $"ALTER TABLE {QuoteIdentifier(table)} ADD COLUMN {ProjectedColumnSql(column, definition)};";
 
     public override string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
-        $"ALTER TABLE {Q(table)} ALTER COLUMN {Q(column)} SET NOT NULL;";
+        $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} SET NOT NULL;";
 
     public override string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
         excludedColumns.Count > 0
-            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{Q(column)} IS NOT NULL"))})"
+            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{QuoteIdentifier(column)} IS NOT NULL"))})"
             : null;
 
     public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
-        $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {Q(index.Name.Identifier)} ON {Q(table)} " +
+        $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)} " +
         $"({string.Join(", ", index.Columns.Select(column =>
-            $"{Q(column.Column.Identifier)} " +
+            $"{QuoteIdentifier(column.Column.Identifier)} " +
             (column.Direction == PhysicalSortDirection.Descending ? "DESC NULLS LAST" : "ASC NULLS FIRST")))})" +
         (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
 
-    public override string DropIndexSql(string table, string index) => $"DROP INDEX {Q(index)};";
+    public override string DropIndexSql(string table, string index) => $"DROP INDEX {QuoteIdentifier(index)};";
 
     public override string UpsertLinkedSql(
         string table,
@@ -145,19 +145,19 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
     {
         var conflict = updateColumns.Count == 0
             ? "DO NOTHING"
-            : "DO UPDATE SET " + string.Join(", ", updateColumns.Select(column => $"{Q(column)} = EXCLUDED.{Q(column)}"));
-        return $"INSERT INTO {Q(table)} ({string.Join(", ", columns.Select(Q))}) VALUES ({string.Join(", ", columns.Select((_, index) => $"@v{index}"))}) " +
-               $"ON CONFLICT ({string.Join(", ", keyColumns.Select(Q))}) {conflict};";
+            : "DO UPDATE SET " + string.Join(", ", updateColumns.Select(column => $"{QuoteIdentifier(column)} = EXCLUDED.{QuoteIdentifier(column)}"));
+        return $"INSERT INTO {QuoteIdentifier(table)} ({string.Join(", ", columns.Select(QuoteIdentifier))}) VALUES ({string.Join(", ", columns.Select((_, index) => $"@v{index}"))}) " +
+               $"ON CONFLICT ({string.Join(", ", keyColumns.Select(QuoteIdentifier))}) {conflict};";
     }
 
     public override string SelectCanonicalBatchSql(ExecutableStorageRoute route, int batchSize, bool hasCursor)
     {
         var cursor = hasCursor
-            ? $" AND ({Q(route.ScopeKey.Column.Identifier)} > @afterScope OR ({Q(route.ScopeKey.Column.Identifier)} = @afterScope AND {Q(route.Envelope.Id.Identifier)} > @afterId))"
+            ? $" AND ({QuoteIdentifier(route.ScopeKey.Column.Identifier)} > @afterScope OR ({QuoteIdentifier(route.ScopeKey.Column.Identifier)} = @afterScope AND {QuoteIdentifier(route.Envelope.Id.Identifier)} > @afterId))"
             : string.Empty;
-        return $"SELECT {Q(route.ScopeKey.Column.Identifier)}, {Q(route.Envelope.Id.Identifier)}, {Q(route.Envelope.CanonicalJson.Identifier)} " +
-               $"FROM {Q(route.PrimaryStorage.Name.Identifier)} WHERE {Q(route.Discriminator.Column.Identifier)} = @kind{cursor} " +
-               $"ORDER BY {Q(route.ScopeKey.Column.Identifier)}, {Q(route.Envelope.Id.Identifier)} LIMIT {batchSize};";
+        return $"SELECT {QuoteIdentifier(route.ScopeKey.Column.Identifier)}, {QuoteIdentifier(route.Envelope.Id.Identifier)}, {QuoteIdentifier(route.Envelope.CanonicalJson.Identifier)} " +
+               $"FROM {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} WHERE {QuoteIdentifier(route.Discriminator.Column.Identifier)} = @kind{cursor} " +
+               $"ORDER BY {QuoteIdentifier(route.ScopeKey.Column.Identifier)}, {QuoteIdentifier(route.Envelope.Id.Identifier)} LIMIT {batchSize};";
     }
 
     public override object? ConvertStorageValue(object? value, ProjectedColumnDefinition definition) => value switch
@@ -551,7 +551,7 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
     }
 
     public override string ProjectedColumnSql(string column, ProjectedColumnDefinition definition) =>
-        $"{Q(column)} {ProjectedType(definition)}{CollationSql(definition)} {(definition.IsNullable ? "NULL" : "NOT NULL")}" +
+        $"{QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} {(definition.IsNullable ? "NULL" : "NOT NULL")}" +
         (DefaultSql(definition) is { } value ? $" DEFAULT {value}" : string.Empty);
 
     private string CollationSql(ProjectedColumnDefinition definition) =>
@@ -559,8 +559,8 @@ internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysical
 
     private string CollationToken(string value) =>
         string.Equals(value, "C", StringComparison.Ordinal)
-            ? $"{Q("pg_catalog")}.{Q("C")}"
-            : Q(value);
+            ? $"{QuoteIdentifier("pg_catalog")}.{QuoteIdentifier("C")}"
+            : QuoteIdentifier(value);
 
     private static string? DefaultSql(ProjectedColumnDefinition definition)
     {

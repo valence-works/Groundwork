@@ -26,8 +26,10 @@ The provider's ability to prepare storage for a manifest, including schema histo
 _Avoid_: Provider capability, runtime capability
 
 **Materialization Plan**:
-A self-contained description of the storage-preparation work needed to make a provider ready for a manifest.
-_Avoid_: Storage manifest, provider plan
+A self-contained description of the storage-preparation work needed to make a provider ready for a
+manifest. "Materialization" means storage preparation and nothing else; a runtime write-path
+structure is linked storage, not a materialization.
+_Avoid_: Storage manifest, provider plan, relationship materialization
 
 **Materialization Operation**:
 One executable storage-preparation step inside a materialization plan.
@@ -97,6 +99,35 @@ client-fallback plan. Provider handlers certify and execute the exact provider, 
 index, and field mapping before the store can serve traffic. Callers do not submit physical query
 plans.
 _Avoid_: Document query
+
+**Bounded**:
+The adjective for every declared, closed contract Groundwork serves: bounded queries, bounded
+mutations, bounded grouped reductions. A bounded contract states its whole shape up front so a
+provider can certify it before traffic.
+_Avoid_: Closed, portable (as a contract-family name)
+
+**Portable**:
+Provider-neutral, and nothing else. It qualifies types and values that mean the same thing on every
+provider; it never names a storage form, a query family, or an optimization level.
+_Avoid_: Portable mode, portable query (as a family), optimized
+
+**Linked Storage**:
+A derived structure holding query keys or relationship keys plus a reference back to its document. It
+is maintained atomically with canonical JSON and is never a physical storage form of its own.
+_Avoid_: Sidecar, physicalization table, optimized projection
+
+**Relationship Reference Storage**:
+The generated, runtime-maintained linked storage that makes one declared cross-unit reference
+queryable and fenceable. It is a write-path structure, not a schema-preparation step, so
+"materialization" does not name it. The shipped types still carry the older names; this is the
+vocabulary new work uses and the rename targets.
+_Avoid_: Relationship materialization, relationship sidecar
+
+**Reference Fence Generation**:
+The monotonic generation that fences a relationship reference against a concurrent change to its
+target, so a stale reference can never be read as proof of an active target. The shipped field is
+still named for materialization.
+_Avoid_: Materialization generation
 
 **Diagnostic Record Store**:
 A specialized, provider-neutral append/query/inspection/retention contract for immutable,

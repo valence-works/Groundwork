@@ -4,7 +4,16 @@
 
 **Created**: 2026-06-24
 
-**Status**: Draft
+**Status**: Superseded as design; preserved as history.
+
+> The Orchard-style imperative runner/executor this spec evaluated was built, never wired to
+> production, and removed in the pre-1.0 vocabulary cleanup (issue #63). `Groundwork.Core.SchemaEvolution`
+> and the schema tool now own the whole lifecycle: additive diffs from executable routes against
+> durable applied state, declared semantic migrations, and one executor under one lease. FR-004's
+> `groundwork_migration_history` table no longer exists. The acceptance criteria below are left
+> unedited as the record of what was evaluated and why. See
+> [ADR 0003](../../docs/adr/0003-adopt-three-physical-storage-forms.md) §6 and the
+> [post-runtime vocabulary reconciliation](../../docs/reports/groundwork-vocabulary-and-public-api-post-runtime.md).
 
 **Input**: User description: "Create a specification and implementation for automatic migrations when Groundwork manifests, document schemas, or physicalized indexes change. Evaluate an Orchard-style migrations API/runner, FluentMigrator, and alternatives."
 

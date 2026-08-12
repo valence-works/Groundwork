@@ -894,7 +894,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         command.Parameters.Add(parameter);
     }
 
-    internal string Q(string identifier) => dialect.QuoteIdentifier(identifier);
+    internal string QuoteIdentifier(string identifier) => dialect.QuoteIdentifier(identifier);
     internal string JsonValue(string expression, string path) => dialect.JsonValue(expression, path);
     internal string SetJsonValue(string expression, string pathParameter, string valueParameter) =>
         dialect.SetJsonValue(expression, pathParameter, valueParameter);
@@ -937,7 +937,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         dialect.ReadDocumentIdentityLookup(reader, ordinal);
     internal RelationalPhysicalEnvelopeRow ReadPhysicalEnvelope(DbDataReader reader) =>
         RelationalPhysicalEnvelopeRowLayout.Read(reader, dialect);
-    internal string P(string name) => dialect.Parameter(name);
+    internal string Parameter(string name) => dialect.Parameter(name);
     internal int MaxPhysicalParameters => dialect.MaxParameters;
     internal string Contains(string field, string parameter) => dialect.Contains(field, parameter);
     internal string StartsWith(string field, string parameter) => dialect.StartsWith(field, parameter);
@@ -1491,14 +1491,14 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         var parts = identity.Select(item => new RelationalPhysicalIdentityPredicatePart(
             item.Column,
             null,
-            P(item.Parameter))).ToArray();
+            Parameter(item.Parameter))).ToArray();
         var hashOnly = dialect.HashOnlyIdentityPredicate(parts);
         if (hashOnly is null)
             return;
 
         await using var command = CreatePhysicalCommand(
             transaction.Connection!,
-            $"SELECT {string.Join(", ", identity.Select(item => Q(item.Column)))} FROM {Q(table)} WHERE {hashOnly};",
+            $"SELECT {string.Join(", ", identity.Select(item => QuoteIdentifier(item.Column)))} FROM {QuoteIdentifier(table)} WHERE {hashOnly};",
             transaction);
         foreach (var item in identity)
             AddPhysicalParameter(command, item.Parameter, item.Value);

@@ -13,7 +13,7 @@ the storage boundary and is never read from document JSON.
 
 ## Projects
 
-- `Groundwork.Core`: manifests, storage intent, provider capability checks, validation, materialization concepts, and physicalization projection rules.
+- `Groundwork.Core`: manifests, storage intent, provider capability checks, validation, physical storage definitions and executable routes, and provider-neutral schema evolution.
 - `Groundwork.Documents`: portable document-store contracts and document planning.
 - `Groundwork.DiagnosticRecords`: bounded append/query/inspection/retention contracts for immutable diagnostic streams.
 - `Groundwork.DiagnosticRecords.Relational`: shared relational schema, transactional ledger/retention kernel, and bounded SQL query translation for diagnostic streams.
@@ -236,19 +236,24 @@ var declaredUnit = legacyUnit with
 };
 ```
 
-The resolver and provider-definition types in this release are declaration/planning inputs. Provider
-DDL, writes, and runtime query routing move to these resolved definitions in the next implementation
-slices; the bridge keeps current provider execution behavior intact meanwhile.
+Provider DDL, writes, and runtime query routing now execute from these resolved definitions on all
+four providers; the bridge above exists only so an existing manifest can be converted deliberately
+rather than reinterpreted. The obsolete declarations emit `GW0001`–`GW0004`, and those warnings are
+migration debt: do not suppress them and do not add aliases around them.
+
+The canonical vocabulary for all of this — which terms are ratified, which are legacy, and how the
+bridge retires — is the
+[post-runtime vocabulary and public API reconciliation](docs/reports/groundwork-vocabulary-and-public-api-post-runtime.md).
+[`CONTEXT.md`](CONTEXT.md) is the short reference.
 
 ### Storage intent
 
-Storage intent declares whether a unit fits Groundwork's portable document/table contract or needs additional evidence or provider-specific behavior:
+Storage intent declares the provider capabilities a unit requires. Provider fit is computed from those declared requirements, never from author self-declaration:
 
-- `StorageIntent.PortableDocument()`: Groundwork's default portable document/table contract.
-- `StorageIntent.BenchmarkGated(...)`: possible future Groundwork support, but requires benchmark or correctness evidence.
-- `StorageIntent.SpecializedProvider(...)`: requires a provider or module-specific contract.
+- `StorageIntent.PortableDocument(descriptor)`: Groundwork's default portable document/table contract. It requires no capabilities beyond the base contract.
+- `StorageIntent.Operational(rationale, descriptor, requirements)`: declares one or more `CapabilityId` requirements plus the rationale for them. Use it when correctness depends on behavior beyond ordinary document storage — atomic commit across units, concurrency evidence, or operational diagnostics.
 
-Use specialized or benchmark-gated intent when correctness depends on behavior beyond ordinary document storage, such as atomic claiming, lease recovery, ordered consumption, retry recovery, idempotency, retention, atomic commit behavior, concurrency evidence, or operational diagnostics.
+`ProviderCapabilityValidator` compares a manifest's requirements against a provider's `ProviderCapabilityReport` and returns a `ProviderFit`; capabilities marked `EvidenceGatedByDefault` in the registry additionally need evidence through `WorkloadEvidencePolicy`. The `WorkloadIntent` descriptor on both factories is a non-binding diagnostic label — it never selects a physical form and never participates in fit.
 
 Configure SQLite by materializing the manifest, then create an `IDocumentStore` over the same connection:
 
@@ -330,6 +335,8 @@ if (created.Status != DocumentStoreWriteStatus.Saved)
 
 var loaded = await store.LoadAsync(DocumentKind, ticket.ticketNumber);
 
+// DocumentStoreQuery is the obsolete single-equality bridge (GW0004). New code declares a
+// BoundedQueryDeclaration and issues a DocumentQuery — see "Bounded document queries" below.
 var openTickets = await store.QueryAsync(
     new DocumentStoreQuery(DocumentKind, "by-status", "open", skip: 0, take: 25));
 

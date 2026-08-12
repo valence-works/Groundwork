@@ -163,7 +163,7 @@ public sealed class SqlServerBenchmarkTarget(
         await using var connection = new SqlConnection(serverConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"CREATE DATABASE {Q(databaseName)};";
+        command.CommandText = $"CREATE DATABASE {QuoteIdentifier(databaseName)};";
         await command.ExecuteNonQueryAsync(cancellationToken);
         connectionString = new SqlConnectionStringBuilder(serverConnectionString) { InitialCatalog = databaseName }.ConnectionString;
     }
@@ -175,7 +175,7 @@ public sealed class SqlServerBenchmarkTarget(
         await using var connection = new SqlConnection(serverConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"ALTER DATABASE {Q(databaseName)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {Q(databaseName)};";
+        command.CommandText = $"ALTER DATABASE {QuoteIdentifier(databaseName)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {QuoteIdentifier(databaseName)};";
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -215,7 +215,7 @@ public sealed class SqlServerBenchmarkTarget(
         await using var connection = new SqlConnection(ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT_BIG(*) FROM {Q(table)} WHERE {Q(projection.Column.Identifier)} = @value;";
+        command.CommandText = $"SELECT COUNT_BIG(*) FROM {QuoteIdentifier(table)} WHERE {QuoteIdentifier(projection.Column.Identifier)} = @value;";
         command.Parameters.AddWithValue("@value", value);
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
     }
@@ -233,11 +233,11 @@ public sealed class SqlServerBenchmarkTarget(
     {
         await using var statistics = connection.CreateCommand();
         statistics.CommandText = Model.Route.LinkedIndexStorage is null
-            ? $"UPDATE STATISTICS {Q(Model.Route.PrimaryStorage.Name.Identifier)} WITH FULLSCAN;"
-            : $"UPDATE STATISTICS {Q(Model.Route.PrimaryStorage.Name.Identifier)} WITH FULLSCAN; " +
-              $"UPDATE STATISTICS {Q(Model.Route.LinkedIndexStorage.Name.Identifier)} WITH FULLSCAN;";
+            ? $"UPDATE STATISTICS {QuoteIdentifier(Model.Route.PrimaryStorage.Name.Identifier)} WITH FULLSCAN;"
+            : $"UPDATE STATISTICS {QuoteIdentifier(Model.Route.PrimaryStorage.Name.Identifier)} WITH FULLSCAN; " +
+              $"UPDATE STATISTICS {QuoteIdentifier(Model.Route.LinkedIndexStorage.Name.Identifier)} WITH FULLSCAN;";
         await statistics.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static string Q(string value) => $"[{value.Replace("]", "]]", StringComparison.Ordinal)}]";
+    private static string QuoteIdentifier(string value) => $"[{value.Replace("]", "]]", StringComparison.Ordinal)}]";
 }
