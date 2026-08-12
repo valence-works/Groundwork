@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.Text;
 using MongoDB.Bson;
 
 namespace Groundwork.MongoDb;
@@ -88,8 +89,8 @@ internal static class MongoDbPhysicalProjectionValues
             {
                 PortablePhysicalType.String => new BsonString(source.GetString() ?? throw new FormatException(
                     "A string collection-element projection requires a JSON string.")),
-                PortablePhysicalType.Int32 => new BsonInt32(MongoDbExactNumericLiteral.Parse(NumberText(source, collectionElement)).ToInt32()),
-                PortablePhysicalType.Int64 => new BsonInt64(MongoDbExactNumericLiteral.Parse(NumberText(source, collectionElement)).ToInt64()),
+                PortablePhysicalType.Int32 => new BsonInt32(ExactNumericLiteral.Parse(NumberText(source, collectionElement)).ToInt32()),
+                PortablePhysicalType.Int64 => new BsonInt64(ExactNumericLiteral.Parse(NumberText(source, collectionElement)).ToInt64()),
                 PortablePhysicalType.Decimal => Decimal(projection, NumberText(source, collectionElement)),
                 PortablePhysicalType.Boolean => new BsonBoolean(source.GetBoolean()),
                 PortablePhysicalType.DateTime or PortablePhysicalType.Guid or PortablePhysicalType.Binary =>
@@ -125,8 +126,8 @@ internal static class MongoDbPhysicalProjectionValues
             {
                 PortablePhysicalType.String or PortablePhysicalType.Guid or PortablePhysicalType.Binary =>
                     new BsonString(value),
-                PortablePhysicalType.Int32 => new BsonInt32(MongoDbExactNumericLiteral.Parse(value).ToInt32()),
-                PortablePhysicalType.Int64 => new BsonInt64(MongoDbExactNumericLiteral.Parse(value).ToInt64()),
+                PortablePhysicalType.Int32 => new BsonInt32(ExactNumericLiteral.Parse(value).ToInt32()),
+                PortablePhysicalType.Int64 => new BsonInt64(ExactNumericLiteral.Parse(value).ToInt64()),
                 PortablePhysicalType.Decimal => Decimal(projection, value),
                 PortablePhysicalType.Boolean => new BsonBoolean(bool.Parse(value)),
                 PortablePhysicalType.DateTime => new BsonString(value),
@@ -162,8 +163,8 @@ internal static class MongoDbPhysicalProjectionValues
             return projection.Definition.Type switch
             {
                 PortablePhysicalType.String => String(projection, value),
-                PortablePhysicalType.Int32 => new BsonInt32(MongoDbExactNumericLiteral.Parse(NumericText(value)).ToInt32()),
-                PortablePhysicalType.Int64 => new BsonInt64(MongoDbExactNumericLiteral.Parse(NumericText(value)).ToInt64()),
+                PortablePhysicalType.Int32 => new BsonInt32(ExactNumericLiteral.Parse(NumericText(value)).ToInt32()),
+                PortablePhysicalType.Int64 => new BsonInt64(ExactNumericLiteral.Parse(NumericText(value)).ToInt64()),
                 PortablePhysicalType.Decimal => Decimal(projection, NumericText(value)),
                 PortablePhysicalType.Boolean when value.IsBoolean => value,
                 PortablePhysicalType.DateTime => DateTimeTicks(value),
@@ -187,8 +188,8 @@ internal static class MongoDbPhysicalProjectionValues
             var source = projection.Definition.Type switch
             {
                 PortablePhysicalType.String or PortablePhysicalType.Guid or PortablePhysicalType.Binary => new BsonString(text),
-                PortablePhysicalType.Int32 => new BsonInt32(MongoDbExactNumericLiteral.Parse(text).ToInt32()),
-                PortablePhysicalType.Int64 => new BsonInt64(MongoDbExactNumericLiteral.Parse(text).ToInt64()),
+                PortablePhysicalType.Int32 => new BsonInt32(ExactNumericLiteral.Parse(text).ToInt32()),
+                PortablePhysicalType.Int64 => new BsonInt64(ExactNumericLiteral.Parse(text).ToInt64()),
                 PortablePhysicalType.Decimal => Decimal(projection, text),
                 PortablePhysicalType.Boolean => new BsonBoolean(bool.Parse(text)),
                 PortablePhysicalType.DateTime => new BsonString(text),
@@ -214,11 +215,13 @@ internal static class MongoDbPhysicalProjectionValues
     private static BsonValue Decimal(ExecutableProjectedColumnRoute projection, string value)
     {
         var definition = projection.Definition;
-        var exact = MongoDbExactNumericLiteral.Parse(value).ValidateDecimal(
+        var literal = ExactNumericLiteral.Parse(value);
+        literal.ValidateScaledDigits(
             definition.Precision ?? throw new InvalidOperationException("A Decimal projection requires declared precision."),
             definition.Scale ?? throw new InvalidOperationException("A Decimal projection requires declared scale."),
             definition.LogicalName);
-        return new BsonDecimal128(Decimal128.Parse(exact));
+        // BSON stores the lexeme as text; zero folds to "0" so redundant spellings ("0.00") do not persist.
+        return new BsonDecimal128(Decimal128.Parse(literal.IsZero ? "0" : literal.OriginalText));
     }
 
     private static string NumericText(BsonValue value) => value.BsonType switch
