@@ -64,23 +64,33 @@ public sealed class SqliteNullExcludedIndexTests(ITestOutputHelper output)
             PhysicalStorageForm.PhysicalEntityTable,
             missingValues: MissingValueBehavior.IncludedAsNull);
 
-        foreach (var unproven in NullExcludedIndexConformance.UnprovenCases)
-        {
-            var result = await cell.Queries.QueryAsync(
-                NullExcludedIndexConformance.Query(unproven.Comparison));
-            Assert.Equal(
-                unproven.ExpectedIds.Order(),
-                result.Documents.Select(document => document.Id).Order());
-        }
+        await NullExcludedIndexConformance.VerifyQueriesAsync(cell.Queries, cell.Route, output.WriteLine);
+    }
+
+    /// <summary>
+    /// The third branch, and the only one where the answer rather than the refusal is the assertion. An
+    /// ordinary query has no scale guarantee to abandon, so the index is given up instead of refused and
+    /// the optimizer serves every row the predicate matches.
+    /// </summary>
+    [Fact]
+    public async Task An_ordinary_query_gives_up_the_index_rather_than_dropping_rows()
+    {
+        await using var cell = await CreateAsync(
+            PhysicalStorageForm.PhysicalEntityTable,
+            executionClass: BoundedQueryExecutionClass.Ordinary);
+
+        await NullExcludedIndexConformance.VerifyQueriesAsync(cell.Queries, cell.Route, output.WriteLine);
     }
 
     private static async Task<Cell> CreateAsync(
         PhysicalStorageForm form,
         MissingValueBehavior missingValues = MissingValueBehavior.Excluded,
-        bool includeDelete = false)
+        bool includeDelete = false,
+        BoundedQueryExecutionClass executionClass = BoundedQueryExecutionClass.ScaleBearing)
     {
         var instance = Guid.NewGuid().ToString("N")[..8];
-        var manifest = NullExcludedIndexConformance.CreateManifest(instance, form, missingValues, includeDelete);
+        var manifest = NullExcludedIndexConformance.CreateManifest(
+            instance, form, missingValues, includeDelete, executionClass);
         var target = NullExcludedIndexConformance.CreateTarget(
             manifest,
             SqliteTestManifests.Provider,

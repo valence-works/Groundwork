@@ -79,26 +79,37 @@ public sealed class MongoDbNullExcludedIndexTests(ITestOutputHelper output) : IA
             PhysicalStorageForm.PhysicalEntityTable,
             missingValues: MissingValueBehavior.IncludedAsNull);
 
-        foreach (var unproven in NullExcludedIndexConformance.UnprovenCases)
-        {
-            var result = await cell.Documents.QueryAsync(
-                NullExcludedIndexConformance.Query(unproven.Comparison));
-            Assert.Equal(
-                unproven.ExpectedIds.Order(),
-                result.Documents.Select(document => document.Id).Order());
-        }
+        await NullExcludedIndexConformance.VerifyQueriesAsync(cell.Documents, cell.Route, output.WriteLine);
+    }
+
+    /// <summary>
+    /// The third branch, and the only one where the answer rather than the refusal is the assertion. An
+    /// ordinary query has no scale guarantee to abandon, so the hint is given up instead of refused — and
+    /// the membership conjuncts have to go with it, since either alone would still drop the document with
+    /// no category.
+    /// </summary>
+    [Fact]
+    public async Task An_ordinary_query_gives_up_the_hint_rather_than_dropping_documents()
+    {
+        var cell = await CreateAsync(
+            PhysicalStorageForm.PhysicalEntityTable,
+            executionClass: BoundedQueryExecutionClass.Ordinary);
+
+        await NullExcludedIndexConformance.VerifyQueriesAsync(cell.Documents, cell.Route, output.WriteLine);
     }
 
     private async Task<Cell> CreateAsync(
         PhysicalStorageForm form,
         MissingValueBehavior missingValues = MissingValueBehavior.Excluded,
-        bool includeDelete = false)
+        bool includeDelete = false,
+        BoundedQueryExecutionClass executionClass = BoundedQueryExecutionClass.ScaleBearing)
     {
         var database = new MongoClient(container.GetConnectionString())
             .GetDatabase($"groundwork_{Guid.NewGuid():N}");
         var instance = Guid.NewGuid().ToString("N")[..8];
         var model = MongoDbPhysicalStorageModel.Compile(
-            NullExcludedIndexConformance.CreateManifest(instance, form, missingValues, includeDelete));
+            NullExcludedIndexConformance.CreateManifest(
+                instance, form, missingValues, includeDelete, executionClass));
         await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
         var documents = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Global);
         await NullExcludedIndexConformance.SeedAsync(documents);

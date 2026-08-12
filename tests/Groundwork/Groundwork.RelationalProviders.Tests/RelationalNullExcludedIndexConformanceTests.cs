@@ -26,13 +26,19 @@ public sealed class SqlServerNullExcludedIndexConformanceTests(
     : IClassFixture<SqlServerNullExcludedIndexContainer>
 {
     [Theory]
-    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
-    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable, BoundedQueryExecutionClass.ScaleBearing)]
+    [InlineData(PhysicalStorageForm.SharedDocuments, BoundedQueryExecutionClass.ScaleBearing)]
+    // An ordinary query has no scale guarantee to abandon, so the same predicates give up the pin and are
+    // answered rather than refused. Only the reference provider needs both arms: PostgreSQL pins nothing
+    // either way, and the arms are the guard's, not the dialect's.
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable, BoundedQueryExecutionClass.Ordinary)]
     public async Task Null_excluding_index_never_answers_with_fewer_rows_than_the_predicate_matches(
-        PhysicalStorageForm form)
+        PhysicalStorageForm form,
+        BoundedQueryExecutionClass executionClass)
     {
         var instance = Guid.NewGuid().ToString("N")[..8];
-        var manifest = NullExcludedIndexConformance.CreateManifest(instance, form);
+        var manifest = NullExcludedIndexConformance.CreateManifest(
+            instance, form, executionClass: executionClass);
         var target = NullExcludedIndexConformance.CreateTarget(
             manifest,
             SqlServerGroundworkCapabilities.Provider,

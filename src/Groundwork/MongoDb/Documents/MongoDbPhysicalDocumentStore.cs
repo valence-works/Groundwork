@@ -1726,10 +1726,20 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
     /// partial filter so the returned set is the predicate's set by construction rather than by trust.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// MongoDB does not reject a hint whose partial filter the query fails to imply; it honours the hint
     /// and returns only the indexed documents. The hint is therefore the row-dropping mechanism, and
     /// dropping the conjuncts without also dropping the hint would restore nothing —
-    /// <see cref="PhysicalIndexNullExclusionGuard"/> decides both together.
+    /// <see cref="PhysicalIndexNullExclusionGuard"/> decides both together. A plan that pins nothing has
+    /// no filter to imply and cannot drop a row, so it is never asked.
+    /// </para>
+    /// <para>
+    /// The question is asked of <see cref="PhysicalIndexNullExclusion"/> rather than of the emitted
+    /// <c>$exists</c> filter, which makes the answer conservative here: MongoDB distinguishes an absent
+    /// path from an explicit null and the partial filter keeps the latter, so an index the guard treats
+    /// as excluding a column may in fact hold some of the documents it refuses to serve from. Erring that
+    /// way costs a pin; erring the other way costs rows.
+    /// </para>
     /// </remarks>
     private static (BsonString? Hint, IReadOnlyList<string> MembershipFields) HintedIndex(
         DocumentQuery query,
@@ -1737,10 +1747,10 @@ internal sealed class MongoDbPhysicalQueryHandler : IPhysicalDocumentQueryHandle
         ExecutableStorageRoute route)
     {
         var hint = PlanIndexHint(plan, route);
-        var index = route.Indexes.SingleOrDefault(candidate =>
+        if (hint is null)
+            return (null, []);
+        var index = route.Indexes.Single(candidate =>
             string.Equals(candidate.Identity, plan.LogicalIndexIdentity, StringComparison.Ordinal));
-        if (index is null)
-            return (hint, []);
         var verdict = PhysicalIndexNullExclusionGuard.Decide(
             query,
             plan,

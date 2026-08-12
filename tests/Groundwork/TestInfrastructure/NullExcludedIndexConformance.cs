@@ -28,6 +28,11 @@ namespace Groundwork.TestInfrastructure;
 /// pins nothing and answers. That is why <see cref="VerifyQueriesAsync"/> accepts either outcome per
 /// case and pins the row set in both, rather than asserting one branch and calling the other a bug.
 /// </para>
+/// <para>
+/// The variable here is therefore the provider. The relational-only <c>NullExcludedIndexScenario</c>
+/// varies filtered-ness instead — uniqueness and nullability one ingredient at a time, asserted against
+/// the filter the provider's catalog reports — and the two are not substitutes for one another.
+/// </para>
 /// </remarks>
 public static class NullExcludedIndexConformance
 {
@@ -72,7 +77,8 @@ public static class NullExcludedIndexConformance
         string instance,
         PhysicalStorageForm form,
         MissingValueBehavior missingValues = MissingValueBehavior.Excluded,
-        bool includeDelete = false)
+        bool includeDelete = false,
+        BoundedQueryExecutionClass executionClass = BoundedQueryExecutionClass.ScaleBearing)
     {
         var envelope = new DocumentEnvelopeDefinition();
         var binding = new SharedStorageBinding($"runtime_{instance}");
@@ -118,7 +124,7 @@ public static class NullExcludedIndexConformance
             },
             QuerySortSupport.Ascending,
             QueryPagingSupport.Offset,
-            BoundedQueryExecutionClass.ScaleBearing,
+            executionClass,
             supportsTotalCount: true,
             resultOperations: new HashSet<BoundedQueryResultOperation>
             {
@@ -212,6 +218,13 @@ public static class NullExcludedIndexConformance
         var provable = await queries.QueryAsync(Query(Provable));
         Assert.Equal([AlphaId], provable.Documents.Select(document => document.Id).Order());
         Assert.Equal(1, provable.TotalCount);
+
+        // An empty membership set matches nothing, so it cannot drop anything either: every index serves
+        // it equally and none may refuse it. Regressed once on the relational side by reading the
+        // resulting contradiction as "proves nothing".
+        var empty = await queries.QueryAsync(Query(DocumentQueryComparison.In(CategoryPath, [])));
+        Assert.Empty(empty.Documents);
+        Assert.Equal(0, empty.TotalCount);
 
         foreach (var unproven in UnprovenCases)
         {

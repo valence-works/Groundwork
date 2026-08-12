@@ -72,9 +72,12 @@ internal static class PhysicalIndexNullExclusionGuard
             return PhysicalIndexNullExclusionVerdict.Serves;
 
         var (nullRejectedColumns, matchesNoRows) = Analyze(query, plan, route);
-        // A predicate that returns no rows cannot drop any, so every index serves it equally.
+        // A predicate that returns no rows cannot drop any, so every index serves it equally. It still
+        // has to restate the exclusion: the conjuncts are what let a provider match the index's own
+        // filter, and a contradiction implies that filter no more than any other predicate does. SQLite
+        // answers an INDEXED BY it cannot satisfy with "no query solution" rather than an empty result.
         if (matchesNoRows)
-            return PhysicalIndexNullExclusionVerdict.Serves;
+            return new PhysicalIndexNullExclusionVerdict(true, excludedColumns);
         var unproven = excludedColumns.Where(column => !nullRejectedColumns.Contains(column)).ToArray();
         if (unproven.Length == 0)
             return new PhysicalIndexNullExclusionVerdict(true, excludedColumns);

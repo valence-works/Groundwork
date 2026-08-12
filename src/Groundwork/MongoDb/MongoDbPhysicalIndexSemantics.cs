@@ -4,7 +4,10 @@ using MongoDB.Bson;
 
 namespace Groundwork.MongoDb;
 
-/// <summary>Canonical MongoDB membership metadata for one provider-neutral physical index.</summary>
+/// <summary>
+/// How MongoDB realises row exclusion for one provider-neutral physical index, and how it recognises
+/// what it emitted when it reads the index back.
+/// </summary>
 internal static class MongoDbPhysicalIndexSemantics
 {
     /// <summary>

@@ -12,6 +12,12 @@ namespace Groundwork.RelationalProviders.Tests;
 /// that may or may not be unique, over a column that may or may not be nullable. Only that pairing
 /// produces a null-excluding index, and only SQL Server acts on it.
 /// </summary>
+/// <remarks>
+/// The variable here is filtered-ness, so this stays relational: the cells vary uniqueness and
+/// nullability one ingredient at a time and read the emitted filter back off the provider's catalog.
+/// The variable in <see cref="Groundwork.TestInfrastructure.NullExcludedIndexConformance"/> is the
+/// provider, and what it asserts is the row set rather than the emitted shape.
+/// </remarks>
 internal static class NullExcludedIndexScenario
 {
     public static DocumentQueryComparison Contains() => DocumentQueryComparison.Contains("category", "lph");
