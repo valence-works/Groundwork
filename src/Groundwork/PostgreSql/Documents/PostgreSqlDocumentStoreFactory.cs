@@ -8,6 +8,7 @@ using Groundwork.PostgreSql.Materialization;
 using Groundwork.PostgreSql.PhysicalStorage;
 using Groundwork.Provider.Relational;
 using Groundwork.Documents.Scoping;
+using Groundwork.Relational.Documents;
 using Npgsql;
 
 namespace Groundwork.PostgreSql.Documents;
@@ -31,17 +32,16 @@ public static class PostgreSqlDocumentStoreFactory
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentNullException.ThrowIfNull(manifest);
-        ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(access);
-        var target = PhysicalSchemaTargetCompiler.Compile(
+        var target = await RelationalPhysicalStoreFactory.AdmitPhysicalAsync(
             manifest,
             provider,
             PostgreSqlGroundworkCapabilities.PhysicalNames,
-            namePolicy);
-        var admission = await new PostgreSqlPhysicalSchemaExecutor(connectionString)
-            .InspectRuntimeAdmissionAsync(target, options, schemaAdmissionLog, cancellationToken);
-        admission.EnsureReady();
+            namePolicy,
+            new PostgreSqlPhysicalSchemaExecutor(connectionString),
+            options,
+            schemaAdmissionLog,
+            cancellationToken);
         return new PostgreSqlPhysicalDocumentStore(
             connectionString,
             manifest,

@@ -433,6 +433,9 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         DocumentStoreScopeResolver.ObserveAcquisition(access, this.scopeObserver);
         this.routes = (routes ?? throw new ArgumentNullException(nameof(routes)))
             .ToDictionary(route => route.StorageUnit.Value, StringComparer.Ordinal);
+        Routes = Array.AsReadOnly(this.routes.Values
+            .OrderBy(route => route.StorageUnit.Value, StringComparer.Ordinal)
+            .ToArray());
         if (this.routes.Count != manifest.StorageUnits.Count ||
             manifest.StorageUnits.Any(unit => !this.routes.ContainsKey(unit.Identity.Value)))
             throw new ArgumentException("Every manifest storage unit requires exactly one executable route.", nameof(routes));
@@ -451,6 +454,13 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
 
     public DocumentStoreAccess Access { get; }
     public TransactionBoundary TransactionBoundary => TransactionBoundary.CrossUnitAtomic;
+
+    /// <summary>
+    /// The compiled executable routes this store executes, ordered by storage unit. Exposed so
+    /// consumers that need per-unit routes (for example bounded query runtimes) do not have to
+    /// recompile the physical schema target the store was opened with.
+    /// </summary>
+    public IReadOnlyList<ExecutableStorageRoute> Routes { get; }
 
     public async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
     {
