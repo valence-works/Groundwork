@@ -1581,96 +1581,69 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         }
     }
 
-    private sealed class UnitOfWork : IDocumentUnitOfWork
+    private sealed class UnitOfWork : RelationalDocumentUnitOfWorkBase
     {
         private readonly RelationalPhysicalDocumentStore store;
         private readonly DocumentCommitScope scope;
-        private readonly DbTransaction? transaction;
-        private readonly RelationalUnitOfWork? ownedUnitOfWork;
-        private readonly IAsyncDisposable? transitionLease;
-        private bool completed;
 
         public UnitOfWork(
             RelationalPhysicalDocumentStore store,
             DocumentCommitScope scope,
             DbTransaction transaction,
             IAsyncDisposable transitionLease)
+            : base(transaction, store.connectionGate, transitionLease)
         {
             this.store = store;
             this.scope = scope;
-            this.transaction = transaction;
-            this.transitionLease = transitionLease;
         }
 
         public UnitOfWork(
             RelationalPhysicalDocumentStore store,
             DocumentCommitScope scope,
             RelationalUnitOfWork ownedUnitOfWork)
+            : base(ownedUnitOfWork)
         {
             this.store = store;
             this.scope = scope;
-            this.ownedUnitOfWork = ownedUnitOfWork;
         }
 
-        public async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
+        protected override string AlreadyCompletedMessage => "The document transaction has already completed.";
+
+        protected override async Task BeforeNonSuccessAbortAsync(CancellationToken callerCancellationToken)
+        {
+            if (store.beforeNonSuccessAbort is not null)
+                await store.beforeNonSuccessAbort(callerCancellationToken);
+        }
+
+        public override async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             ArgumentNullException.ThrowIfNull(request);
             store.ValidateDocumentIdentity(request.Id);
             scope.EnsureIncludes(request.DocumentKind);
-            try
-            {
-                var result = await ExecuteAsync(
-                    (currentTransaction, ct) => store.SaveCoreAsync(request, currentTransaction, ct),
-                    cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Saved)
-                    await AbortNonSuccessAsync(cancellationToken);
-                return result;
-            }
-            catch (Exception primaryFailure)
-            {
-                try
-                {
-                    await AbortAsync(CancellationToken.None);
-                }
-                catch (Exception cleanupFailure)
-                {
-                    RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
-                }
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
-                throw;
-            }
+            return await StageWriteAsync(
+                ct => ExecuteAsync(
+                    (currentTransaction, innerCt) => store.SaveCoreAsync(request, currentTransaction, innerCt),
+                    ct),
+                DocumentStoreWriteStatus.Saved,
+                cancellationToken);
         }
-        public async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
+
+        public override async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             ArgumentNullException.ThrowIfNull(request);
             store.ValidateDocumentIdentity(request.Id);
             scope.EnsureIncludes(request.DocumentKind);
-            try
-            {
-                var result = await ExecuteAsync(
-                    (currentTransaction, ct) => store.DeleteCoreAsync(request, currentTransaction, ct),
-                    cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Deleted)
-                    await AbortNonSuccessAsync(cancellationToken);
-                return result;
-            }
-            catch (Exception primaryFailure)
-            {
-                try
-                {
-                    await AbortAsync(CancellationToken.None);
-                }
-                catch (Exception cleanupFailure)
-                {
-                    RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
-                }
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
-                throw;
-            }
+            return await StageWriteAsync(
+                ct => ExecuteAsync(
+                    (currentTransaction, innerCt) => store.DeleteCoreAsync(request, currentTransaction, innerCt),
+                    ct),
+                DocumentStoreWriteStatus.Deleted,
+                cancellationToken);
         }
-        public async Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
+
+        public override async Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             store.ValidateDocumentIdentity(id);
@@ -1679,113 +1652,6 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
                 (currentTransaction, ct) => store.LoadCoreAsync(
                     currentTransaction.Connection!, documentKind, id, currentTransaction, ct),
                 cancellationToken);
-        }
-        public async Task CommitAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            if (ownedUnitOfWork is not null)
-            {
-                try { await ownedUnitOfWork.CommitAsync(cancellationToken); }
-                finally { completed = true; }
-                return;
-            }
-            await CompleteDirectAsync(() => transaction!.CommitAsync(cancellationToken));
-        }
-        public async Task RollbackAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            await AbortAsync(cancellationToken);
-        }
-        public async ValueTask DisposeAsync()
-        {
-            if (completed) return;
-            if (ownedUnitOfWork is not null)
-            {
-                completed = true;
-                await ownedUnitOfWork.DisposeAsync();
-                return;
-            }
-            await CompleteDirectAsync(() => transaction!.RollbackAsync());
-        }
-        private async Task CompleteDirectAsync(Func<Task> terminalAction)
-        {
-            if (completed) return;
-            completed = true;
-            Exception? primaryFailure = null;
-            try
-            {
-                await terminalAction();
-            }
-            catch (Exception exception)
-            {
-                primaryFailure = exception;
-            }
-            primaryFailure = await CaptureCleanupFailureAsync(
-                primaryFailure,
-                () => transaction!.DisposeAsync());
-            primaryFailure = await CaptureCleanupFailureAsync(
-                primaryFailure,
-                () => transitionLease!.DisposeAsync());
-            try
-            {
-                store.connectionGate.Release();
-            }
-            catch (Exception cleanupFailure)
-            {
-                if (primaryFailure is null)
-                    primaryFailure = cleanupFailure;
-                else
-                    RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
-            }
-            if (primaryFailure is not null)
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
-        }
-        private async Task AbortAsync(CancellationToken cancellationToken)
-        {
-            if (completed) return;
-            if (ownedUnitOfWork is not null)
-            {
-                try { await ownedUnitOfWork.RollbackAsync(cancellationToken); }
-                finally { completed = true; }
-                return;
-            }
-            await CompleteDirectAsync(() => transaction!.RollbackAsync(cancellationToken));
-        }
-        private async Task AbortNonSuccessAsync(CancellationToken callerCancellationToken)
-        {
-            if (store.beforeNonSuccessAbort is not null)
-                await store.beforeNonSuccessAbort(callerCancellationToken);
-            await AbortAsync(CancellationToken.None);
-        }
-        private Task<T> ExecuteAsync<T>(
-            Func<DbTransaction, CancellationToken, Task<T>> operation,
-            CancellationToken cancellationToken) =>
-            ownedUnitOfWork is not null
-                ? ownedUnitOfWork.Executor.ExecuteAsync(
-                    (_, currentTransaction, ct) => operation(currentTransaction, ct),
-                    cancellationToken)
-                : operation(transaction!, cancellationToken);
-
-        private void EnsureActive()
-        {
-            if (completed) throw new InvalidOperationException("The document transaction has already completed.");
-        }
-
-        private static async Task<Exception?> CaptureCleanupFailureAsync(
-            Exception? primaryFailure,
-            Func<ValueTask> cleanup)
-        {
-            try
-            {
-                await cleanup();
-            }
-            catch (Exception cleanupFailure)
-            {
-                if (primaryFailure is null)
-                    return cleanupFailure;
-                RelationalCleanupFailures.Attach(primaryFailure, cleanupFailure);
-            }
-            return primaryFailure;
         }
     }
 

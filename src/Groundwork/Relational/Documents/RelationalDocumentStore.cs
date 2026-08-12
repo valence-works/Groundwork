@@ -700,83 +700,72 @@ public class RelationalDocumentStore : IDocumentStore
         }
     }
 
-    private sealed class RelationalDocumentUnitOfWork : IDocumentUnitOfWork
+    private sealed class RelationalDocumentUnitOfWork : RelationalDocumentUnitOfWorkBase
     {
         private readonly RelationalDocumentStore store;
         private readonly DocumentCommitScope scope;
-        private readonly DbTransaction? transaction;
-        private readonly RelationalUnitOfWork? ownedUnitOfWork;
-        private bool completed;
 
         public RelationalDocumentUnitOfWork(
             RelationalDocumentStore store,
             DocumentCommitScope scope,
             DbTransaction transaction)
+            : base(transaction, store.connectionGate)
         {
             this.store = store;
             this.scope = scope;
-            this.transaction = transaction;
         }
 
         public RelationalDocumentUnitOfWork(
             RelationalDocumentStore store,
             DocumentCommitScope scope,
             RelationalUnitOfWork ownedUnitOfWork)
+            : base(ownedUnitOfWork)
         {
             this.store = store;
             this.scope = scope;
-            this.ownedUnitOfWork = ownedUnitOfWork;
         }
 
-        public async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
+        protected override string AlreadyCompletedMessage => "The document transaction has already been committed or rolled back.";
+
+        public override async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             ArgumentNullException.ThrowIfNull(request);
             store.dialect.ValidateDocumentIdentity(request.Id);
             this.scope.EnsureIncludes(request.DocumentKind);
-            try
-            {
-                var unit = store.GetUnit(request.DocumentKind);
-                var selection = store.ResolveScope(unit, StorageScopeOperation.Save);
-                var result = await ExecuteAsync(
-                    (currentTransaction, ct) => store.SaveCoreAsync(request, unit, selection, currentTransaction, ct),
-                    cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Saved)
-                    await AbortAsync(CancellationToken.None);
-                return result;
-            }
-            catch
-            {
-                await AbortAsync(CancellationToken.None);
-                throw;
-            }
+            return await StageWriteAsync(
+                ct =>
+                {
+                    var unit = store.GetUnit(request.DocumentKind);
+                    var selection = store.ResolveScope(unit, StorageScopeOperation.Save);
+                    return ExecuteAsync(
+                        (currentTransaction, innerCt) => store.SaveCoreAsync(request, unit, selection, currentTransaction, innerCt),
+                        ct);
+                },
+                DocumentStoreWriteStatus.Saved,
+                cancellationToken);
         }
 
-        public async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
+        public override async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             ArgumentNullException.ThrowIfNull(request);
             store.dialect.ValidateDocumentIdentity(request.Id);
             this.scope.EnsureIncludes(request.DocumentKind);
-            try
-            {
-                var unit = store.GetUnit(request.DocumentKind);
-                var selection = store.ResolveScope(unit, StorageScopeOperation.Delete);
-                var result = await ExecuteAsync(
-                    (currentTransaction, ct) => store.DeleteCoreAsync(request, unit, selection, currentTransaction, ct),
-                    cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Deleted)
-                    await AbortAsync(CancellationToken.None);
-                return result;
-            }
-            catch
-            {
-                await AbortAsync(CancellationToken.None);
-                throw;
-            }
+            return await StageWriteAsync(
+                ct =>
+                {
+                    var unit = store.GetUnit(request.DocumentKind);
+                    var selection = store.ResolveScope(unit, StorageScopeOperation.Delete);
+                    return ExecuteAsync(
+                        (currentTransaction, innerCt) => store.DeleteCoreAsync(request, unit, selection, currentTransaction, innerCt),
+                        ct);
+                },
+                DocumentStoreWriteStatus.Deleted,
+                cancellationToken);
         }
 
-        public async Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
+        public override async Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             store.dialect.ValidateDocumentIdentity(id);
@@ -796,115 +785,6 @@ public class RelationalDocumentStore : IDocumentStore
                     ct),
                 cancellationToken);
             return stored?.Envelope;
-        }
-
-        public async Task CommitAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            if (ownedUnitOfWork is not null)
-            {
-                try
-                {
-                    await ownedUnitOfWork.CommitAsync(cancellationToken);
-                }
-                finally
-                {
-                    completed = true;
-                }
-                return;
-            }
-
-            try
-            {
-                await transaction!.CommitAsync(cancellationToken);
-            }
-            finally
-            {
-                await CompleteAsync();
-            }
-        }
-
-        public async Task RollbackAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            await AbortAsync(cancellationToken);
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            if (completed)
-                return;
-
-            if (ownedUnitOfWork is not null)
-            {
-                completed = true;
-                await ownedUnitOfWork.DisposeAsync();
-                return;
-            }
-
-            try
-            {
-                await transaction!.RollbackAsync();
-            }
-            catch
-            {
-                // Best-effort rollback when disposed without an explicit commit/rollback.
-            }
-            finally
-            {
-                await CompleteAsync();
-            }
-        }
-
-        private async Task CompleteAsync()
-        {
-            if (completed)
-                return;
-
-            completed = true;
-            await transaction!.DisposeAsync();
-            store.connectionGate.Release();
-        }
-
-        private async Task AbortAsync(CancellationToken cancellationToken)
-        {
-            if (completed)
-                return;
-
-            if (ownedUnitOfWork is not null)
-            {
-                try
-                {
-                    await ownedUnitOfWork.RollbackAsync(cancellationToken);
-                }
-                finally
-                {
-                    completed = true;
-                }
-                return;
-            }
-
-            try
-            {
-                await transaction!.RollbackAsync(cancellationToken);
-            }
-            finally
-            {
-                await CompleteAsync();
-            }
-        }
-
-        private Task<T> ExecuteAsync<T>(
-            Func<DbTransaction, CancellationToken, Task<T>> operation,
-            CancellationToken cancellationToken) =>
-            ownedUnitOfWork is not null
-                ? ownedUnitOfWork.Executor.ExecuteAsync((_, currentTransaction, ct) => operation(currentTransaction, ct), cancellationToken)
-                : operation(transaction!, cancellationToken);
-
-        private void EnsureActive()
-        {
-            if (completed)
-                throw new InvalidOperationException("The document transaction has already been committed or rolled back.");
         }
     }
 }
