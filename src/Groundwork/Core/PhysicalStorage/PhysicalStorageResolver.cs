@@ -678,6 +678,9 @@ public static class PhysicalStorageResolver
         IReadOnlyList<ScaleBearingPathDemand> demand) =>
         demand
             .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind, x.Length) }
+                // Residual predicates are query-time filters, not bound declaration sites: a residual
+                // sharing a bounded index path takes the unit-wide declared bound, and one on its own
+                // path stays unbounded.
                 .Concat(x.ResidualPredicateFields.Select(residual =>
                     new ProjectedPathDemand(residual.Path, residual.ValueKind, Length: null))))
             .Where(x => !PhysicalDocumentFieldPaths.IsEnvelope(x.Path))

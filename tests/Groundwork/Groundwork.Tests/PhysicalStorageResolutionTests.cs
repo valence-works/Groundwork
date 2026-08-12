@@ -494,6 +494,72 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
+    public void ResidualPredicateOnABoundedIndexPathTakesTheUnitWideDeclaredBound()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-status",
+                    [new IndexField("status")],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing),
+                new BoundedQueryDeclaration(
+                    "list-by-status",
+                    "by-status",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing,
+                    residualPredicateFields:
+                    [
+                        new BoundedQueryResidualPredicateField(
+                            "customerId",
+                            IndexValueKind.Keyword,
+                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal })
+                    ])
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        // The residual predicate is a query-time filter, not a bound declaration site: the write-time
+        // contract for customerId comes from the index declaration alone, so the shared projected
+        // column keeps the declared bound and the residual-only view of the path adds no conflict.
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var definition = Assert.Single(result.Definitions).Definition;
+        Assert.Collection(
+            definition.ProjectedColumns,
+            column =>
+            {
+                Assert.Equal("customerId", column.Path);
+                Assert.Equal(64, column.Length);
+            },
+            column =>
+            {
+                Assert.Equal("status", column.Path);
+                Assert.Null(column.Length);
+            });
+    }
+
+    [Fact]
     public void MixedDeclaredAndOmittedLengthsForOnePathAreRejected()
     {
         var physicalStorage = new StorageUnitPhysicalStorage(
