@@ -498,13 +498,15 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         IReadOnlyList<IndexField> fields,
         IndexValueKind valueKind,
         bool isUnique,
-        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull)
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull,
+        int? length = null)
     {
         Identity = identity;
         Fields = fields?.ToArray() ?? throw new ArgumentNullException(nameof(fields));
         ValueKind = valueKind;
         IsUnique = isUnique;
         MissingValueBehavior = missingValueBehavior;
+        Length = length;
     }
 
     public string Identity { get; }
@@ -517,6 +519,12 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
 
     public MissingValueBehavior MissingValueBehavior { get; }
 
+    /// <summary>
+    /// Default maximum UTF-16 code-unit count for <see cref="IndexValueKind.String"/> and
+    /// <see cref="IndexValueKind.Keyword"/> fields.
+    /// </summary>
+    public int? Length { get; }
+
     public IndexValueKind GetValueKind(IndexField field)
     {
         ArgumentNullException.ThrowIfNull(field);
@@ -526,13 +534,20 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
     public IndexValueKind GetValueKind(string path) =>
         GetValueKind(Fields.Single(field => field.Path == path));
 
+    public int? GetLength(IndexField field)
+    {
+        ArgumentNullException.ThrowIfNull(field);
+        return field.Length ?? Length;
+    }
+
     public bool Equals(LogicalIndexDeclaration? other) =>
         other is not null &&
         Identity == other.Identity &&
         Fields.SequenceEqual(other.Fields) &&
         ValueKind == other.ValueKind &&
         IsUnique == other.IsUnique &&
-        MissingValueBehavior == other.MissingValueBehavior;
+        MissingValueBehavior == other.MissingValueBehavior &&
+        Length == other.Length;
 
     public override bool Equals(object? obj) => Equals(obj as LogicalIndexDeclaration);
 
@@ -545,6 +560,7 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         hash.Add(ValueKind);
         hash.Add(IsUnique);
         hash.Add(MissingValueBehavior);
+        hash.Add(Length);
         return hash.ToHashCode();
     }
 }
@@ -809,6 +825,7 @@ public sealed record ScaleBearingPathDemand(
     string Path,
     PhysicalSortDirection SortDirection,
     IndexValueKind ValueKind,
+    int? Length,
     MissingValueBehavior MissingValueBehavior,
     IReadOnlyList<PortableQueryOperation> Operations,
     QuerySortSupport SortSupport,
@@ -828,6 +845,7 @@ public sealed record ScaleBearingPathDemand(
         Path == other.Path &&
         SortDirection == other.SortDirection &&
         ValueKind == other.ValueKind &&
+        Length == other.Length &&
         MissingValueBehavior == other.MissingValueBehavior &&
         Operations.Count == other.Operations.Count &&
         Operations.ToHashSet().SetEquals(other.Operations) &&
@@ -850,6 +868,7 @@ public sealed record ScaleBearingPathDemand(
         hash.Add(Path, StringComparer.Ordinal);
         hash.Add(SortDirection);
         hash.Add(ValueKind);
+        hash.Add(Length);
         hash.Add(MissingValueBehavior);
         foreach (var operation in Operations.Order())
             hash.Add(operation);

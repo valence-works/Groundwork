@@ -406,6 +406,215 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
+    public void DeclaredKeyLengthBoundsSynthesizedProjectedColumns()
+    {
+        var result = ResolveStringDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Length: 200)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var definition = Assert.Single(result.Definitions).Definition;
+        Assert.Equal(PhysicalStorageForm.PhysicalEntityTable, definition.Form);
+        var projected = Assert.Single(definition.ProjectedColumns);
+        Assert.Equal("value", projected.Path);
+        Assert.Equal(PortablePhysicalType.String, projected.Type);
+        Assert.Equal(200, projected.Length);
+    }
+
+    [Fact]
+    public void DeclarationLevelKeyLengthAppliesWhenFieldsOmitIt()
+    {
+        var result = ResolveStringDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull,
+            length: 64));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Equal(64, projected.Length);
+    }
+
+    [Fact]
+    public void FieldKeyLengthOverridesDeclarationDefault()
+    {
+        var result = ResolveStringDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Length: 450)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull,
+            length: 64));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Equal(450, projected.Length);
+    }
+
+    [Fact]
+    public void UndeclaredKeyLengthLeavesSynthesizedStringColumnsUnbounded()
+    {
+        var result = ResolveStringDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Null(projected.Length);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void InvalidDeclaredKeyLengthIsRejected(int length)
+    {
+        var result = ResolveStringDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Length: length)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-039");
+    }
+
+    [Fact]
+    public void DeclaredKeyLengthOnNonStringFieldIsRejected()
+    {
+        var result = ResolveStringDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Length: 64)],
+            IndexValueKind.Number,
+            false,
+            MissingValueBehavior.IncludedAsNull));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-039");
+    }
+
+    [Fact]
+    public void DeclarationLevelKeyLengthWithoutAnyStringFieldIsRejected()
+    {
+        var result = ResolveStringDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value")],
+            IndexValueKind.Boolean,
+            false,
+            MissingValueBehavior.IncludedAsNull,
+            length: 64));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-039");
+    }
+
+    [Fact]
+    public void ConflictingDeclaredKeyLengthsForOnePathAreRejected()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-value",
+                    [new IndexField("value", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false,
+                    MissingValueBehavior.IncludedAsNull),
+                new LogicalIndexDeclaration(
+                    "by-value-alt",
+                    [new IndexField("value", Length: 128)],
+                    IndexValueKind.Keyword,
+                    false,
+                    MissingValueBehavior.IncludedAsNull)
+            ],
+            [
+                StringScaleBearingQuery("list-by-value", "by-value"),
+                StringScaleBearingQuery("list-by-value-alt", "by-value-alt")
+            ]);
+        var manifest = WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage);
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-039");
+    }
+
+    [Fact]
+    public void IndexLeavingKeyLengthUndeclaredInheritsTheDeclaredOne()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-value",
+                    [new IndexField("value", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false,
+                    MissingValueBehavior.IncludedAsNull),
+                new LogicalIndexDeclaration(
+                    "by-value-alt",
+                    [new IndexField("value")],
+                    IndexValueKind.Keyword,
+                    false,
+                    MissingValueBehavior.IncludedAsNull)
+            ],
+            [
+                StringScaleBearingQuery("list-by-value", "by-value"),
+                StringScaleBearingQuery("list-by-value-alt", "by-value-alt")
+            ]);
+        var manifest = WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage);
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Equal(64, projected.Length);
+    }
+
+    private static PhysicalStorageResolutionResult ResolveStringDemand(LogicalIndexDeclaration index)
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [index],
+            [StringScaleBearingQuery("list-by-value", index.Identity)]);
+        var manifest = WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage);
+        return PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+    }
+
+    private static BoundedQueryDeclaration StringScaleBearingQuery(string identity, string indexIdentity) =>
+        new(
+            identity,
+            indexIdentity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.None,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing);
+
+    [Fact]
     public void ScaleBearingCompoundDemandSynthesizesOrderedPhysicalIndex()
     {
         var physicalStorage = new StorageUnitPhysicalStorage(
