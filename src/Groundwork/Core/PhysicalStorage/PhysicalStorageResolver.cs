@@ -273,6 +273,30 @@ public static class PhysicalStorageResolver
                     $"{target}.logicalIndexes.{index.Identity}"));
                 valid = false;
             }
+
+            if (index.Length is < 1 || index.Fields.Any(field => field.Length is < 1))
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-038",
+                    $"Logical index '{index.Identity}' requires declared lengths to be at least one UTF-16 code unit.",
+                    $"{target}.logicalIndexes.{index.Identity}"));
+                valid = false;
+            }
+
+            var nonStringBoundedPaths = index.Fields
+                .Where(field => index.GetLength(field) is not null &&
+                    index.GetValueKind(field) is not (IndexValueKind.String or IndexValueKind.Keyword))
+                .Select(field => field.Path)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            if (nonStringBoundedPaths.Length != 0)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-038",
+                    $"Logical index '{index.Identity}' can only declare lengths for String or Keyword paths: {string.Join(", ", nonStringBoundedPaths)}.",
+                    $"{target}.logicalIndexes.{index.Identity}"));
+                valid = false;
+            }
         }
 
         var queryGroups = storage.BoundedQueries
@@ -522,6 +546,7 @@ public static class PhysicalStorageResolver
                     field.Path,
                     sortDirections[order],
                     matching[0].GetValueKind(field),
+                    matching[0].GetLength(field),
                     matching[0].MissingValueBehavior,
                     Array.AsReadOnly(query.Operations.Order().ToArray()),
                     query.SortSupport,
@@ -550,6 +575,21 @@ public static class PhysicalStorageResolver
                 "GW-PHYSICAL-036",
                 $"Scale-bearing residual predicate paths must have one value kind per storage unit: {string.Join(", ", conflictingResidualKinds)}.",
                 $"storageUnits.{unitIdentity.Value}.physicalStorage.boundedQueries"));
+        }
+
+        var conflictingLengths = demand
+            .Where(x => x.Length is not null)
+            .GroupBy(x => x.Path, StringComparer.Ordinal)
+            .Where(group => group.Select(x => x.Length).Distinct().Count() > 1)
+            .Select(group => group.Key)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (conflictingLengths.Length != 0)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-PHYSICAL-038",
+                $"Scale-bearing index paths must declare one length per storage unit: {string.Join(", ", conflictingLengths)}.",
+                $"storageUnits.{unitIdentity.Value}.physicalStorage.logicalIndexes"));
         }
 
         return demand
@@ -635,15 +675,16 @@ public static class PhysicalStorageResolver
     private static IReadOnlyList<ProjectedColumnDefinition> SynthesizeProjectedColumns(
         IReadOnlyList<ScaleBearingPathDemand> demand) =>
         demand
-            .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind) }
+            .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind, x.Length) }
                 .Concat(x.ResidualPredicateFields.Select(residual =>
-                    new ProjectedPathDemand(residual.Path, residual.ValueKind))))
+                    new ProjectedPathDemand(residual.Path, residual.ValueKind, Length: null))))
             .Where(x => !PhysicalDocumentFieldPaths.IsEnvelope(x.Path))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Select(group => new ProjectedColumnDefinition(
                 FeatureDefaultColumnName(group.Key),
                 group.Key,
-                ToPortableType(group.First().ValueKind)))
+                ToPortableType(group.First().ValueKind),
+                Length: group.Max(x => x.Length)))
             .OrderBy(x => x.Path, StringComparer.Ordinal)
             .ToArray();
 
@@ -1727,5 +1768,5 @@ public static class PhysicalStorageResolver
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null)
     };
 
-    private sealed record ProjectedPathDemand(string Path, IndexValueKind ValueKind);
+    private sealed record ProjectedPathDemand(string Path, IndexValueKind ValueKind, int? Length);
 }

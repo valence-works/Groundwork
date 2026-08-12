@@ -104,13 +104,18 @@ public static class SupportTicketManifest
                 logicalIndexes,
                 boundedQueries));
 
+    // Keyword paths are bounded so providers with finite index-key budgets (SQL Server) can certify
+    // the synthesized physical indexes.
+    private const int KeywordLength = 128;
+
     private static LogicalIndexDeclaration Keyword(string identity, string path, bool isUnique = false) =>
         new(
             identity,
             [new IndexField(path)],
             IndexValueKind.Keyword,
             isUnique,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.Excluded,
+            KeywordLength);
 
     private static readonly IReadOnlySet<PortableQueryOperation> EqualOnly =
         new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };

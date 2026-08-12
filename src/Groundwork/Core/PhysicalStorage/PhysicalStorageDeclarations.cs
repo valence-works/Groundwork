@@ -498,13 +498,15 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         IReadOnlyList<IndexField> fields,
         IndexValueKind valueKind,
         bool isUnique,
-        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull)
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull,
+        int? length = null)
     {
         Identity = identity;
         Fields = fields?.ToArray() ?? throw new ArgumentNullException(nameof(fields));
         ValueKind = valueKind;
         IsUnique = isUnique;
         MissingValueBehavior = missingValueBehavior;
+        Length = length;
     }
 
     public string Identity { get; }
@@ -517,6 +519,13 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
 
     public MissingValueBehavior MissingValueBehavior { get; }
 
+    /// <summary>
+    /// Declaration-default maximum count of UTF-16 code units for String and Keyword fields, overridden
+    /// per field by <see cref="IndexField.Length"/>. Bounds the synthesized projected column so providers
+    /// with finite index-key budgets (SQL Server) can certify declared-mode indexes.
+    /// </summary>
+    public int? Length { get; }
+
     public IndexValueKind GetValueKind(IndexField field)
     {
         ArgumentNullException.ThrowIfNull(field);
@@ -526,13 +535,27 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
     public IndexValueKind GetValueKind(string path) =>
         GetValueKind(Fields.Single(field => field.Path == path));
 
+    /// <summary>
+    /// The effective declared length for one field. The declaration default only reaches String and
+    /// Keyword fields; an explicit field-level length is always surfaced so validation can reject it
+    /// on kinds that cannot be bounded.
+    /// </summary>
+    public int? GetLength(IndexField field)
+    {
+        ArgumentNullException.ThrowIfNull(field);
+        return GetValueKind(field) is IndexValueKind.String or IndexValueKind.Keyword
+            ? field.Length ?? Length
+            : field.Length;
+    }
+
     public bool Equals(LogicalIndexDeclaration? other) =>
         other is not null &&
         Identity == other.Identity &&
         Fields.SequenceEqual(other.Fields) &&
         ValueKind == other.ValueKind &&
         IsUnique == other.IsUnique &&
-        MissingValueBehavior == other.MissingValueBehavior;
+        MissingValueBehavior == other.MissingValueBehavior &&
+        Length == other.Length;
 
     public override bool Equals(object? obj) => Equals(obj as LogicalIndexDeclaration);
 
@@ -545,6 +568,7 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         hash.Add(ValueKind);
         hash.Add(IsUnique);
         hash.Add(MissingValueBehavior);
+        hash.Add(Length);
         return hash.ToHashCode();
     }
 }
@@ -809,6 +833,7 @@ public sealed record ScaleBearingPathDemand(
     string Path,
     PhysicalSortDirection SortDirection,
     IndexValueKind ValueKind,
+    int? Length,
     MissingValueBehavior MissingValueBehavior,
     IReadOnlyList<PortableQueryOperation> Operations,
     QuerySortSupport SortSupport,
@@ -828,6 +853,7 @@ public sealed record ScaleBearingPathDemand(
         Path == other.Path &&
         SortDirection == other.SortDirection &&
         ValueKind == other.ValueKind &&
+        Length == other.Length &&
         MissingValueBehavior == other.MissingValueBehavior &&
         Operations.Count == other.Operations.Count &&
         Operations.ToHashSet().SetEquals(other.Operations) &&
@@ -850,6 +876,7 @@ public sealed record ScaleBearingPathDemand(
         hash.Add(Path, StringComparer.Ordinal);
         hash.Add(SortDirection);
         hash.Add(ValueKind);
+        hash.Add(Length);
         hash.Add(MissingValueBehavior);
         foreach (var operation in Operations.Order())
             hash.Add(operation);

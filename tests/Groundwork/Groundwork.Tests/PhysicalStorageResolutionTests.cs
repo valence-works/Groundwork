@@ -368,6 +368,175 @@ public sealed class PhysicalStorageResolutionTests
         var projected = Assert.Single(definition.Definition.ProjectedColumns);
         Assert.Equal("category", projected.Path);
         Assert.Equal(PortablePhysicalType.String, projected.Type);
+        Assert.Null(projected.Length);
+    }
+
+    [Fact]
+    public void DeclaredKeywordLengthsBoundSynthesizedProjectedColumns()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer-region",
+                    [new IndexField("customerId"), new IndexField("region", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false,
+                    MissingValueBehavior.IncludedAsNull,
+                    length: 128)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer-region",
+                    "by-customer-region",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.Ascending,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
+            ]);
+        var manifest = WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage);
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var definition = Assert.Single(result.Definitions).Definition;
+        Assert.Collection(
+            definition.ProjectedColumns,
+            column =>
+            {
+                Assert.Equal("customerId", column.Path);
+                Assert.Equal(PortablePhysicalType.String, column.Type);
+                Assert.Equal(128, column.Length);
+            },
+            column =>
+            {
+                Assert.Equal("region", column.Path);
+                Assert.Equal(PortablePhysicalType.String, column.Type);
+                Assert.Equal(64, column.Length);
+            });
+    }
+
+    [Fact]
+    public void DeclaredLengthsMustBeAtLeastOneCodeUnit()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 0)],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-038" &&
+            diagnostic.Target == "storageUnits.configurationDocument.physicalStorage.logicalIndexes.by-customer");
+    }
+
+    [Fact]
+    public void DeclaredLengthsRequireStringOrKeywordFields()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer-created",
+                    [
+                        new IndexField("customerId"),
+                        new IndexField("createdAt", IndexValueKind.DateTime, Length: 32)
+                    ],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer-created",
+                    "by-customer-created",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.Ascending,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-038" &&
+            diagnostic.Message.Contains("createdAt", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ConflictingDeclaredLengthsForOnePathAreRejected()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-customer-wide",
+                    [new IndexField("customerId", Length: 128)],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing),
+                new BoundedQueryDeclaration(
+                    "list-by-customer-wide",
+                    "by-customer-wide",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-038" &&
+            diagnostic.Message.Contains("customerId", StringComparison.Ordinal));
     }
 
     [Fact]
