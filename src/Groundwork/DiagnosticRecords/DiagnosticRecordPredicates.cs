@@ -278,28 +278,10 @@ public static class DiagnosticRecordQueryValidator
         switch (predicate)
         {
             case DiagnosticRecordPredicate.All all:
-                if (all.Predicates is null || all.Predicates.Count == 0)
-                {
-                    errors.Add(new("query.predicate.empty", "An all-predicate must contain at least one child.", "predicate"));
-                    break;
-                }
-                foreach (var child in all.Predicates)
-                {
-                    if (child is null)
-                        errors.Add(new("query.predicate.child_null", "Predicate children cannot be null.", "predicate"));
-                }
+                ValidateCompositePredicate(all.Predicates, "An all-predicate must contain at least one child.", errors);
                 break;
             case DiagnosticRecordPredicate.Any any:
-                if (any.Predicates is null || any.Predicates.Count == 0)
-                {
-                    errors.Add(new("query.predicate.empty", "An any-predicate must contain at least one child.", "predicate"));
-                    break;
-                }
-                foreach (var child in any.Predicates)
-                {
-                    if (child is null)
-                        errors.Add(new("query.predicate.child_null", "Predicate children cannot be null.", "predicate"));
-                }
+                ValidateCompositePredicate(any.Predicates, "An any-predicate must contain at least one child.", errors);
                 break;
             case DiagnosticRecordPredicate.Comparison comparison:
                 if (string.IsNullOrWhiteSpace(comparison.Field))
@@ -361,6 +343,24 @@ public static class DiagnosticRecordQueryValidator
                 if (comparison.Operator == DiagnosticPredicateOperator.Contains && field.Type != DiagnosticFieldType.String)
                     errors.Add(new("query.predicate.contains_type", "Contains is only valid for string fields.", "predicate.operator"));
                 break;
+        }
+    }
+
+    private static void ValidateCompositePredicate(
+        IReadOnlyList<DiagnosticRecordPredicate> children,
+        string emptyMessage,
+        List<DiagnosticValidationError> errors)
+    {
+        if (children is null || children.Count == 0)
+        {
+            errors.Add(new("query.predicate.empty", emptyMessage, "predicate"));
+            return;
+        }
+
+        foreach (var child in children)
+        {
+            if (child is null)
+                errors.Add(new("query.predicate.child_null", "Predicate children cannot be null.", "predicate"));
         }
     }
 
