@@ -7,10 +7,10 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
     // Each scenario either requires a deadline to fire (the guarded work never completes, so any
     // duration is deterministic and short keeps the test fast) or requires it NOT to fire (the work
     // completes on its own, so the budget must be generous enough that a loaded runner cannot flip
-    // the outcome). Guard bounds the whole call strictly above every internal budget.
+    // the outcome). Guard bounds every call and sits above the internal budgets by construction.
     private static readonly TimeSpan ExpiringDeadline = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan GenerousBudget = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan Guard = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan Guard = GenerousBudget * 3;
 
     [Fact]
     public async Task Timeout_reports_database_operation_and_server_session_diagnostics()
@@ -19,13 +19,13 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_timeout",
                 "READ_COMMITTED_SNAPSHOT configuration",
-                ExpiringDeadline,
-                GenerousBudget,
-                GenerousBudget,
+                operationTimeout: ExpiringDeadline,
+                abortTimeout: GenerousBudget,
+                diagnosticTimeout: GenerousBudget,
                 cancellationToken => Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken),
                 () => ValueTask.CompletedTask,
                 _ => Task.FromResult("session=71,status=suspended,wait=LCK_M_X,blocker=54"),
-                CancellationToken.None));
+                CancellationToken.None)).WaitAsync(Guard);
 
         Assert.Contains("groundwork_diagnostics_timeout", exception.Message, StringComparison.Ordinal);
         Assert.Contains("READ_COMMITTED_SNAPSHOT configuration", exception.Message, StringComparison.Ordinal);
@@ -45,9 +45,9 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_canceled",
                 "creation",
-                GenerousBudget,
-                GenerousBudget,
-                GenerousBudget,
+                operationTimeout: GenerousBudget,
+                abortTimeout: GenerousBudget,
+                diagnosticTimeout: GenerousBudget,
                 token => Task.FromCanceled(token),
                 () => ValueTask.CompletedTask,
                 _ =>
@@ -55,7 +55,7 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
                     Interlocked.Increment(ref diagnosticCalls);
                     return Task.FromResult("unexpected");
                 },
-                cancellation.Token));
+                cancellation.Token)).WaitAsync(Guard);
 
         Assert.Equal(0, diagnosticCalls);
     }
@@ -67,13 +67,13 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_failure",
                 "drop",
-                GenerousBudget,
-                GenerousBudget,
-                GenerousBudget,
+                operationTimeout: GenerousBudget,
+                abortTimeout: GenerousBudget,
+                diagnosticTimeout: GenerousBudget,
                 _ => Task.FromException(new IOException("drop failed")),
                 () => ValueTask.CompletedTask,
                 _ => Task.FromException<string>(new InvalidOperationException("diagnostics failed")),
-                CancellationToken.None));
+                CancellationToken.None)).WaitAsync(Guard);
 
         Assert.IsType<IOException>(exception.InnerException);
         Assert.Contains("diagnostics unavailable", exception.Message, StringComparison.Ordinal);
@@ -90,9 +90,9 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_non_cooperative",
                 "creation",
-                ExpiringDeadline,
-                GenerousBudget,
-                GenerousBudget,
+                operationTimeout: ExpiringDeadline,
+                abortTimeout: GenerousBudget,
+                diagnosticTimeout: GenerousBudget,
                 _ => releaseExecution.Task,
                 () =>
                 {
@@ -117,17 +117,19 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_stuck_diagnostics",
                 "drop",
-                GenerousBudget,
-                GenerousBudget,
-                ExpiringDeadline,
+                operationTimeout: GenerousBudget,
+                abortTimeout: GenerousBudget,
+                diagnosticTimeout: ExpiringDeadline,
                 _ => Task.FromException(new IOException("drop failed")),
                 () => ValueTask.CompletedTask,
                 _ => diagnostics.Task,
                 CancellationToken.None)).WaitAsync(Guard);
 
         Assert.IsType<IOException>(exception.InnerException);
-        Assert.Contains("diagnostics unavailable", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("deadline", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            $"diagnostics unavailable (deadline {ExpiringDeadline} exceeded)",
+            exception.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -140,9 +142,9 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_poisoned",
                 "READ_COMMITTED_SNAPSHOT configuration",
-                ExpiringDeadline,
-                ExpiringDeadline,
-                GenerousBudget,
+                operationTimeout: ExpiringDeadline,
+                abortTimeout: ExpiringDeadline,
+                diagnosticTimeout: GenerousBudget,
                 _ => execution.Task,
                 () => new(abort.Task),
                 _ => Task.FromResult("session=101,status=rollback"),
