@@ -1,6 +1,10 @@
+using System.Text.Json;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.Queries;
 using Groundwork.Core.SchemaEvolution;
+using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.Documents.UnitOfWork;
 using Groundwork.Relational.Documents;
@@ -9,13 +13,47 @@ using Xunit;
 
 namespace Groundwork.RelationalProviders.Tests;
 
-public abstract class RelationalServerPhysicalIdentityConformance : RelationalPhysicalStorageConformance
+public abstract class RelationalServerPhysicalIdentityConformance<TStore> : PhysicalStorageConformance
+    where TStore : RelationalPhysicalDocumentStore
 {
     protected abstract Task<RelationalServerIdentityFixture> CreateIdentityAsync(
         PhysicalStorageForm form,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal);
 
     protected abstract Task<RelationalServerLinkedBackfillCollisionFixture> CreateLinkedBackfillCollisionAsync();
+
+    /// <summary>The provider delta bundle every lifted server-tier scenario is expressed against.</summary>
+    private protected abstract RelationalMutationServerHarness<TStore> MutationHarness();
+
+    /// <summary>A schema executor whose operation execution can be intercepted (transition fencing).</summary>
+    private protected abstract IPhysicalSchemaExecutor CreateSchemaExecutorWithOperationHook(
+        Func<PhysicalSchemaOperation, CancellationToken, Task>? beforeOperation);
+
+    /// <summary>A schema-executor factory pinned to a single pooled connection (acknowledgement-loss replay).</summary>
+    private protected abstract Func<IPhysicalSchemaExecutor> SingleConnectionSchemaExecutorFactory();
+
+    /// <summary>Seeds provider statistics/noise so mutation explains bind the declared index.</summary>
+    private protected abstract Task PrepareMutationPlanEvidenceAsync(ExecutableStorageRoute route);
+
+    /// <summary>Provider-native plan assertion for every command of a bounded-mutation explain.</summary>
+    private protected abstract void AssertMutationExplainCommandPlan(string? nativePlan, string expectedIndex);
+
+    /// <summary>Recreates the collection membership index with its value/owner columns reversed.</summary>
+    private protected abstract Task RebuildCollectionMembershipIndexReversedAsync(
+        ExecutableCollectionElementStorageRoute storage);
+
+    /// <summary>Provisions a server database that is dropped (with pools cleared) on disposal.</summary>
+    private protected abstract Task<EphemeralServerDatabase> CreateEphemeralDatabaseAsync(string name);
+
+    /// <summary>The public physical factory entry point with safe auto-apply enabled.</summary>
+    private protected abstract Task<object?> OpenPhysicalAutoApplyAsync(
+        string connectionString,
+        StorageManifest manifest,
+        Groundwork.Core.Capabilities.ProviderIdentity provider,
+        IPhysicalNamePolicy namePolicy);
+
+    /// <summary>A schema-history inspector bound to the given connection string.</summary>
+    private protected abstract IPhysicalSchemaHistoryInspector CreateSchemaHistoryInspectorFor(string connectionString);
 
     [Theory]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
@@ -244,6 +282,396 @@ public abstract class RelationalServerPhysicalIdentityConformance : RelationalPh
         Assert.Equal([1, 2], await fixture.ReadPriorityValuesAsync());
     }
 
+    protected sealed override async Task<CursorPagingFixture> CreateCursorPagingAsync(PhysicalStorageForm form)
+    {
+        var harness = MutationHarness();
+        var model = RelationalPhysicalStorageTestModels.Create(
+            form,
+            harness.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: harness.Normalizer,
+            categoryPaging: QueryPagingSupport.Cursor);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var route = model.Target.Routes.Single();
+        return new CursorPagingFixture(
+            harness.CreateStore(model.Manifest, model.Target.Routes),
+            () => harness.CreateQueryRuntime(
+                harness.CreateStore(model.Manifest, model.Target.Routes),
+                model.Manifest,
+                route,
+                model.Target.Provider),
+            route,
+            () => ValueTask.CompletedTask);
+    }
+
+    [Fact]
+    public async Task Collection_membership_and_contains_all_execute_from_typed_element_storage()
+    {
+        var harness = MutationHarness();
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: harness.Normalizer,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var store = harness.CreateStore(model.Manifest, model.Target.Routes);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":["a","b","b"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "two", "1", """{"category":"x","permissions":["a"]}"""));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "three", "1", """{"category":"x","permissions":["b","c"]}"""));
+        var queries = harness.CreateQueryRuntime(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider);
+
+        var contains = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
+        var containsAll = await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["b", "a", "b"]))]));
+
+        Assert.Equal(2, contains.TotalCount);
+        Assert.Equal(["one", "three"], contains.Documents.Select(document => document.Id).Order());
+        Assert.Equal("one", Assert.Single(containsAll.Documents).Id);
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":["c"]}""", 1))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
+            "configurationDocument", "three", 1))).Status);
+
+        Assert.Equal("one", Assert.Single((await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "c"))]))).Documents).Id);
+        Assert.Empty((await queries.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]))).Documents);
+    }
+
+    [Fact]
+    public async Task Collection_contains_all_deduplicates_after_typed_conversion()
+    {
+        var harness = MutationHarness();
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: harness.Normalizer,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true,
+            collectionType: PortablePhysicalType.Int32,
+            collectionLogicalValueKind: IndexValueKind.Number,
+            collectionLength: null,
+            collectionCollation: null);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var store = harness.CreateStore(model.Manifest, model.Target.Routes);
+        await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "one", "1", """{"category":"x","permissions":[1,2]}"""));
+        var runtime = harness.CreateQueryRuntime(
+            store, model.Manifest, model.Target.Routes.Single(), model.Target.Provider);
+
+        var query = new DocumentQuery(
+            "configurationDocument",
+            "list-by-permissions",
+            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
+                "permissions",
+                ["1", "01"]))]);
+        var rendered = RelationalPhysicalQueryRuntime.BuildQueryCommand(
+            store,
+            model.Manifest,
+            model.Target.Routes.Single(),
+            model.Target.Provider,
+            harness.HandlerPrefix,
+            query);
+        var membershipParameter = Assert.Single(rendered.Parameters.Where(parameter =>
+            parameter.Name.StartsWith("v", StringComparison.Ordinal)));
+        Assert.Equal("v0", membershipParameter.Name);
+        Assert.Equal(1, Assert.IsType<int>(membershipParameter.Value));
+        Assert.Equal(1, rendered.CommandText.Split("@v0", StringSplitOptions.None).Length - 1);
+        Assert.Equal(1, rendered.CommandText.Split("EXISTS (SELECT 1 FROM", StringSplitOptions.None).Length - 1);
+
+        var result = await runtime.QueryAsync(query);
+
+        Assert.Equal("one", Assert.Single(result.Documents).Id);
+    }
+
+    [Fact]
+    public async Task Additive_collection_storage_backfills_preexisting_documents()
+    {
+        var harness = MutationHarness();
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var initial = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: harness.Normalizer);
+        var additive = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: harness.Normalizer,
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+        await PhysicalSchemaApplication.ApplyAsync(initial.Target, harness.CreateExecutor());
+        await harness.CreateStore(initial.Manifest, initial.Target.Routes)
+            .SaveAsync(new SaveDocumentRequest(
+                "configurationDocument", "preexisting", "1", """{"category":"x","permissions":["a","b"]}"""));
+
+        var applied = await PhysicalSchemaApplication.ApplyAsync(additive.Target, harness.CreateExecutor());
+        var evolved = harness.CreateStore(additive.Manifest, additive.Target.Routes);
+        var result = await harness.CreateQueryRuntime(
+                evolved, additive.Manifest, additive.Target.Routes.Single(), additive.Target.Provider)
+            .QueryAsync(new DocumentQuery(
+                "configurationDocument",
+                "list-by-permissions",
+                [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.Equal("preexisting", Assert.Single(result.Documents).Id);
+    }
+
+    [Fact]
+    public async Task Collection_schema_transition_fences_old_route_writers()
+    {
+        var harness = MutationHarness();
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var initial = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: harness.Normalizer,
+            mutationOptions: new(IncludeCategoryTransition: true));
+        var additive = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: harness.Normalizer,
+            mutationOptions: new(IncludeCategoryTransition: true),
+            includeCollection: true,
+            includeCollectionMembershipQuery: true);
+
+        await RelationalCollectionSchemaTransitionAssertions.SuccessfulTransitionFencesOldWritersAsync(
+            initial,
+            additive,
+            (manifest, routes) => harness.CreateStore(manifest, routes),
+            (store, manifest, route) => harness.CreateMutationRuntime(
+                Assert.IsAssignableFrom<TStore>(store),
+                manifest,
+                route,
+                harness.Provider),
+            CreateSchemaExecutorWithOperationHook);
+    }
+
+    [Fact]
+    public async Task Collection_save_failure_rolls_back_primary_and_element_rows()
+    {
+        var harness = MutationHarness();
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: harness.Normalizer,
+            includeCollection: true);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var store = harness.CreateStore(model.Manifest, model.Target.Routes);
+        store.WriteInterceptor = (point, operation, _, _, _) =>
+            point == RelationalPhysicalWriteExecutionPoint.AfterPrimaryMutation &&
+            operation == RelationalPhysicalWriteOperation.Save
+                ? ValueTask.FromException(new InjectedServerCollectionWriteException())
+                : ValueTask.CompletedTask;
+
+        await Assert.ThrowsAsync<InjectedServerCollectionWriteException>(() => store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "failed", "1", """{"category":"x","permissions":["a"]}""")));
+        store.WriteInterceptor = null;
+
+        Assert.Null(await store.LoadAsync("configurationDocument", "failed"));
+        var table = Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier;
+        await using var connection = harness.CreateConnection();
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {harness.CreateDialect().QuoteIdentifier(table)};";
+        Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task Collection_membership_index_drift_is_rejected_from_live_schema()
+    {
+        var harness = MutationHarness();
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: $"collection_{Guid.NewGuid():N}"[..19],
+            normalizer: harness.Normalizer,
+            includeCollection: true);
+        var storage = Assert.Single(model.Target.Routes.Single().CollectionElementStorages);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        await RebuildCollectionMembershipIndexReversedAsync(storage);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor()));
+        Assert.Contains(storage.MembershipKey.Name.Identifier, error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Bounded_mutation_explains_the_exact_execution_stages_with_the_declared_physical_index(
+        bool assignment)
+    {
+        var harness = MutationHarness();
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: assignment,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: harness.Normalizer,
+            // Keep assignment evidence bound to its declared source index, not a covering compound alternative.
+            includeCategoryPriorityQuery: !assignment,
+            mutationOptions: assignment
+                ? new(IncludePriorityAssignment: true)
+                : new(IncludeCategoryTransition: true));
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, harness.CreateExecutor());
+        var route = model.Target.Routes.Single();
+        var store = harness.CreateStore(model.Manifest, model.Target.Routes);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument",
+            "plan-target",
+            "1",
+            assignment
+                ? "{\"category\":\"assignment-evidence\",\"priority\":7}"
+                : "{\"category\":\"pending\"}"))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument",
+            "plan-noise",
+            "1",
+            assignment
+                ? "{\"category\":\"tools\",\"priority\":1}"
+                : "{\"category\":\"tools\"}"))).Status);
+        await PrepareMutationPlanEvidenceAsync(route);
+        var mutationContext = new RelationalPhysicalMutationRuntimeContext(
+            store,
+            model.Manifest,
+            route,
+            model.Target.Provider,
+            harness.Provider.Name,
+            harness.HandlerPrefix);
+        var request = assignment
+            ? new DocumentMutation(
+                "configurationDocument",
+                "assign-priority",
+                "assignment-explain",
+                [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "assignment-evidence"))])
+            : new DocumentMutation("configurationDocument", "revoke-pending", "explain");
+        var evidence = await Assert.IsAssignableFrom<IPhysicalDocumentMutationExplainer>(
+                harness.CreateMutationRuntime(store, model.Manifest, route, model.Target.Provider))
+            .ExplainAsync(request);
+        if (assignment)
+            Assert.IsType<PhysicalAssignMutationAction>(evidence.Plan.Action);
+        var executed = new List<(string Identity, string CommandText, long? PreparedRestrictionRowCount)>();
+        var execution = RelationalPhysicalMutationRuntime.CreateWithSelectionObserver(
+            mutationContext,
+            (identity, command, preparedRestrictionRowCount) =>
+            {
+                executed.Add((identity, command.CommandText, preparedRestrictionRowCount));
+                return ValueTask.CompletedTask;
+            });
+
+        var expectedIndex = route.Indexes.Single(index => index.Identity == "by-category").Name.Identifier;
+        var result = await execution.ExecuteAsync(request);
+        Assert.Equal(BoundedMutationStatus.Completed, result.Status);
+        Assert.Equal(1, result.AffectedCount);
+        if (assignment)
+        {
+            var document = await store.LoadAsync("configurationDocument", "plan-target");
+            Assert.NotNull(document);
+            using var json = JsonDocument.Parse(document.ContentJson);
+            Assert.Equal(42, json.RootElement.GetProperty("priority").GetInt32());
+        }
+        Assert.Equal(
+            evidence.Commands.Select(command => (
+                command.Identity,
+                command.RenderedCommand!,
+                command.PreparedRestrictionRowCount)),
+            executed);
+        Assert.Null(evidence.Commands[0].PreparedRestrictionRowCount);
+        Assert.True(evidence.Commands[1].PreparedRestrictionRowCount > 0);
+        Assert.All(evidence.Commands, command =>
+            AssertMutationExplainCommandPlan(command.NativePlan, expectedIndex));
+    }
+
+    [Fact]
+    public async Task Physical_factory_auto_applies_safe_schema_when_enabled()
+    {
+        var harness = MutationHarness();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        await using var database = await CreateEphemeralDatabaseAsync($"groundwork_startup_{suffix}");
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: suffix,
+            normalizer: harness.Normalizer);
+
+        var store = await OpenPhysicalAutoApplyAsync(
+            database.ConnectionString,
+            model.Manifest,
+            model.Target.Provider,
+            new DelegatePhysicalNamePolicy(context => $"gw_{suffix}_{context.FeatureDefaultLogicalName}"));
+        var inspection = await CreateSchemaHistoryInspectorFor(database.ConnectionString)
+            .InspectHistoryAsync(model.Target, CancellationToken.None);
+
+        Assert.NotNull(store);
+        Assert.Equal(model.Target.Fingerprint, inspection.History.AppliedState?.TargetFingerprint);
+    }
+
+    [Fact]
+    public Task Bounded_transition_updates_the_exact_indexed_identity_set() =>
+        RelationalBoundedMutationServerAssertions.TransitionUpdatesExactIndexedIdentitySetAsync(MutationHarness());
+
+    [Fact]
+    public Task Ordinary_save_and_delete_serialize_with_the_selected_set() =>
+        RelationalBoundedMutationServerAssertions.OrdinaryCrudSerializesWithSelectedSetAsync(MutationHarness());
+
+    [Fact]
+    public Task ConcurrentMaterializationAndAcknowledgementLossAreRestartSafe()
+    {
+        var harness = MutationHarness();
+        return RelationalPhysicalServerAssertions.ConcurrentMaterializationAndAcknowledgementLossAreRestartSafeAsync(
+            harness.Provider,
+            harness.Normalizer,
+            SingleConnectionSchemaExecutorFactory());
+    }
+
+    [Fact]
+    public Task Application_lock_disposal_is_heartbeat_race_safe()
+    {
+        var harness = MutationHarness();
+        return RelationalPhysicalServerAssertions.ApplicationLockDisposalIsHeartbeatRaceSafeAsync(
+            harness.Provider,
+            harness.Normalizer,
+            harness.CreateExecutor);
+    }
+
     private static SaveDocumentRequest Save(string id, string category, long expectedVersion) =>
         new("configurationDocument", id, "1", $"{{\"category\":\"{category}\",\"priority\":1}}", expectedVersion);
 
@@ -271,6 +699,16 @@ public abstract class RelationalServerPhysicalIdentityConformance : RelationalPh
         Assert.Equal(retainedId, exception.RetainedId);
         Assert.Equal(lookupKey, exception.LookupKey);
     }
+}
+
+internal sealed class InjectedServerCollectionWriteException : Exception;
+
+internal sealed class EphemeralServerDatabase(
+    string connectionString,
+    Func<ValueTask> disposeAsync) : IAsyncDisposable
+{
+    public string ConnectionString { get; } = connectionString;
+    public ValueTask DisposeAsync() => disposeAsync();
 }
 
 public sealed class RelationalServerIdentityFixture(

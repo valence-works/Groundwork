@@ -14,26 +14,44 @@ using Xunit;
 namespace Groundwork.TestInfrastructure;
 
 /// <summary>
-/// Provider-neutral black-box contract for route-driven relational physical storage. SQL Server
-/// and PostgreSQL provider slices inherit this suite and supply only their connection/materializer
-/// fixture, keeping behavior assertions identical to the SQLite reference.
+/// Provider-neutral black-box contract for route-driven physical storage. The SQLite, SQL Server,
+/// PostgreSQL, and MongoDB provider slices inherit this suite and supply only their
+/// connection/materializer fixture, keeping the behavior assertions identical across providers.
 /// </summary>
-public abstract class RelationalPhysicalStorageConformance
+public abstract class PhysicalStorageConformance
 {
-    protected abstract Task<RelationalPhysicalStorageFixture> CreateAsync(
+    protected abstract Task<PhysicalStorageFixture> CreateAsync(
         PhysicalStorageForm form,
         bool dedicatedWithoutLinked = false);
 
-    protected abstract Task<RelationalScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form);
+    protected abstract Task<ScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form);
 
-    protected abstract Task<RelationalPhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form);
+    protected abstract Task<PhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form);
 
-    protected abstract Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync();
+    protected abstract Task<UnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync();
 
-    protected virtual Task PrepareUnfilteredGlobalIdQueryPlanAsync(RelationalUnfilteredGlobalQueryFixture fixture) =>
+    protected abstract Task<CursorPagingFixture> CreateCursorPagingAsync(PhysicalStorageForm form);
+
+    protected virtual Task PrepareUnfilteredGlobalIdQueryPlanAsync(UnfilteredGlobalQueryFixture fixture) =>
         Task.CompletedTask;
 
     protected abstract void AssertUnfilteredGlobalIdQueryPlan(PhysicalDocumentQueryExplanation explanation);
+
+    /// <summary>
+    /// The access kind an explicitly unfiltered global-id route plans with. Relational providers
+    /// page the primary envelope directly; MongoDB plans native document fields.
+    /// </summary>
+    protected virtual PhysicalQueryAccessKind UnfilteredGlobalIdQueryAccessKind =>
+        PhysicalQueryAccessKind.PrimaryEnvelope;
+
+    /// <summary>
+    /// Provider-specific native-plan assertions for the resumed cursor page. The default asserts
+    /// nothing beyond the shared behavioral contract.
+    /// </summary>
+    protected virtual Task AssertCursorPageExplanationAsync(
+        IBoundedDocumentStore queries,
+        DocumentQuery middleQuery,
+        ExecutableStorageRoute route) => Task.CompletedTask;
 
     [Theory]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
@@ -219,7 +237,7 @@ public abstract class RelationalPhysicalStorageConformance
         Assert.True(count >= 3);
         Assert.Equal("b", Assert.Single(page.Documents).Id);
         Assert.Empty(explanation.Plan.Predicates);
-        Assert.Equal(PhysicalQueryAccessKind.PrimaryEnvelope, explanation.Plan.AccessKind);
+        Assert.Equal(UnfilteredGlobalIdQueryAccessKind, explanation.Plan.AccessKind);
         Assert.Equal(fixture.Route.Indexes.Single().Name, explanation.Plan.IndexName);
         Assert.Equal(
             fixture.Route.Envelope.Identity.ComparisonKey.Identifier,
@@ -229,6 +247,57 @@ public abstract class RelationalPhysicalStorageConformance
             explanation.Commands.Select(command => command.Kind));
         Assert.All(explanation.Commands, command => Assert.NotEqual(0, command.ProviderAppliedMaximumRows));
         AssertUnfilteredGlobalIdQueryPlan(explanation);
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task Cursor_pages_resume_by_identity_across_a_reopened_store(PhysicalStorageForm form)
+    {
+        await using var fixture = await CreateCursorPagingAsync(form);
+        foreach (var id in new[] { "c", "a", "b", "d", "e" })
+        {
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(
+                Save(id, "tools", 0))).Status);
+        }
+
+        var query = new DocumentQuery(
+            "configurationDocument",
+            "list-by-category",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "tools"))],
+            [new DocumentQueryOrder("category")],
+            take: 1);
+        var first = await fixture.OpenQueries().QueryAsync(query);
+
+        var reopened = fixture.OpenQueries();
+        var middleQuery = new DocumentQuery(
+            query.DocumentKind,
+            query.QueryIdentity,
+            query.Clauses,
+            query.Order,
+            take: 2,
+            continuation: first.NextContinuation);
+        var middle = await reopened.QueryAsync(middleQuery);
+        var final = await reopened.QueryAsync(new DocumentQuery(
+            query.DocumentKind,
+            query.QueryIdentity,
+            query.Clauses,
+            query.Order,
+            take: 10,
+            continuation: middle.NextContinuation));
+        var expected = new[] { "a", "b", "c", "d", "e" }
+            .OrderBy(id => fixture.Route.Envelope.Identity.Project(id).LookupKey, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(expected[0], Assert.Single(first.Documents).Id);
+        Assert.NotNull(first.NextContinuation);
+        Assert.Equal(expected[1..3], middle.Documents.Select(document => document.Id));
+        Assert.NotNull(middle.NextContinuation);
+        Assert.Equal(expected[3..], final.Documents.Select(document => document.Id));
+        Assert.Null(final.NextContinuation);
+        Assert.Equal(5, final.TotalCount);
+        await AssertCursorPageExplanationAsync(reopened, middleQuery, fixture.Route);
     }
 
     protected static (StorageManifest Manifest, PhysicalSchemaTarget Target) CreateUnfilteredGlobalIdQueryModel(
@@ -304,7 +373,7 @@ public abstract class RelationalPhysicalStorageConformance
         new("configurationDocument", id, "1", $"{{\"category\":\"{category}\",\"priority\":1}}", expectedVersion);
 }
 
-public sealed class RelationalPhysicalStorageFixture(
+public sealed class PhysicalStorageFixture(
     IDocumentStore documents,
     IBoundedDocumentStore? queries,
     ExecutableStorageRoute route,
@@ -318,7 +387,7 @@ public sealed class RelationalPhysicalStorageFixture(
     public ValueTask DisposeAsync() => disposeAsync();
 }
 
-public sealed class RelationalScopedPhysicalStorageFixture(
+public sealed class ScopedPhysicalStorageFixture(
     Func<DocumentStoreAccess, IDocumentStore> open,
     Func<ValueTask> disposeAsync) : IAsyncDisposable
 {
@@ -326,21 +395,21 @@ public sealed class RelationalScopedPhysicalStorageFixture(
     public ValueTask DisposeAsync() => disposeAsync();
 }
 
-public sealed class RelationalPhysicalStorageEvolutionFixture(
+public sealed class PhysicalStorageEvolutionFixture(
     IDocumentStore initialDocuments,
-    Func<Task<RelationalPhysicalStorageFixture>> applyAdditiveAsync,
+    Func<Task<PhysicalStorageFixture>> applyAdditiveAsync,
     Func<Task<PhysicalSchemaApplicationOutcome>> restartAsync,
     Func<CancellationToken, ValueTask<IAsyncDisposable>> acquireApplicationLockAsync,
     Func<ValueTask> disposeAsync) : IAsyncDisposable
 {
     public IDocumentStore InitialDocuments { get; } = initialDocuments;
-    public Func<Task<RelationalPhysicalStorageFixture>> ApplyAdditiveAsync { get; } = applyAdditiveAsync;
+    public Func<Task<PhysicalStorageFixture>> ApplyAdditiveAsync { get; } = applyAdditiveAsync;
     public Func<Task<PhysicalSchemaApplicationOutcome>> RestartAsync { get; } = restartAsync;
     public Func<CancellationToken, ValueTask<IAsyncDisposable>> AcquireApplicationLockAsync { get; } = acquireApplicationLockAsync;
     public ValueTask DisposeAsync() => disposeAsync();
 }
 
-public sealed class RelationalUnfilteredGlobalQueryFixture(
+public sealed class UnfilteredGlobalQueryFixture(
     IDocumentStore documents,
     IBoundedDocumentStore queries,
     ExecutableStorageRoute route,
@@ -348,6 +417,21 @@ public sealed class RelationalUnfilteredGlobalQueryFixture(
 {
     public IDocumentStore Documents { get; } = documents;
     public IBoundedDocumentStore Queries { get; } = queries;
+    public ExecutableStorageRoute Route { get; } = route;
+    public ValueTask DisposeAsync() => disposeAsync();
+}
+
+public sealed class CursorPagingFixture(
+    IDocumentStore documents,
+    Func<IBoundedDocumentStore> openQueries,
+    ExecutableStorageRoute route,
+    Func<ValueTask> disposeAsync) : IAsyncDisposable
+{
+    public IDocumentStore Documents { get; } = documents;
+
+    /// <summary>Opens a query surface over a freshly reopened store each call.</summary>
+    public Func<IBoundedDocumentStore> OpenQueries { get; } = openQueries;
+
     public ExecutableStorageRoute Route { get; } = route;
     public ValueTask DisposeAsync() => disposeAsync();
 }

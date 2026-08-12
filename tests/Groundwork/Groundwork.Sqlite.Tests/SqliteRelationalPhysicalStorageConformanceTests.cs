@@ -1,5 +1,6 @@
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.Queries;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
@@ -13,7 +14,7 @@ using Xunit;
 
 namespace Groundwork.Sqlite.Tests;
 
-public sealed class SqliteRelationalPhysicalStorageConformanceTests : RelationalPhysicalStorageConformance
+public sealed class SqliteRelationalPhysicalStorageConformanceTests : PhysicalStorageConformance
 {
     [Fact]
     public async Task Sort_only_index_field_residual_filters_before_cursor_limit_and_binds_continuation()
@@ -120,7 +121,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         Assert.Null(await store.LoadAsync("configurationDocument", "staged-before-cancellation"));
     }
 
-    protected override async Task<RelationalPhysicalStorageFixture> CreateAsync(
+    protected override async Task<PhysicalStorageFixture> CreateAsync(
         PhysicalStorageForm form,
         bool dedicatedWithoutLinked = false)
     {
@@ -139,7 +140,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
             var queries = dedicatedWithoutLinked
                 ? null
                 : SqlitePhysicalQueryRuntime.Create(store, model.Manifest, route, model.Target.Provider);
-            return new RelationalPhysicalStorageFixture(
+            return new PhysicalStorageFixture(
                 store,
                 queries,
                 route,
@@ -153,7 +154,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         }
     }
 
-    protected override async Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
+    protected override async Task<UnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
     {
         var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -170,7 +171,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
                 model.Manifest,
                 model.Target.Routes,
                 DocumentStoreAccess.Global);
-            return new RelationalUnfilteredGlobalQueryFixture(
+            return new UnfilteredGlobalQueryFixture(
                 store,
                 SqlitePhysicalQueryRuntime.Create(store, model.Manifest, route, model.Target.Provider),
                 route,
@@ -196,7 +197,37 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         Assert.DoesNotContain("USE TEMP B-TREE FOR ORDER BY", page.NativePlan, StringComparison.Ordinal);
     }
 
-    protected override async Task<RelationalScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form)
+    protected override async Task<CursorPagingFixture> CreateCursorPagingAsync(PhysicalStorageForm form)
+    {
+        var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        try
+        {
+            var model = SqlitePhysicalSchemaExecutorTests.CreateModel(
+                form,
+                includePriority: false,
+                categoryPaging: QueryPagingSupport.Cursor);
+            await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
+            var route = model.Target.Routes.Single();
+            SqlitePhysicalDocumentStore OpenStore() => new(
+                connection,
+                model.Manifest,
+                model.Target.Routes,
+                DocumentStoreAccess.Global);
+            return new CursorPagingFixture(
+                OpenStore(),
+                () => SqlitePhysicalQueryRuntime.Create(OpenStore(), model.Manifest, route, model.Target.Provider),
+                route,
+                connection.DisposeAsync);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+    protected override async Task<ScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form)
     {
         var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -204,7 +235,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         {
             var model = SqlitePhysicalSchemaExecutorTests.CreateModel(form, includePriority: true, scoped: true);
             await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlitePhysicalSchemaExecutor(connection));
-            return new RelationalScopedPhysicalStorageFixture(
+            return new ScopedPhysicalStorageFixture(
                 access => new SqlitePhysicalDocumentStore(connection, model.Manifest, model.Target.Routes, access),
                 connection.DisposeAsync);
         }
@@ -215,7 +246,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         }
     }
 
-    protected override async Task<RelationalPhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form)
+    protected override async Task<PhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form)
     {
         var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -230,7 +261,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
                 initial.Manifest,
                 initial.Target.Routes,
                 DocumentStoreAccess.Global);
-            return new RelationalPhysicalStorageEvolutionFixture(
+            return new PhysicalStorageEvolutionFixture(
                 initialDocuments,
                 async () =>
                 {
@@ -241,7 +272,7 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
                         additive.Manifest,
                         additive.Target.Routes,
                         DocumentStoreAccess.Global);
-                    return new RelationalPhysicalStorageFixture(
+                    return new PhysicalStorageFixture(
                         store,
                         SqlitePhysicalQueryRuntime.Create(store, additive.Manifest, route, additive.Target.Provider),
                         route,
