@@ -17,6 +17,10 @@ using MongoDB.Driver;
 
 namespace Groundwork.MongoDb.Documents;
 
+[Obsolete(
+    "The portable document model is retired (ADR 0006). Use MongoDbDocumentStoreFactory.OpenPhysicalAsync "
+    + "and execute declared bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+    DiagnosticId = "GW0005")]
 public sealed class MongoDbDocumentStore : IDocumentStore
 {
     private readonly IMongoDatabase database;

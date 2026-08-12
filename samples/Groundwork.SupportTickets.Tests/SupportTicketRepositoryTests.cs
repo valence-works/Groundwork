@@ -1,6 +1,7 @@
-using Groundwork.Core.Manifests;
-using Groundwork.Core.Physicalization;
-using Groundwork.Relational.Physicalization;
+using Groundwork.Core.Capabilities;
+using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.SchemaEvolution;
+using Groundwork.Sqlite;
 using Groundwork.SupportTickets;
 using Microsoft.Data.Sqlite;
 using Xunit;
@@ -17,7 +18,7 @@ public sealed class SupportTicketRepositoryTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task CreateLoadAndQueryTicketsByDeclaredIndexes()
+    public async Task CreateLoadAndQueryTicketsByDeclaredBoundedQueries()
     {
         var opened = await host.Tickets.CreateAsync(NewTicket("TCK-1001", "acme", "open", "high", "triage"));
         await host.Tickets.CreateAsync(NewTicket("TCK-1002", "acme", "open", "low", "triage"));
@@ -80,35 +81,32 @@ public sealed class SupportTicketRepositoryTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task ConfiguredPhysicalizedIndexesCreateOptimizedProjectionForPortableManifest()
+    public async Task DeclaredPhysicalStorageMaterializesEntityRouteAndStoresDocuments()
     {
-        var databasePath = Path.Combine(Path.GetTempPath(), $"groundwork-support-index-{Guid.NewGuid():N}.db");
+        var databasePath = Path.Combine(Path.GetTempPath(), $"groundwork-support-route-{Guid.NewGuid():N}.db");
         var connectionString = $"Data Source={databasePath}";
-        SupportTicketSampleHost? configuredHost = null;
 
         try
         {
-            configuredHost = await SupportTicketSampleHost.CreateAsync(new SupportTicketStorageOptions(
-                SupportTicketProvider.Sqlite,
-                connectionString,
-                PhysicalizedIndexes: new HashSet<string>(StringComparer.Ordinal)
-                {
-                    SupportTicketManifest.ByTicketNumber,
-                    SupportTicketManifest.ByStatus
-                }));
-
-            var ticketUnit = configuredHost.Manifest.StorageUnits.Single(unit => unit.Identity.Value == SupportTicketManifest.DocumentKind);
-            var fields = PhysicalizationProjection.EligibleFields(ticketUnit);
+            await using var configuredHost = await SupportTicketSampleHost.CreateAsync(
+                new SupportTicketStorageOptions(SupportTicketProvider.Sqlite, connectionString));
             var opened = await configuredHost.Tickets.CreateAsync(NewTicket("TCK-5001", "acme", "open", "normal", "triage"));
+            var found = await configuredHost.Tickets.FindByTicketNumberAsync(opened.Ticket.TicketNumber);
 
-            Assert.Equal(PhysicalizationKind.Portable, ticketUnit.Physicalization.Kind);
-            Assert.Equal([SupportTicketManifest.ByTicketNumber, SupportTicketManifest.ByStatus], fields.Select(field => field.Name));
-            Assert.Equal(1, await CountPhysicalizedRowsAsync(connectionString, ticketUnit, opened.Ticket.TicketNumber));
+            // Scale-bearing bounded queries over content paths resolve the default policy to a
+            // physical entity table; the ticket row must land in that compiled route's storage.
+            var target = PhysicalSchemaTargetCompiler.Compile(
+                configuredHost.Manifest,
+                new ProviderIdentity("groundwork-sqlite", "1.0.0"),
+                SqliteGroundworkCapabilities.PhysicalNames);
+            var route = target.Routes.Single(route => route.StorageUnit.Value == SupportTicketManifest.DocumentKind);
+
+            Assert.Equal(PhysicalStorageForm.PhysicalEntityTable, route.Form);
+            Assert.NotNull(found);
+            Assert.Equal(1, await CountPhysicalRowsAsync(connectionString, route, opened.Ticket.TicketNumber));
         }
         finally
         {
-            if (configuredHost is not null)
-                await configuredHost.DisposeAsync();
             if (File.Exists(databasePath))
                 File.Delete(databasePath);
         }
@@ -127,7 +125,10 @@ public sealed class SupportTicketRepositoryTests : IAsyncDisposable
             assignee,
             DateTimeOffset.Parse("2026-06-12T09:00:00Z"));
 
-    private static async Task<long> CountPhysicalizedRowsAsync(string connectionString, StorageUnit unit, string documentId)
+    private static async Task<long> CountPhysicalRowsAsync(
+        string connectionString,
+        ExecutableStorageRoute route,
+        string documentId)
     {
         await using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync();
@@ -135,10 +136,9 @@ public sealed class SupportTicketRepositoryTests : IAsyncDisposable
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
             SELECT COUNT(*)
-            FROM {RelationalPhysicalizationNames.TableName(unit)}
-            WHERE document_kind = @kind AND document_id = @id;
+            FROM "{route.PrimaryStorage.Name.Identifier}"
+            WHERE "{route.Envelope.Id.Identifier}" = @id;
             """;
-        command.Parameters.AddWithValue("@kind", unit.Identity.Value);
         command.Parameters.AddWithValue("@id", documentId);
         return Convert.ToInt64(await command.ExecuteScalarAsync());
     }

@@ -25,7 +25,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Groundwork.SupportTickets\Groundwork.SupportTickets.csproj" />
     <ProjectReference Include="..\..\src\Groundwork\MongoDb\Groundwork.MongoDb.csproj" />
-    <ProjectReference Include="..\..\src\Groundwork\Relational\Groundwork.Relational.csproj" />
   </ItemGroup>
 
 </Project>

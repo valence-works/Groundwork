@@ -11,8 +11,8 @@ internal static class SupportTicketEndpoints
         {
             status = "ok",
             provider = storageOptions.Provider.ToString(),
-            physicalization = storageOptions.EffectivePhysicalization.Kind.ToString(),
-            physicalizedIndexes = storageOptions.EffectivePhysicalizedIndexes.Order()
+            storage = "physical-routes",
+            storageUnits = new[] { SupportTicketManifest.DocumentKind, SupportTicketManifest.CommentDocumentKind }
         }));
 
         app.MapPost("/tickets", async (CreateTicketRequest request, SupportTicketRepository tickets, CancellationToken cancellationToken) =>

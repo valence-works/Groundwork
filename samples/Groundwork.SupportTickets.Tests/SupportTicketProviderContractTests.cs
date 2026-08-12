@@ -1,8 +1,11 @@
 using System.Data.Common;
-using Groundwork.Core.Manifests;
-using Groundwork.Core.Physicalization;
+using Groundwork.Core.Capabilities;
+using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.SchemaEvolution;
 using Groundwork.MongoDb;
-using Groundwork.Relational.Physicalization;
+using Groundwork.PostgreSql;
+using Groundwork.SqlServer;
+using Groundwork.Sqlite;
 using Groundwork.SupportTickets;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
@@ -19,7 +22,7 @@ namespace Groundwork.SupportTickets.Tests;
 public abstract class SupportTicketProviderContractTests
 {
     [Fact]
-    public async Task MaterializesOptimizedTicketingManifestAndRunsTicketWorkflow()
+    public async Task MaterializesPhysicalRoutesAndRunsTicketWorkflow()
     {
         await using var harness = await CreateHarnessAsync();
         var opened = await harness.Host.Tickets.CreateAsync(NewTicket("TCK-9001", "acme", "open", "high", "triage"));
@@ -52,7 +55,7 @@ public abstract class SupportTicketProviderContractTests
         Assert.Single(highPriorityTickets);
         Assert.Single(resolvedTickets);
         Assert.Equal(comment.Comment.CommentId, Assert.Single(comments).Comment.CommentId);
-        await harness.AssertPhysicalizedTicketAndCommentAsync(resolved, comment);
+        await harness.AssertPhysicalTicketAndCommentAsync(resolved, comment);
     }
 
     [Fact]
@@ -92,7 +95,7 @@ public abstract class SupportTicketProviderContractTests
 public interface ISupportTicketProviderHarness : IAsyncDisposable
 {
     SupportTicketSampleHost Host { get; }
-    Task AssertPhysicalizedTicketAndCommentAsync(SupportTicketDocument ticket, SupportTicketCommentDocument comment);
+    Task AssertPhysicalTicketAndCommentAsync(SupportTicketDocument ticket, SupportTicketCommentDocument comment);
 }
 
 public sealed class SqliteSupportTicketProviderTests : SupportTicketProviderContractTests
@@ -103,11 +106,12 @@ public sealed class SqliteSupportTicketProviderTests : SupportTicketProviderCont
         var connectionString = $"Data Source={databasePath}";
         var host = await SupportTicketSampleHost.CreateAsync(new SupportTicketStorageOptions(
             SupportTicketProvider.Sqlite,
-            connectionString,
-            Physicalization: PhysicalizationPolicy.Optimized));
+            connectionString));
         return new RelationalSupportTicketProviderHarness(
             host,
             () => new SqliteConnection(connectionString),
+            new ProviderIdentity("groundwork-sqlite", "1.0.0"),
+            SqliteGroundworkCapabilities.PhysicalNames,
             databasePath);
     }
 }
@@ -129,9 +133,12 @@ public sealed class PostgreSqlSupportTicketProviderTests : SupportTicketProvider
         var connectionString = container.GetConnectionString();
         var host = await SupportTicketSampleHost.CreateAsync(new SupportTicketStorageOptions(
             SupportTicketProvider.PostgreSql,
-            connectionString,
-            Physicalization: PhysicalizationPolicy.Optimized));
-        return new RelationalSupportTicketProviderHarness(host, () => new NpgsqlConnection(connectionString));
+            connectionString));
+        return new RelationalSupportTicketProviderHarness(
+            host,
+            () => new NpgsqlConnection(connectionString),
+            new ProviderIdentity("groundwork-postgresql", "1.0.0"),
+            PostgreSqlGroundworkCapabilities.PhysicalNames);
     }
 }
 
@@ -148,9 +155,12 @@ public sealed class SqlServerSupportTicketProviderTests : SupportTicketProviderC
         var connectionString = container.GetConnectionString();
         var host = await SupportTicketSampleHost.CreateAsync(new SupportTicketStorageOptions(
             SupportTicketProvider.SqlServer,
-            connectionString,
-            Physicalization: PhysicalizationPolicy.Optimized));
-        return new RelationalSupportTicketProviderHarness(host, () => new SqlConnection(connectionString));
+            connectionString));
+        return new RelationalSupportTicketProviderHarness(
+            host,
+            () => new SqlConnection(connectionString),
+            new ProviderIdentity("groundwork-sqlserver", "1.0.0"),
+            SqlServerGroundworkCapabilities.PhysicalNames);
     }
 }
 
@@ -170,8 +180,7 @@ public sealed class MongoDbSupportTicketProviderTests : SupportTicketProviderCon
         var host = await SupportTicketSampleHost.CreateAsync(new SupportTicketStorageOptions(
             SupportTicketProvider.MongoDb,
             container.GetConnectionString(),
-            databaseName,
-            PhysicalizationPolicy.Optimized));
+            databaseName));
         return new MongoDbSupportTicketProviderHarness(host, container.GetConnectionString(), databaseName);
     }
 }
@@ -179,16 +188,19 @@ public sealed class MongoDbSupportTicketProviderTests : SupportTicketProviderCon
 internal sealed class RelationalSupportTicketProviderHarness(
     SupportTicketSampleHost host,
     Func<DbConnection> createConnection,
+    ProviderIdentity provider,
+    IProviderPhysicalNameNormalizer physicalNames,
     string? databasePath = null) : ISupportTicketProviderHarness
 {
     public SupportTicketSampleHost Host { get; } = host;
 
-    public async Task AssertPhysicalizedTicketAndCommentAsync(SupportTicketDocument ticket, SupportTicketCommentDocument comment)
+    public async Task AssertPhysicalTicketAndCommentAsync(SupportTicketDocument ticket, SupportTicketCommentDocument comment)
     {
+        var target = PhysicalSchemaTargetCompiler.Compile(Host.Manifest, provider, physicalNames);
         await using var connection = createConnection();
         await connection.OpenAsync();
-        Assert.Equal(1, await CountPhysicalizedRowsAsync(connection, SupportTicketManifest.DocumentKind, ticket.Ticket.TicketNumber));
-        Assert.Equal(1, await CountPhysicalizedRowsAsync(connection, SupportTicketManifest.CommentDocumentKind, comment.Comment.CommentId));
+        Assert.Equal(1, await CountPhysicalRowsAsync(connection, target, SupportTicketManifest.DocumentKind, ticket.Ticket.TicketNumber));
+        Assert.Equal(1, await CountPhysicalRowsAsync(connection, target, SupportTicketManifest.CommentDocumentKind, comment.Comment.CommentId));
     }
 
     public async ValueTask DisposeAsync()
@@ -198,17 +210,21 @@ internal sealed class RelationalSupportTicketProviderHarness(
             File.Delete(databasePath);
     }
 
-    private static async Task<long> CountPhysicalizedRowsAsync(DbConnection connection, string documentKind, string documentId)
+    private static async Task<long> CountPhysicalRowsAsync(
+        DbConnection connection,
+        PhysicalSchemaTarget target,
+        string documentKind,
+        string documentId)
     {
-        var manifest = SupportTicketManifest.Create(PhysicalizationPolicy.Optimized);
-        var unit = manifest.StorageUnits.Single(unit => unit.Identity.Value == documentKind);
+        var route = target.Routes.Single(route => route.StorageUnit.Value == documentKind);
         await using var command = connection.CreateCommand();
+
+        // Double-quoted identifiers work on SQLite, PostgreSQL, and SQL Server (QUOTED_IDENTIFIER ON).
         command.CommandText = $"""
             SELECT COUNT(*)
-            FROM {RelationalPhysicalizationNames.TableName(unit)}
-            WHERE document_kind = @kind AND document_id = @id;
+            FROM "{route.PrimaryStorage.Name.Identifier}"
+            WHERE "{route.Envelope.Id.Identifier}" = @id;
             """;
-        AddParameter(command, "kind", documentKind);
         AddParameter(command, "id", documentId);
         return Convert.ToInt64(await command.ExecuteScalarAsync());
     }
@@ -229,13 +245,12 @@ internal sealed class MongoDbSupportTicketProviderHarness(
 {
     public SupportTicketSampleHost Host { get; } = host;
 
-    public async Task AssertPhysicalizedTicketAndCommentAsync(SupportTicketDocument ticket, SupportTicketCommentDocument comment)
+    public async Task AssertPhysicalTicketAndCommentAsync(SupportTicketDocument ticket, SupportTicketCommentDocument comment)
     {
-        var client = new MongoClient(connectionString);
-        var database = client.GetDatabase(databaseName);
-        var manifest = SupportTicketManifest.Create(PhysicalizationPolicy.Optimized);
-        await AssertPhysicalizedDocumentAsync(database, manifest, SupportTicketManifest.DocumentKind, ticket.Ticket.TicketNumber);
-        await AssertPhysicalizedDocumentAsync(database, manifest, SupportTicketManifest.CommentDocumentKind, comment.Comment.CommentId);
+        var model = MongoDbPhysicalStorageModel.Compile(Host.Manifest, new ProviderIdentity("groundwork-mongodb", "1.0.0"));
+        var database = new MongoClient(connectionString).GetDatabase(databaseName);
+        await AssertSinglePhysicalDocumentAsync(database, model, SupportTicketManifest.DocumentKind);
+        await AssertSinglePhysicalDocumentAsync(database, model, SupportTicketManifest.CommentDocumentKind);
     }
 
     public async ValueTask DisposeAsync()
@@ -244,15 +259,16 @@ internal sealed class MongoDbSupportTicketProviderHarness(
         await new MongoClient(connectionString).DropDatabaseAsync(databaseName);
     }
 
-    private static async Task AssertPhysicalizedDocumentAsync(IMongoDatabase database, StorageManifest manifest, string documentKind, string documentId)
+    private static async Task AssertSinglePhysicalDocumentAsync(
+        IMongoDatabase database,
+        MongoDbPhysicalStorageModel model,
+        string documentKind)
     {
-        var unit = manifest.StorageUnits.Single(unit => unit.Identity.Value == documentKind);
-        var document = await database
-            .GetCollection<BsonDocument>(MongoDbGroundworkNames.CollectionName(unit))
-            .Find(Builders<BsonDocument>.Filter.Eq("_id.id", documentId))
-            .SingleAsync();
+        var route = model.RoutesByStorageUnit[documentKind];
+        var count = await database
+            .GetCollection<BsonDocument>(route.PrimaryStorage.Name.Identifier)
+            .CountDocumentsAsync(Builders<BsonDocument>.Filter.Empty);
 
-        Assert.True(document.TryGetValue("physicalized", out var physicalized));
-        Assert.NotEmpty(physicalized.AsBsonDocument);
+        Assert.Equal(1, count);
     }
 }

@@ -35,7 +35,8 @@ export interface SupportTicketCommentResponse {
 export interface HealthResponse {
   status: string;
   provider: string;
-  physicalization: string;
+  storage: string;
+  storageUnits: string[];
 }
 
 export interface ProviderFitView {
