@@ -53,6 +53,10 @@ public static class PhysicalStorageDefinitionSerializer
                 writer.WriteString("valueKind", demand.ValueKind.ToString());
                 if (demand.Length is not null)
                     writer.WriteNumber("length", demand.Length.Value);
+                if (demand.Precision is not null)
+                    writer.WriteNumber("precision", demand.Precision.Value);
+                if (demand.Scale is not null)
+                    writer.WriteNumber("scale", demand.Scale.Value);
                 writer.WriteString("missingValueBehavior", demand.MissingValueBehavior.ToString());
                 writer.WritePropertyName("operations");
                 writer.WriteStartArray();

@@ -43,6 +43,9 @@ internal static class PhysicalStorageDeclarationValidator
 
             if (!ValidateDeclaredKeyLength(index, target, diagnostics))
                 valid = false;
+
+            if (!ValidateDeclaredNumericShape(index, target, diagnostics))
+                valid = false;
         }
 
         var queryGroups = RequireUniqueIdentities(
@@ -325,6 +328,61 @@ internal static class PhysicalStorageDeclarationValidator
 
     internal static bool IsStringKind(IndexValueKind kind) =>
         kind is IndexValueKind.String or IndexValueKind.Keyword;
+
+    /// <summary>
+    /// Validates the declared portable decimal shape of numeric index fields. Precision and scale
+    /// belong only to <see cref="IndexValueKind.Number"/> fields, always travel together, and stay
+    /// inside the provider-portable decimal envelope (precision 1-28, scale 0-precision).
+    /// </summary>
+    private static bool ValidateDeclaredNumericShape(
+        LogicalIndexDeclaration index,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        var valid = true;
+        var indexTarget = $"{target}.logicalIndexes.{index.Identity}";
+        if ((index.Precision is not null || index.Scale is not null) &&
+            index.Fields.All(field => index.GetValueKind(field) != IndexValueKind.Number))
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-PHYSICAL-038",
+                $"Logical index '{index.Identity}' declares default decimal precision or scale without any Number field.",
+                indexTarget));
+            valid = false;
+        }
+
+        foreach (var field in index.Fields)
+        {
+            if (index.GetValueKind(field) != IndexValueKind.Number)
+            {
+                if (field.Precision is null && field.Scale is null)
+                    continue;
+
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-038",
+                    $"Logical index '{index.Identity}' field '{field.Path}' declares decimal precision or scale on a non-Number value kind.",
+                    indexTarget));
+                valid = false;
+                continue;
+            }
+
+            var precision = index.GetPrecision(field);
+            var scale = index.GetScale(field);
+            if (precision is null && scale is null)
+                continue;
+
+            if (precision is null || scale is null || precision is < 1 or > 28 || scale < 0 || scale > precision)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-038",
+                    $"Logical index '{index.Identity}' field '{field.Path}' requires declared decimal precision 1-28 with scale 0-precision.",
+                    indexTarget));
+                valid = false;
+            }
+        }
+
+        return valid;
+    }
 
     private static bool HasCompatiblePredicateAndSortPrefix(
         BoundedQueryDeclaration query,
