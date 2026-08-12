@@ -41,7 +41,7 @@
 
 ## Factory and session lifecycle
 
-`SqliteDocumentStoreFactory.CreateAsync` materializes through one short-lived connection and returns
+`SqliteDocumentStoreFactory.CreateAsync` (retired portable model, `GW0005`; use `OpenPhysicalAsync` per ADR 0006) materializes through one short-lived connection and returns
 `SqliteDocumentStore` directly. The returned store owns no connection: each operation opens and
 disposes its own connection behind a provider-owned serialization gate, and each explicit unit of
 work owns one connection and transaction until completion.

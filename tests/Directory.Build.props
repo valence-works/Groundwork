@@ -3,7 +3,8 @@
 
   <PropertyGroup>
     <!-- Test projects intentionally exercise the legacy bridge APIs. The suppression is scoped
-         here so src/ keeps full GW0001-GW0004 deprecation signal (per-site pragmas only). -->
+         here so src/ keeps its GW0001-GW0005 deprecation signal: the warnings src still emits are
+         the deliberate inventory of legacy-bridge dependencies slated for the breaking cleanup. -->
     <NoWarn>$(NoWarn);GW0001;GW0002;GW0003;GW0004;GW0005</NoWarn>
   </PropertyGroup>
 </Project>
