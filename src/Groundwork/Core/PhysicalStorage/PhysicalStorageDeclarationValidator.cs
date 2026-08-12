@@ -40,6 +40,9 @@ internal static class PhysicalStorageDeclarationValidator
                     $"{target}.logicalIndexes.{index.Identity}"));
                 valid = false;
             }
+
+            if (!ValidateDeclaredKeyLength(index, target, diagnostics))
+                valid = false;
         }
 
         var queryGroups = RequireUniqueIdentities(
@@ -269,6 +272,59 @@ internal static class PhysicalStorageDeclarationValidator
 
         return groups;
     }
+
+    /// <summary>
+    /// Validates the declared key length of string index fields. Length belongs only to
+    /// <see cref="IndexValueKind.String"/> and <see cref="IndexValueKind.Keyword"/> fields and is a
+    /// positive maximum count of UTF-16 code units.
+    /// </summary>
+    private static bool ValidateDeclaredKeyLength(
+        LogicalIndexDeclaration index,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
+        var valid = true;
+        var indexTarget = $"{target}.logicalIndexes.{index.Identity}";
+        if (index.Length is not null &&
+            index.Fields.All(field => !IsStringKind(index.GetValueKind(field))))
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-PHYSICAL-039",
+                $"Logical index '{index.Identity}' declares a default key length without any String or Keyword field.",
+                indexTarget));
+            valid = false;
+        }
+
+        foreach (var field in index.Fields)
+        {
+            if (!IsStringKind(index.GetValueKind(field)))
+            {
+                if (field.Length is null)
+                    continue;
+
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-039",
+                    $"Logical index '{index.Identity}' field '{field.Path}' declares a key length on a non-string value kind.",
+                    indexTarget));
+                valid = false;
+                continue;
+            }
+
+            if (index.GetLength(field) is <= 0)
+            {
+                diagnostics.Add(GroundworkDiagnostic.Error(
+                    "GW-PHYSICAL-039",
+                    $"Logical index '{index.Identity}' field '{field.Path}' requires a declared key length of at least 1.",
+                    indexTarget));
+                valid = false;
+            }
+        }
+
+        return valid;
+    }
+
+    internal static bool IsStringKind(IndexValueKind kind) =>
+        kind is IndexValueKind.String or IndexValueKind.Keyword;
 
     private static bool HasCompatiblePredicateAndSortPrefix(
         BoundedQueryDeclaration query,

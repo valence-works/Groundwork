@@ -186,12 +186,14 @@ public static class PhysicalStorageResolver
                     continue;
                 }
 
+                var valueKind = matching[0].GetValueKind(field);
                 demand.Add(new ScaleBearingPathDemand(
                     query.Identity,
                     query.IndexIdentity,
                     field.Path,
                     sortDirections[order],
-                    matching[0].GetValueKind(field),
+                    valueKind,
+                    PhysicalStorageDeclarationValidator.IsStringKind(valueKind) ? matching[0].GetLength(field) : null,
                     matching[0].MissingValueBehavior,
                     Array.AsReadOnly(query.Operations.Order().ToArray()),
                     query.SortSupport,
@@ -220,6 +222,21 @@ public static class PhysicalStorageResolver
                 "GW-PHYSICAL-036",
                 $"Scale-bearing residual predicate paths must have one value kind per storage unit: {string.Join(", ", conflictingResidualKinds)}.",
                 $"storageUnits.{unitIdentity.Value}.physicalStorage.boundedQueries"));
+        }
+
+        var conflictingKeyLengths = demand
+            .Where(x => x.Length is not null)
+            .GroupBy(x => x.Path, StringComparer.Ordinal)
+            .Where(group => group.Select(x => x.Length).Distinct().Count() > 1)
+            .Select(group => group.Key)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (conflictingKeyLengths.Length != 0)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-PHYSICAL-039",
+                $"Scale-bearing string paths must declare one key length per storage unit: {string.Join(", ", conflictingKeyLengths)}.",
+                $"storageUnits.{unitIdentity.Value}.physicalStorage.logicalIndexes"));
         }
 
         return demand
@@ -305,15 +322,16 @@ public static class PhysicalStorageResolver
     private static IReadOnlyList<ProjectedColumnDefinition> SynthesizeProjectedColumns(
         IReadOnlyList<ScaleBearingPathDemand> demand) =>
         demand
-            .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind) }
+            .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind, x.Length) }
                 .Concat(x.ResidualPredicateFields.Select(residual =>
-                    new ProjectedPathDemand(residual.Path, residual.ValueKind))))
+                    new ProjectedPathDemand(residual.Path, residual.ValueKind, null))))
             .Where(x => !PhysicalDocumentFieldPaths.IsEnvelope(x.Path))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Select(group => new ProjectedColumnDefinition(
                 FeatureDefaultColumnName(group.Key),
                 group.Key,
-                ToPortableType(group.First().ValueKind)))
+                ToPortableType(group.First().ValueKind),
+                Length: group.Select(x => x.Length).FirstOrDefault(length => length is not null)))
             .OrderBy(x => x.Path, StringComparer.Ordinal)
             .ToArray();
 
@@ -465,5 +483,5 @@ public static class PhysicalStorageResolver
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null)
     };
 
-    private sealed record ProjectedPathDemand(string Path, IndexValueKind ValueKind);
+    private sealed record ProjectedPathDemand(string Path, IndexValueKind ValueKind, int? Length);
 }
