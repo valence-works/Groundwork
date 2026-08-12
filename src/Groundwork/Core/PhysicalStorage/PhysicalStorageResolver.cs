@@ -590,10 +590,10 @@ public static class PhysicalStorageResolver
 
         // An omitted length is an unbounded contract, not a missing opinion: mixing it with a declared
         // length for the same path would silently narrow the shared projected column and reject writes
-        // the unbounded declaration permits. Index fields and residual predicates are both typed
-        // declaration sites for a path, so both participate.
-        var conflictingLengths = demand
-            .Select(x => (x.Path, x.Length))
+        // the unbounded declaration permits. Every typed declaration site for a path participates —
+        // fields of all logical indexes, queried or not, and scale-bearing residual predicates.
+        var conflictingLengths = storage.LogicalIndexes
+            .SelectMany(index => index.Fields.Select(field => (field.Path, Length: index.GetLength(field))))
             .Concat(storage.BoundedQueries
                 .Where(query => query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing)
                 .SelectMany(query => query.ResidualPredicateFields)

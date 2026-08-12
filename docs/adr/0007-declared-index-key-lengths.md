@@ -42,7 +42,8 @@ Declare the bound where the rest of the logical index contract lives:
   column, so declared-mode keyword indexes certify on SQL Server exactly like explicit bounded columns.
 - Validation (GW-PHYSICAL-038) rejects non-positive lengths, explicit lengths on fields whose kind
   cannot be bounded, and inconsistent lengths for one path within a storage unit — including one
-  index declaring a length while another leaves the same path unbounded. An omitted length is an
+  index declaring a length while another leaves the same path unbounded. Every declaration of the
+  path participates, whether or not a scale-bearing query references it. An omitted length is an
   unbounded contract, not a missing opinion; letting a declared length win would silently narrow the
   shared projected column and reject writes the unbounded declaration permits (GW-PHYSICAL-037).
 - Residual predicate fields are typed declaration sites exactly like index fields — they already
