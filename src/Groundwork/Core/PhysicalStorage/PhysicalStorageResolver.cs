@@ -380,6 +380,17 @@ public static class PhysicalStorageResolver
 
             foreach (var residual in query.ResidualPredicateFields)
             {
+                if (residual.Length is < 1 ||
+                    residual.Length is not null &&
+                    residual.ValueKind is not (IndexValueKind.String or IndexValueKind.Keyword))
+                {
+                    diagnostics.Add(GroundworkDiagnostic.Error(
+                        "GW-PHYSICAL-038",
+                        $"Residual predicate path '{residual.Path}' on bounded query '{query.Identity}' requires a declared length to be at least one UTF-16 code unit on a String or Keyword path.",
+                        $"{target}.boundedQueries.{query.Identity}.residualPredicateFields"));
+                    valid = false;
+                }
+
                 if (residual.Path == PhysicalDocumentFieldPaths.StorageScope)
                 {
                     diagnostics.Add(GroundworkDiagnostic.Error(
@@ -579,8 +590,14 @@ public static class PhysicalStorageResolver
 
         // An omitted length is an unbounded contract, not a missing opinion: mixing it with a declared
         // length for the same path would silently narrow the shared projected column and reject writes
-        // the unbounded declaration permits.
+        // the unbounded declaration permits. Index fields and residual predicates are both typed
+        // declaration sites for a path, so both participate.
         var conflictingLengths = demand
+            .Select(x => (x.Path, x.Length))
+            .Concat(storage.BoundedQueries
+                .Where(query => query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing)
+                .SelectMany(query => query.ResidualPredicateFields)
+                .Select(field => (field.Path, field.Length)))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Where(group => group.Select(x => x.Length).Distinct().Count() > 1)
             .Select(group => group.Key)
@@ -590,8 +607,8 @@ public static class PhysicalStorageResolver
         {
             diagnostics.Add(GroundworkDiagnostic.Error(
                 "GW-PHYSICAL-038",
-                $"Scale-bearing index paths must declare one length, or none, per storage unit: {string.Join(", ", conflictingLengths)}.",
-                $"storageUnits.{unitIdentity.Value}.physicalStorage.logicalIndexes"));
+                $"Scale-bearing paths must declare one length, or none, per storage unit: {string.Join(", ", conflictingLengths)}.",
+                $"storageUnits.{unitIdentity.Value}.physicalStorage"));
         }
 
         return demand
@@ -678,11 +695,8 @@ public static class PhysicalStorageResolver
         IReadOnlyList<ScaleBearingPathDemand> demand) =>
         demand
             .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind, x.Length) }
-                // Residual predicates are query-time filters, not bound declaration sites: a residual
-                // sharing a bounded index path takes the unit-wide declared bound, and one on its own
-                // path stays unbounded.
                 .Concat(x.ResidualPredicateFields.Select(residual =>
-                    new ProjectedPathDemand(residual.Path, residual.ValueKind, Length: null))))
+                    new ProjectedPathDemand(residual.Path, residual.ValueKind, residual.Length))))
             .Where(x => !PhysicalDocumentFieldPaths.IsEnvelope(x.Path))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Select(group => new ProjectedColumnDefinition(

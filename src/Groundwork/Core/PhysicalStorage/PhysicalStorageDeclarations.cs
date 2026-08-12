@@ -633,6 +633,9 @@ public sealed class BoundedQueryPredicateField : IEquatable<BoundedQueryPredicat
 /// Declares an optional server-side predicate that does not contribute physical-index predicate-prefix
 /// evidence. Its path may independently supply certified order. Residual predicates remain closed,
 /// typed query-plan fields and execute before result operations, paging limits, hydration, or materialization.
+/// Like an <see cref="IndexField"/>, a residual is a typed declaration site: its <see cref="ValueKind"/>
+/// must agree unit-wide, and an optional <see cref="Length"/> (maximum UTF-16 code units for String and
+/// Keyword paths) must agree with every other declaration of the same path.
 /// </summary>
 public sealed class BoundedQueryResidualPredicateField : IEquatable<BoundedQueryResidualPredicateField>
 {
@@ -640,7 +643,8 @@ public sealed class BoundedQueryResidualPredicateField : IEquatable<BoundedQuery
         string path,
         IndexValueKind valueKind,
         IReadOnlySet<PortableQueryOperation> operations,
-        bool isRequired = false)
+        bool isRequired = false,
+        int? length = null)
     {
         if (string.IsNullOrWhiteSpace(path))
             throw new ArgumentException("A stable residual predicate path is required.", nameof(path));
@@ -649,6 +653,7 @@ public sealed class BoundedQueryResidualPredicateField : IEquatable<BoundedQuery
         ValueKind = valueKind;
         Operations = (operations ?? throw new ArgumentNullException(nameof(operations))).ToFrozenSet();
         IsRequired = isRequired;
+        Length = length;
     }
 
     public string Path { get; }
@@ -659,11 +664,14 @@ public sealed class BoundedQueryResidualPredicateField : IEquatable<BoundedQuery
 
     public bool IsRequired { get; }
 
+    public int? Length { get; }
+
     public bool Equals(BoundedQueryResidualPredicateField? other) =>
         other is not null &&
         Path == other.Path &&
         ValueKind == other.ValueKind &&
         IsRequired == other.IsRequired &&
+        Length == other.Length &&
         Operations.SetEquals(other.Operations);
 
     public override bool Equals(object? obj) => Equals(obj as BoundedQueryResidualPredicateField);
@@ -674,6 +682,7 @@ public sealed class BoundedQueryResidualPredicateField : IEquatable<BoundedQuery
         hash.Add(Path, StringComparer.Ordinal);
         hash.Add(ValueKind);
         hash.Add(IsRequired);
+        hash.Add(Length);
         foreach (var operation in Operations.Order())
             hash.Add(operation);
         return hash.ToHashCode();

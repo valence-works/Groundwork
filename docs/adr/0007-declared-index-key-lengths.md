@@ -45,11 +45,11 @@ Declare the bound where the rest of the logical index contract lives:
   index declaring a length while another leaves the same path unbounded. An omitted length is an
   unbounded contract, not a missing opinion; letting a declared length win would silently narrow the
   shared projected column and reject writes the unbounded declaration permits (GW-PHYSICAL-037).
-- Residual predicate fields are query-time filters, not bound declaration sites: they cannot declare
-  a length, so a residual sharing a path with a bounded index takes the unit-wide declared bound
-  rather than conflicting with it. The bound — and the write-time rejection of over-length values —
-  comes from the index declaration alone and is identical whether or not any residual shares the
-  path; a residual on a path no index bounds stays unbounded.
+- Residual predicate fields are typed declaration sites exactly like index fields — they already
+  declare value kinds that must agree unit-wide (GW-PHYSICAL-036) — so they gain the same optional
+  `Length` and participate in the same one-length-per-path rule. A residual sharing a path with a
+  bounded index must declare the matching length; leaving it unbounded is the same silent-narrowing
+  conflict as between two indexes and is rejected, not inherited.
 
 Unbounded string demand stays legal: providers without a key budget accept it unchanged, and SQL
 Server keeps rejecting it at certification time with its existing bounded-key diagnostic. This mirrors

@@ -494,7 +494,42 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
-    public void ResidualPredicateOnABoundedIndexPathTakesTheUnitWideDeclaredBound()
+    public void ResidualPredicateOnABoundedIndexPathMustDeclareTheMatchingLength()
+    {
+        var result = ResolveBoundedCustomerWithStatusResidual(residualLength: null);
+
+        // A residual predicate is a typed declaration site like an index field: leaving the path
+        // unbounded while an index bounds it is the same silent-narrowing conflict as between two
+        // indexes, so it is rejected rather than inheriting the bound.
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-038" &&
+            diagnostic.Message.Contains("customerId", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ResidualPredicateWithTheMatchingLengthSharesTheBoundedColumn()
+    {
+        var result = ResolveBoundedCustomerWithStatusResidual(residualLength: 64);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var definition = Assert.Single(result.Definitions).Definition;
+        Assert.Collection(
+            definition.ProjectedColumns,
+            column =>
+            {
+                Assert.Equal("customerId", column.Path);
+                Assert.Equal(64, column.Length);
+            },
+            column =>
+            {
+                Assert.Equal("status", column.Path);
+                Assert.Null(column.Length);
+            });
+    }
+
+    private static PhysicalStorageResolutionResult ResolveBoundedCustomerWithStatusResidual(int? residualLength)
     {
         var physicalStorage = new StorageUnitPhysicalStorage(
             StorageUnitProvisioningMode.Declared,
@@ -531,32 +566,15 @@ public sealed class PhysicalStorageResolutionTests
                         new BoundedQueryResidualPredicateField(
                             "customerId",
                             IndexValueKind.Keyword,
-                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal })
+                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                            length: residualLength)
                     ])
             ]);
 
-        var result = PhysicalStorageResolver.Resolve(
+        return PhysicalStorageResolver.Resolve(
             WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
             PhysicalNamePolicy.Identity,
             ProviderPhysicalNameNormalizer.Identity);
-
-        // The residual predicate is a query-time filter, not a bound declaration site: the write-time
-        // contract for customerId comes from the index declaration alone, so the shared projected
-        // column keeps the declared bound and the residual-only view of the path adds no conflict.
-        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
-        var definition = Assert.Single(result.Definitions).Definition;
-        Assert.Collection(
-            definition.ProjectedColumns,
-            column =>
-            {
-                Assert.Equal("customerId", column.Path);
-                Assert.Equal(64, column.Length);
-            },
-            column =>
-            {
-                Assert.Equal("status", column.Path);
-                Assert.Null(column.Length);
-            });
     }
 
     [Fact]
