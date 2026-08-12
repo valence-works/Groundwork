@@ -908,12 +908,62 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
         Assert.Equal(exponentBoundary, loaded.RootElement.GetProperty("exponent").GetRawText());
     }
 
+    /// <summary>
+    /// valence-works/Groundwork#166 on the mutation path. A null equality is defined to match a field
+    /// that is null or absent alike, and declaring the index
+    /// <see cref="MissingValueBehavior.Excluded"/> must not quietly change that: the selector runs
+    /// against an unfiltered mirror index that holds the omitted document too, so nothing about the
+    /// index gives it licence to skip one. The seeded document with no <c>status</c> at all is the whole
+    /// point of the cell — before the fix it survived a delete that names it.
+    /// </summary>
     [Fact]
-    public async Task Explicit_null_matches_a_mutation_while_an_omitted_excluded_value_does_not()
+    public async Task Null_equality_prunes_an_omitted_value_on_a_null_excluding_index()
+    {
+        var fixture = await NullExcludedMutationFixtureAsync();
+
+        var result = await fixture.Mutations.ExecuteAsync(Delete("null-prune-1", null));
+
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 2), result);
+        Assert.Null(await fixture.Documents.LoadAsync(DocumentKind, "missing"));
+        Assert.Null(await fixture.Documents.LoadAsync(DocumentKind, "null"));
+        Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "present"));
+    }
+
+    /// <summary>
+    /// The sharper case, and the one no conjunct could have rescued: MongoDB's <c>{$ne: v}</c> matches a
+    /// document that has no such field, so the omitted document is inside the predicate however the
+    /// index is declared. Excluding it was never an index-soundness measure, only a lost delete.
+    /// </summary>
+    [Fact]
+    public async Task Inequality_prunes_an_omitted_value_on_a_null_excluding_index()
+    {
+        var fixture = await NullExcludedMutationFixtureAsync();
+
+        var result = await fixture.Mutations.ExecuteAsync(new DocumentMutation(
+            DocumentKind,
+            "prune-by-status",
+            "not-equal-prune-1",
+            [DocumentQueryClause.Of(DocumentQueryComparison.NotEqual("status", "present"))]));
+
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 2), result);
+        Assert.Null(await fixture.Documents.LoadAsync(DocumentKind, "missing"));
+        Assert.Null(await fixture.Documents.LoadAsync(DocumentKind, "null"));
+        Assert.NotNull(await fixture.Documents.LoadAsync(DocumentKind, "present"));
+    }
+
+    private async Task<(MongoDbPhysicalDocumentStore Documents, IBoundedDocumentMutationStore Mutations)>
+        NullExcludedMutationFixtureAsync()
     {
         var database = new MongoClient(container.GetConnectionString())
             .GetDatabase($"groundwork_{Guid.NewGuid():N}");
-        var model = Model(isNullable: true);
+        var model = Model(
+            isNullable: true,
+            missingValueBehavior: MissingValueBehavior.Excluded,
+            operations: new HashSet<PortableQueryOperation>
+            {
+                PortableQueryOperation.Equal,
+                PortableQueryOperation.NotEqual
+            });
         await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
         var documents = new MongoDbPhysicalDocumentStore(
             database,
@@ -928,12 +978,9 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
             DocumentKind, "missing", "1", """{"rank":1}""", ExpectedVersion: 0))).Status);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await documents.SaveAsync(new SaveDocumentRequest(
             DocumentKind, "null", "1", """{"status":null,"rank":2}""", ExpectedVersion: 0))).Status);
-
-        var result = await mutations.ExecuteAsync(Delete("null-prune-1", null));
-
-        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 1), result);
-        Assert.NotNull(await documents.LoadAsync(DocumentKind, "missing"));
-        Assert.Null(await documents.LoadAsync(DocumentKind, "null"));
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await documents.SaveAsync(new SaveDocumentRequest(
+            DocumentKind, "present", "1", """{"status":"present","rank":3}""", ExpectedVersion: 0))).Status);
+        return (documents, mutations);
     }
 
     [Fact]
@@ -1585,12 +1632,16 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
     internal static MongoDbPhysicalStorageModel Model(
         PhysicalStorageForm form = PhysicalStorageForm.DedicatedDocumentTable,
         string path = "status",
-        bool isNullable = false)
+        bool isNullable = false,
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull,
+        IReadOnlySet<PortableQueryOperation>? operations = null)
     {
         var template = MongoDbPhysicalStorageConformanceTests.Model(
             form,
+            operations,
             path: path,
-            isNullable: isNullable);
+            isNullable: isNullable,
+            missingValueBehavior: missingValueBehavior);
         var unit = Assert.Single(template.Manifest.StorageUnits);
         var storage = unit.PhysicalStorage!;
         var manifest = template.Manifest with

@@ -389,16 +389,17 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
         DocumentScopeSelection scope)
     {
         var query = PredicateQuery(mutation, plan);
+        // Nothing here narrows the set to documents that carry the mirrored fields, and nothing may.
+        // The selector runs against its own mirror index, which is created and validated as an ordinary
+        // non-sparse index with no partial filter expression, so it holds every document in the route —
+        // including those whose mirror is unset. The pin is therefore sound as it stands, and requiring
+        // the mirrors to exist would only drop documents the predicate matches. A null equality is the
+        // plain case: it is defined to match a field that is null or absent alike.
         var filters = new List<FilterDefinition<BsonDocument>>
         {
             Builders<BsonDocument>.Filter.Eq(selector.DiscriminatorField, selector.DiscriminatorValue),
             Builders<BsonDocument>.Filter.Eq(selector.ScopeField, scope.StorageKey)
         };
-        if (selector.MissingValueBehavior == MissingValueBehavior.Excluded)
-        {
-            filters.AddRange(selector.Fields.Select(mirror =>
-                Builders<BsonDocument>.Filter.Exists(mirror.Identifier, true)));
-        }
         foreach (var clause in query.Clauses)
         {
             filters.Add(Builders<BsonDocument>.Filter.Or(clause.Comparisons.Select(comparison =>
