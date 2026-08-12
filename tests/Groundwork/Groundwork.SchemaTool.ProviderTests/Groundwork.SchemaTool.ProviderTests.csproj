@@ -25,4 +25,8 @@
     <ProjectReference Include="..\..\..\src\Groundwork\SchemaTool\Groundwork.SchemaTool.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\TestInfrastructure\TestContainerImages.cs" Link="TestInfrastructure\TestContainerImages.cs" />
+  </ItemGroup>
+
 </Project>

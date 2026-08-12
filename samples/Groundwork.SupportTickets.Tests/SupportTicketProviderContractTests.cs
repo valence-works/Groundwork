@@ -137,7 +137,7 @@ public sealed class PostgreSqlSupportTicketProviderTests : SupportTicketProvider
 
 public sealed class SqlServerSupportTicketProviderTests : SupportTicketProviderContractTests, IAsyncLifetime
 {
-    private readonly MsSqlContainer container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU18-ubuntu-22.04").Build();
+    private readonly MsSqlContainer container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04").Build();
 
     public async Task InitializeAsync() => await container.StartAsync();
 

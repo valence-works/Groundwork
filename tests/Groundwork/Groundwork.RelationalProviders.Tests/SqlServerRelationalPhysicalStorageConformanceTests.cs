@@ -25,7 +25,7 @@ namespace Groundwork.RelationalProviders.Tests;
 public sealed class SqlServerPhysicalStorageContainer : IAsyncLifetime
 {
     public MsSqlContainer Container { get; } =
-        new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04").Build();
+        new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
 
     public Task InitializeAsync() => Container.StartAsync();
     public Task DisposeAsync() => Container.DisposeAsync().AsTask();

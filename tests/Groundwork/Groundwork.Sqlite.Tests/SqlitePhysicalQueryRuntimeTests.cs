@@ -1338,7 +1338,11 @@ public sealed class SqlitePhysicalQueryRuntimeTests
             root = root.Parent;
         if (root is null)
             throw new InvalidOperationException("Could not locate the Groundwork repository root.");
-        var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        // The probe builds alongside this test project, so its output lives under the same
+        // bin/{configuration}/{tfm} segments as this test assembly's own output directory.
+        var testOutput = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = testOutput.Name;
+        var configuration = testOutput.Parent!.Name;
         var probe = Path.Combine(
             root.FullName,
             "tests",
@@ -1346,7 +1350,7 @@ public sealed class SqlitePhysicalQueryRuntimeTests
             "Groundwork.DocumentCursor.ProcessProbe",
             "bin",
             configuration,
-            "net10.0",
+            targetFramework,
             "Groundwork.DocumentCursor.ProcessProbe.dll");
         var start = new ProcessStartInfo("dotnet")
         {

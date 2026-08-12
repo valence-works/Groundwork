@@ -23,7 +23,7 @@ public sealed class MongoDbPhysicalTopologyCollection
 [Collection(MongoDbPhysicalTopologyCollection.Name)]
 public sealed class MongoDbPhysicalTopologyTests : IAsyncLifetime
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder("mongo:7.0.24").Build();
+    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb).Build();
 
     public Task InitializeAsync() => container.StartAsync();
 

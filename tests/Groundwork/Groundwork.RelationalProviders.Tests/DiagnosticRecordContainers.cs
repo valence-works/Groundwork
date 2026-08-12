@@ -19,7 +19,7 @@ public sealed class SqlServerDiagnosticContainer : IAsyncLifetime
     private static readonly TimeSpan DatabaseOperationTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DatabaseAbortTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DatabaseDiagnosticTimeout = TimeSpan.FromSeconds(5);
-    private readonly MsSqlContainer container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU18-ubuntu-22.04").Build();
+    private readonly MsSqlContainer container = new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
     private readonly SemaphoreSlim databaseLifecycleGate = new(1, 1);
     private readonly ConcurrentDictionary<string, byte> ownedDatabases = new(StringComparer.Ordinal);
     private int poisoned;
@@ -408,7 +408,7 @@ public sealed class PostgreSqlDiagnosticRecordCollection : ICollectionFixture<Po
 
 public sealed class PostgreSqlDiagnosticContainer : IAsyncLifetime
 {
-    private readonly PostgreSqlContainer container = new PostgreSqlBuilder("postgres:17.6-alpine3.22")
+    private readonly PostgreSqlContainer container = new PostgreSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.PostgreSql)
         .WithDatabase("groundwork")
         .WithUsername("groundwork")
         .WithPassword("groundwork")

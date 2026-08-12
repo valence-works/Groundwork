@@ -62,7 +62,7 @@ public sealed class MongoDbDiagnosticRecordCollection : ICollectionFixture<Mongo
 
 public sealed class MongoDbReplicaSetFixture : IAsyncLifetime
 {
-    private readonly MongoDbContainer _container = new MongoDbBuilder("mongo:7.0.24")
+    private readonly MongoDbContainer _container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
         .WithReplicaSet("rs0")
         .WithCommand("--setParameter", "enableTestCommands=1")
         .Build();
@@ -1302,7 +1302,7 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
 
 public sealed class MongoDbDiagnosticRecordStandaloneTests : IAsyncLifetime
 {
-    private readonly MongoDbContainer _container = new MongoDbBuilder("mongo:7.0.24").Build();
+    private readonly MongoDbContainer _container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb).Build();
 
     public async Task InitializeAsync() => await _container.StartAsync();
     public async Task DisposeAsync() => await _container.DisposeAsync();

@@ -219,7 +219,7 @@ public sealed class MongoDbDocumentIdentityAcceptanceEvidenceTests
 
 public sealed class MongoDbDocumentIdentityAcceptanceContainer : IAsyncLifetime
 {
-    public MongoDbContainer Container { get; } = new MongoDbBuilder("mongo:7.0.24")
+    public MongoDbContainer Container { get; } = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
         .WithReplicaSet("groundwork-identity-acceptance-rs")
         .Build();
 

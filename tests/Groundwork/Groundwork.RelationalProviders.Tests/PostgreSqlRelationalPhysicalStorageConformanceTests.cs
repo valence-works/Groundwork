@@ -23,7 +23,7 @@ namespace Groundwork.RelationalProviders.Tests;
 
 public sealed class PostgreSqlPhysicalStorageContainer : IAsyncLifetime
 {
-    public PostgreSqlContainer Container { get; } = new PostgreSqlBuilder("postgres:17.6-alpine3.22")
+    public PostgreSqlContainer Container { get; } = new PostgreSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.PostgreSql)
         .WithDatabase("groundwork")
         .WithUsername("groundwork")
         .WithPassword("groundwork")

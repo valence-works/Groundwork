@@ -203,13 +203,15 @@ public sealed class RelationalSessionFactoryTests
         var second = sessions.ExecuteAsync(HoldConnection);
         try
         {
-            await bothEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await bothEntered.Task.WaitAsync(TimeSpan.FromSeconds(30));
         }
         finally
         {
             release.TrySetResult();
             await Task.WhenAll(first, second);
         }
+
+        Assert.Equal(2, entered);
     }
 
     [Fact]

@@ -21,7 +21,7 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
 {
     private const string DocumentKind = "workItem";
-    private readonly MongoDbContainer container = new MongoDbBuilder("mongo:7.0.24")
+    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
         .WithReplicaSet("groundwork-mutations-rs")
         .Build();
 

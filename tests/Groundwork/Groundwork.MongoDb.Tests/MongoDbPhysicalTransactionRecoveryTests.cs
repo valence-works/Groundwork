@@ -23,7 +23,7 @@ public sealed class MongoDbPhysicalTransactionRecoveryCollection
 [Collection(MongoDbPhysicalTransactionRecoveryCollection.Name)]
 public sealed class MongoDbPhysicalTransactionRecoveryTests : IAsyncLifetime
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder("mongo:7.0.24")
+    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
         .WithReplicaSet("groundwork-rs")
         .WithCommand("--setParameter", "enableTestCommands=1")
         .Build();
