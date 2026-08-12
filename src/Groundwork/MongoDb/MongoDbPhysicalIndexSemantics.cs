@@ -7,21 +7,6 @@ namespace Groundwork.MongoDb;
 /// <summary>Canonical MongoDB membership metadata for one provider-neutral physical index.</summary>
 internal static class MongoDbPhysicalIndexSemantics
 {
-    public static IReadOnlyList<string> ValueFields(
-        ExecutableStorageRoute route,
-        ExecutablePhysicalIndexRoute index)
-    {
-        var projected = route.ProjectedColumns
-            .Where(projection => projection.Target == index.Target)
-            .Select(projection => projection.Column.Identifier)
-            .ToHashSet(StringComparer.Ordinal);
-        return index.Columns
-            .OrderBy(column => column.Order)
-            .Select(column => column.Column.Identifier)
-            .Where(projected.Contains)
-            .ToArray();
-    }
-
     /// <summary>
     /// The partial filter that realises <see cref="MissingValueBehavior.Excluded"/>, or
     /// <see langword="null"/> when the index keeps every document. <paramref name="missingValueBehavior"/>

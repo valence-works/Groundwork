@@ -104,12 +104,12 @@ otherwise remains unchanged.
 ## Pinning an index that excludes null rows
 
 Some providers pin the planned index into the emitted statement — SQL Server as `WITH (INDEX(...))`,
-SQLite as `INDEXED BY`. Some indexes also exclude rows rather than merely ordering them, and exactly
-one thing decides that: an index declared `MissingValueBehavior.Excluded` omits rows that have no
-value for its nullable keyed columns. Every provider realises that identically — a filtered index on
-SQL Server and PostgreSQL, a partial index on SQLite, a partial filter expression on MongoDB — from a
-single shared rule, `PhysicalIndexNullExclusion`. Where both hold, pinning is only sound for a
-predicate that cannot match the excluded rows.
+SQLite as `INDEXED BY`, MongoDB as a `Hint`. Some indexes also exclude rows rather than merely
+ordering them, and exactly one thing decides that: an index declared `MissingValueBehavior.Excluded`
+omits rows that have no value for its nullable keyed columns. Every provider realises that
+identically — a filtered index on SQL Server and PostgreSQL, a partial index on SQLite, a partial
+filter expression on MongoDB — from a single shared rule, `PhysicalIndexNullExclusion`. Where both
+hold, pinning is only sound for a predicate that cannot match the excluded rows.
 
 Uniqueness does not enter into it. SQL Server unique indexes treat nulls as equal to one another, so
 a unique index over a nullable column used to acquire a null-excluding filter as a side effect of
@@ -120,23 +120,34 @@ pairing, a unique index that keeps rows without a value, is refused at route com
 (`GW-ROUTE-007`) because the providers genuinely disagree about whether two such rows collide and
 SQLite cannot be told otherwise.
 
-The pin is therefore decided per invocation, from the predicate rather than from the plan alone. A
-clause proves a column non-null only when *every* alternative in that disjunction rejects nulls on
-it. Equality against a non-null value, inequality, the range operations, `StartsWith` and `Contains`
-all reject nulls; equality against a null value renders `IS NULL` and does not, and `NotContains` does
-not, because it is defined to match a null or absent field.
+The pin is therefore decided per invocation, from the predicate rather than from the plan alone, by
+one provider-neutral rule: `PhysicalIndexNullExclusionGuard`. A clause proves a column non-null only
+when *every* alternative in that disjunction rejects nulls on it. Equality against a non-null value,
+inequality, the range operations, `StartsWith` and `Contains` all reject nulls; equality against a
+null value renders `IS NULL` and does not, and `NotContains` does not, because it is defined to match
+a null or absent field. `NotEqual` means the field has a value and that value differs, so MongoDB
+pairs `$ne` with a null rejection rather than letting the operator mean something narrower there.
 
 When the predicate proves every excluded column non-null, the query keeps its pin and carries an
-`IS NOT NULL` conjunct per excluded column. Those conjuncts are redundant by construction — they are
-only emitted where the predicate already rejects nulls — and exist so the provider can match the
-index's own filter. SQL Server's filtered-index matching reasons over simple comparison forms and
-cannot see through an expression such as `LOWER(column) LIKE @p`, so without the conjunct it refuses
-to produce a plan at all.
+`IS NOT NULL` conjunct per excluded column — `$exists: true` on MongoDB. Those conjuncts are redundant
+by construction — they are only emitted where the predicate already rejects nulls — and exist so the
+provider can match the index's own filter. SQL Server's filtered-index matching reasons over simple
+comparison forms and cannot see through an expression such as `LOWER(column) LIKE @p`, so without the
+conjunct it refuses to produce a plan at all.
 
 When the predicate does not prove it, the index would drop rows the query can match. A scale-bearing
 query is refused by name rather than degraded to a scan; any other query drops the pin and leaves the
-choice to the optimizer. PostgreSQL emits the filter but never pins an index, so it is unaffected by
-the pin decision while still honouring the declaration.
+choice to the optimizer. On MongoDB the pin has to be dropped along with the membership conjuncts,
+because MongoDB honours a `Hint` whose partial filter the query does not imply rather than rejecting
+it — there the hint is itself the row-dropping mechanism. PostgreSQL emits the filter but never pins
+an index, so it is unaffected by the pin decision while still honouring the declaration.
+
+Row exclusion is therefore a storage choice and never a row-visibility one. No provider returns,
+updates, or deletes fewer rows than the predicate matches because the index it would have used omits
+some of them; which providers *refuse* differs, because it follows from which providers pin. Bounded
+mutations inherit the query decision through their predicate query on the relational providers, and
+on MongoDB select through the provider-owned mutation mirror index, which carries no partial filter
+and so excludes nothing.
 
 ## Isolation and failure rules
 

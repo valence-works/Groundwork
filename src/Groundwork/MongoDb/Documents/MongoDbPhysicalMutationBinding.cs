@@ -468,6 +468,11 @@ internal sealed class MongoDbPhysicalMutationSelector
 
     public string ScopeField { get; }
 
+    /// <summary>
+    /// The declared row exclusion, carried so the serialized binding still describes the logical index it
+    /// was compiled from. It does not reach the mutation filter: the mirror index this selector pins has
+    /// no partial filter, so it excludes nothing and there is nothing for a predicate to restate.
+    /// </summary>
     public MissingValueBehavior MissingValueBehavior { get; }
 
     public IReadOnlyList<MongoDbPhysicalMutationMirrorField> Fields { get; }

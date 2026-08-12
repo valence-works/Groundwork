@@ -908,12 +908,20 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
         Assert.Equal(exponentBoundary, loaded.RootElement.GetProperty("exponent").GetRawText());
     }
 
+    /// <summary>
+    /// A null equality selects the document that states null and the one that omits the path alike,
+    /// because that is what the predicate matches — on MongoDB as on every relational provider, where
+    /// both spellings land in the same <c>IS NULL</c>. It used to select only the explicit null, because
+    /// the mutation filter carried a membership conjunct per mirror field whenever the selector's index
+    /// declared row exclusion. Row exclusion is a storage choice, so it may not narrow a mutation's match
+    /// set (valence-works/Groundwork#178).
+    /// </summary>
     [Fact]
-    public async Task Explicit_null_matches_a_mutation_while_an_omitted_excluded_value_does_not()
+    public async Task Null_equality_prunes_the_omitted_value_alongside_the_explicit_null()
     {
         var database = new MongoClient(container.GetConnectionString())
             .GetDatabase($"groundwork_{Guid.NewGuid():N}");
-        var model = Model(isNullable: true);
+        var model = Model(isNullable: true, missingValueBehavior: MissingValueBehavior.Excluded);
         await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
         var documents = new MongoDbPhysicalDocumentStore(
             database,
@@ -931,8 +939,8 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
 
         var result = await mutations.ExecuteAsync(Delete("null-prune-1", null));
 
-        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 1), result);
-        Assert.NotNull(await documents.LoadAsync(DocumentKind, "missing"));
+        Assert.Equal(new BoundedMutationResult(BoundedMutationStatus.Completed, 2), result);
+        Assert.Null(await documents.LoadAsync(DocumentKind, "missing"));
         Assert.Null(await documents.LoadAsync(DocumentKind, "null"));
     }
 
@@ -1585,12 +1593,14 @@ public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
     internal static MongoDbPhysicalStorageModel Model(
         PhysicalStorageForm form = PhysicalStorageForm.DedicatedDocumentTable,
         string path = "status",
-        bool isNullable = false)
+        bool isNullable = false,
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull)
     {
         var template = MongoDbPhysicalStorageConformanceTests.Model(
             form,
             path: path,
-            isNullable: isNullable);
+            isNullable: isNullable,
+            missingValueBehavior: missingValueBehavior);
         var unit = Assert.Single(template.Manifest.StorageUnits);
         var storage = unit.PhysicalStorage!;
         var manifest = template.Manifest with

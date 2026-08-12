@@ -17,7 +17,6 @@ namespace Groundwork.MongoDb.Documents;
 internal sealed class MongoDbPhysicalQueryExplainer(
     IMongoDatabase database,
     ExecutableStorageRoute route,
-    StorageUnitPhysicalStorage storage,
     Func<DocumentScopeSelection> scope,
     MongoDbTransactionCapability transactionCapability)
 {
@@ -31,14 +30,14 @@ internal sealed class MongoDbPhysicalQueryExplainer(
         if (plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
             return await ExplainCollectionMembershipAsync(query, plan, resolvedScope, cancellationToken);
         var basePredicate = MongoDbPhysicalQueryHandler.BuildPredicate(
-            query, plan, resolvedScope, storage, route);
+            query, plan, resolvedScope, route);
         var pagePredicate = MongoDbPhysicalQueryHandler.BuildPagePredicate(
             query, plan, resolvedScope, basePredicate);
         var lookup = database.GetCollection<BsonDocument>(plan.LookupObject.Identifier);
         var renderedBaseFilter = Render(lookup, basePredicate.Filter);
         var renderedPageFilter = Render(lookup, pagePredicate.Filter);
         var sort = MongoDbPhysicalQueryHandler.BuildSort(query, plan);
-        var indexHint = MongoDbPhysicalQueryHandler.PlanIndexHint(plan, route);
+        var indexHint = basePredicate.IndexHint;
         await transactionCapability.EnsureSupportedAsync(
             [route.StorageUnit.Value],
             "physical query explain",

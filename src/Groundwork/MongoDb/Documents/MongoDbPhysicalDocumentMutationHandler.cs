@@ -394,11 +394,10 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
             Builders<BsonDocument>.Filter.Eq(selector.DiscriminatorField, selector.DiscriminatorValue),
             Builders<BsonDocument>.Filter.Eq(selector.ScopeField, scope.StorageKey)
         };
-        if (selector.MissingValueBehavior == MissingValueBehavior.Excluded)
-        {
-            filters.AddRange(selector.Fields.Select(mirror =>
-                Builders<BsonDocument>.Filter.Exists(mirror.Identifier, true)));
-        }
+        // No membership conjuncts, whatever the selector's MissingValueBehavior says. A bounded mutation
+        // is pinned to the provider-owned mirror index, which carries no partial filter and so excludes
+        // nothing; requiring the mirrors to exist would only make the mutation skip documents its
+        // predicate matches, which is the one thing row exclusion is never allowed to do.
         foreach (var clause in query.Clauses)
         {
             filters.Add(Builders<BsonDocument>.Filter.Or(clause.Comparisons.Select(comparison =>
@@ -451,7 +450,13 @@ internal sealed class MongoDbPhysicalDocumentMutationHandler : IPhysicalDocument
         return comparison.Operator switch
         {
             QueryComparisonOperator.Equal => Builders<BsonDocument>.Filter.Eq(field, value),
-            QueryComparisonOperator.NotEqual => Builders<BsonDocument>.Filter.Ne(field, value),
+            // Paired with a null rejection for the reason MongoDbPhysicalQueryHandler.NotEqual gives:
+            // NotEqual means the field has a value and that value differs.
+            QueryComparisonOperator.NotEqual => value.IsBsonNull
+                ? Builders<BsonDocument>.Filter.Ne(field, BsonNull.Value)
+                : Builders<BsonDocument>.Filter.And(
+                    Builders<BsonDocument>.Filter.Ne(field, value),
+                    Builders<BsonDocument>.Filter.Ne(field, BsonNull.Value)),
             QueryComparisonOperator.In => comparison.Values.Count == 0
                 ? Builders<BsonDocument>.Filter.Eq("_groundwork_match_none", true)
                 : Builders<BsonDocument>.Filter.In(field, comparison.Values.Select(ToValue)),

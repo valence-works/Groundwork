@@ -2506,7 +2506,10 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         var database = Database();
         // The keyed column has to be nullable for Excluded to produce a partial filter at all, which is
         // what the "partial-omitted" case exists to detect the absence of.
-        var model = Model(PhysicalStorageForm.PhysicalEntityTable, isNullable: true);
+        var model = Model(
+            PhysicalStorageForm.PhysicalEntityTable,
+            isNullable: true,
+            missingValueBehavior: MissingValueBehavior.Excluded);
         var materializer = new MongoDbGroundworkMaterializer(database);
         await materializer.MaterializeAsync(model);
         var route = Assert.Single(model.Routes);
@@ -3275,7 +3278,8 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 PortableQueryOperation.NotEqual
             },
             isNullable: true,
-            isUnique: true);
+            isUnique: true,
+            missingValueBehavior: MissingValueBehavior.Excluded);
         await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
         var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
 
@@ -3288,14 +3292,18 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, (await store.SaveAsync(new SaveDocumentRequest(
             "workItem", "null-b", "1", """{"status":null,"rank":4}""", ExpectedVersion: 0))).Status);
 
-        var equalNull = await store.QueryAsync(new DocumentQuery(
+        // The uniqueness above is what distinguishes the two: a partial filter on $exists lets any number
+        // of documents with no status coexist while admitting exactly one that states null. The query side
+        // draws no such distinction, because it may not — a null equality asks for the very rows the index
+        // omits, so this scale-bearing query is refused rather than answered from the index.
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => store.QueryAsync(new DocumentQuery(
             "workItem", "list-by-status",
-            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", null))]));
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", null))])));
         var notNull = await store.QueryAsync(new DocumentQuery(
             "workItem", "list-by-status",
             [DocumentQueryClause.Of(DocumentQueryComparison.NotEqual("status", null))]));
-        Assert.Equal(["null-a"], equalNull.Documents.Select(document => document.Id));
-        Assert.DoesNotContain(notNull.Documents, document => document.Id.StartsWith("missing-", StringComparison.Ordinal));
+        Assert.Contains("MissingValueBehavior.Excluded", refusal.Message, StringComparison.Ordinal);
+        Assert.Empty(notNull.Documents);
 
         var route = Assert.Single(model.Routes);
         var index = Assert.Single(route.Indexes);
@@ -3319,7 +3327,10 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     public async Task Widening_a_partially_filtered_index_rebuilds_it_without_its_filter()
     {
         var database = Database();
-        var narrow = Model(PhysicalStorageForm.PhysicalEntityTable, isNullable: true);
+        var narrow = Model(
+            PhysicalStorageForm.PhysicalEntityTable,
+            isNullable: true,
+            missingValueBehavior: MissingValueBehavior.Excluded);
         var widened = Model(
             PhysicalStorageForm.PhysicalEntityTable,
             isNullable: true,
