@@ -123,18 +123,21 @@ public static class BenchmarkModelFactory
                 indexes: [indexedIndex, orderedIndex]),
             _ => throw new ArgumentOutOfRangeException(nameof(form), form, null)
         };
+        // Both indexes take the default IncludedAsNull, matching the physical definitions above.
+        // Every benchmark document carries status and rank, and both projected columns are
+        // non-nullable, so a null-excluding index would exclude nothing while still making the
+        // provider build a filtered/partial index. That is a different physical structure with a
+        // different plan from the one the harness means to measure.
         var indexedLogical = new LogicalIndexDeclaration(
             IndexedIndexIdentity,
             [new IndexField("status", IndexValueKind.Keyword)],
             IndexValueKind.Keyword,
-            false,
-            MissingValueBehavior.Excluded);
+            false);
         var orderedLogical = new LogicalIndexDeclaration(
             CompoundIndexIdentity,
             [new IndexField("status", IndexValueKind.Keyword), new IndexField("rank", IndexValueKind.Number)],
             IndexValueKind.Keyword,
-            false,
-            MissingValueBehavior.Excluded);
+            false);
         var indexedQuery = QueryDeclaration(IndexedQueryIdentity, indexedLogical.Identity, ordered: false);
         var orderedQuery = QueryDeclaration(QueryIdentity, orderedLogical.Identity, ordered: true);
         var unit = new StorageUnit(
