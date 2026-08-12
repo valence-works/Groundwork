@@ -22,9 +22,16 @@ public sealed class MongoDbPhysicalTransactionRecoveryCollection
 }
 
 [Collection(MongoDbPhysicalTransactionRecoveryCollection.Name)]
-public sealed class MongoDbPhysicalTransactionRecoveryTests(MongoDbFailpointReplicaSetTestContainer fixture)
+public sealed class MongoDbPhysicalTransactionRecoveryTests(MongoDbFailpointReplicaSetTestContainer fixture) : IAsyncLifetime
 {
     private readonly MongoDbContainer container = fixture.Container;
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    // The container is shared across this collection; a "times: N" failpoint armed by a test that
+    // fails before consuming it would otherwise stay armed and fire in the next test.
+    public Task DisposeAsync() =>
+        DisableCommandFailureAsync(new MongoClient(container.GetConnectionString()).GetDatabase("admin"));
 
     [Fact]
     public async Task Transient_transaction_error_retries_the_body_from_a_fresh_session_once()

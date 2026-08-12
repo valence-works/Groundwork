@@ -670,12 +670,18 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             new(fixture.GetUtcNow(), "unknown-commit-retry"), [new("record-1", fixture.GetUtcNow(), "{}")]);
         await ConfigureCommitFailureAsync(fixture.Database, new BsonDocument("times", 1), 91,
             ["UnknownTransactionCommitResult"]);
+        try
+        {
+            var result = await store.AppendAsync(batch);
+            var page = await store.QueryAsync(new(scope, TestDefinition.Stream, 10));
 
-        var result = await store.AppendAsync(batch);
-        var page = await store.QueryAsync(new(scope, TestDefinition.Stream, 10));
-
-        Assert.Equal(DiagnosticAppendStatus.Committed, result.Status);
-        Assert.Equal("1", Assert.Single(page.Records).Cursor.Value);
+            Assert.Equal(DiagnosticAppendStatus.Committed, result.Status);
+            Assert.Equal("1", Assert.Single(page.Records).Cursor.Value);
+        }
+        finally
+        {
+            await DisableCommitFailureAsync(fixture.Database);
+        }
     }
 
     [Fact]
@@ -721,13 +727,19 @@ public sealed class MongoDbDiagnosticRecordStoreConformanceTests(MongoDbReplicaS
             await ConfigureCommitFailureAsync(fixture.Database, new BsonDocument("times", 1), 2, [], token));
         await ConfigureCommitFailureAsync(fixture.Database, new BsonDocument("times", 1), 91,
             ["UnknownTransactionCommitResult"]);
+        try
+        {
+            var exception = await Assert.ThrowsAsync<DiagnosticAcknowledgementLostException>(async () =>
+                await store.AppendAsync(batch));
+            var retry = await store.AppendAsync(batch);
 
-        var exception = await Assert.ThrowsAsync<DiagnosticAcknowledgementLostException>(async () =>
-            await store.AppendAsync(batch));
-        var retry = await store.AppendAsync(batch);
-
-        Assert.Equal(DiagnosticOperationKind.Append, exception.OperationKind);
-        Assert.Contains(retry.Status, new[] { DiagnosticAppendStatus.Committed, DiagnosticAppendStatus.Replayed });
+            Assert.Equal(DiagnosticOperationKind.Append, exception.OperationKind);
+            Assert.Contains(retry.Status, new[] { DiagnosticAppendStatus.Committed, DiagnosticAppendStatus.Replayed });
+        }
+        finally
+        {
+            await DisableCommitFailureAsync(fixture.Database);
+        }
     }
 
     private static async Task ConfigureCommitFailureAsync(
