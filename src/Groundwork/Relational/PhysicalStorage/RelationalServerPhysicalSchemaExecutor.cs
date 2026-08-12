@@ -1217,7 +1217,12 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     return await action(connection, cancellationToken);
                 }
-                catch (Exception exception) when (exception is DbException or InvalidOperationException)
+                // A session killed mid-operation surfaces as whatever the driver's protocol state
+                // permits (SqlClient can throw NullReferenceException), so lock loss is classified
+                // by verifying ownership, not by exception type. Only the caller's own cancellation
+                // is propagated unexamined.
+                catch (Exception exception) when (
+                    exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
                 {
                     var verificationFailure = default(Exception);
                     var isOwned = false;
@@ -1232,8 +1237,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                                 resource,
                                 verificationTimeout.Token);
                         }
-                        catch (Exception ownershipException) when (
-                            ownershipException is DbException or InvalidOperationException or OperationCanceledException)
+                        catch (Exception ownershipException)
                         {
                             verificationFailure = ownershipException;
                         }

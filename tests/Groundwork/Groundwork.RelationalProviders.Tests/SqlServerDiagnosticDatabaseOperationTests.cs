@@ -4,6 +4,14 @@ namespace Groundwork.RelationalProviders.Tests;
 
 public sealed class SqlServerDiagnosticDatabaseOperationTests
 {
+    // Each scenario either requires a deadline to fire (the guarded work never completes, so any
+    // duration is deterministic and short keeps the test fast) or requires it NOT to fire (the work
+    // completes on its own, so the budget must be generous enough that a loaded runner cannot flip
+    // the outcome). Guard bounds the whole call strictly above every internal budget.
+    private static readonly TimeSpan ExpiringDeadline = TimeSpan.FromMilliseconds(20);
+    private static readonly TimeSpan GenerousBudget = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan Guard = TimeSpan.FromSeconds(30);
+
     [Fact]
     public async Task Timeout_reports_database_operation_and_server_session_diagnostics()
     {
@@ -11,9 +19,9 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_timeout",
                 "READ_COMMITTED_SNAPSHOT configuration",
-                TimeSpan.FromMilliseconds(20),
-                TimeSpan.FromMilliseconds(100),
-                TimeSpan.FromMilliseconds(20),
+                ExpiringDeadline,
+                GenerousBudget,
+                GenerousBudget,
                 cancellationToken => Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken),
                 () => ValueTask.CompletedTask,
                 _ => Task.FromResult("session=71,status=suspended,wait=LCK_M_X,blocker=54"),
@@ -37,9 +45,9 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_canceled",
                 "creation",
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromMilliseconds(100),
-                TimeSpan.FromMilliseconds(20),
+                GenerousBudget,
+                GenerousBudget,
+                GenerousBudget,
                 token => Task.FromCanceled(token),
                 () => ValueTask.CompletedTask,
                 _ =>
@@ -59,9 +67,9 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_failure",
                 "drop",
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromMilliseconds(100),
-                TimeSpan.FromMilliseconds(20),
+                GenerousBudget,
+                GenerousBudget,
+                GenerousBudget,
                 _ => Task.FromException(new IOException("drop failed")),
                 () => ValueTask.CompletedTask,
                 _ => Task.FromException<string>(new InvalidOperationException("diagnostics failed")),
@@ -82,9 +90,9 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_non_cooperative",
                 "creation",
-                TimeSpan.FromMilliseconds(20),
-                TimeSpan.FromMilliseconds(100),
-                TimeSpan.FromMilliseconds(20),
+                ExpiringDeadline,
+                GenerousBudget,
+                GenerousBudget,
                 _ => releaseExecution.Task,
                 () =>
                 {
@@ -93,7 +101,7 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
                     return ValueTask.CompletedTask;
                 },
                 _ => Task.FromResult("session=91,status=rollback"),
-                CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(1));
+                CancellationToken.None)).WaitAsync(Guard);
 
         Assert.Equal(1, abortCalls);
         Assert.Contains("groundwork_diagnostics_non_cooperative", exception.Message, StringComparison.Ordinal);
@@ -109,13 +117,13 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_stuck_diagnostics",
                 "drop",
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromMilliseconds(100),
-                TimeSpan.FromMilliseconds(20),
+                GenerousBudget,
+                GenerousBudget,
+                ExpiringDeadline,
                 _ => Task.FromException(new IOException("drop failed")),
                 () => ValueTask.CompletedTask,
                 _ => diagnostics.Task,
-                CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(1));
+                CancellationToken.None)).WaitAsync(Guard);
 
         Assert.IsType<IOException>(exception.InnerException);
         Assert.Contains("diagnostics unavailable", exception.Message, StringComparison.Ordinal);
@@ -132,13 +140,13 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
             SqlServerDiagnosticDatabaseOperation.ExecuteAsync(
                 "groundwork_diagnostics_poisoned",
                 "READ_COMMITTED_SNAPSHOT configuration",
-                TimeSpan.FromMilliseconds(20),
-                TimeSpan.FromMilliseconds(20),
-                TimeSpan.FromMilliseconds(20),
+                ExpiringDeadline,
+                ExpiringDeadline,
+                GenerousBudget,
                 _ => execution.Task,
                 () => new(abort.Task),
                 _ => Task.FromResult("session=101,status=rollback"),
-                CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(1));
+                CancellationToken.None)).WaitAsync(Guard);
 
         Assert.False(exception.OperationQuiesced);
         Assert.Contains("quiesced=False", exception.Message, StringComparison.Ordinal);
