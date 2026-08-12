@@ -1,15 +1,23 @@
 using Groundwork.Core.Indexing;
-using Groundwork.Core.Manifests;
-using Groundwork.Core.Queries;
 using Groundwork.Core.Intents;
+using Groundwork.Core.Manifests;
+using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.Queries;
 
 namespace Groundwork.SupportTickets;
 
+/// <summary>
+/// Declares the support-ticket storage units through the current physical-storage surface:
+/// logical indexes, bounded query declarations, and default physical-form resolution. Every
+/// repository query executes one of the bounded declarations below; nothing queries outside them.
+/// </summary>
 public static class SupportTicketManifest
 {
     public const string DocumentKind = "supportTicket";
     public const string CommentDocumentKind = "supportTicketComment";
     public const string SchemaVersion = "1.0.0";
+
+    // Logical index identities.
     public const string ByTicketNumber = "by-ticket-number";
     public const string ByCustomer = "by-customer";
     public const string ByStatus = "by-status";
@@ -18,108 +26,111 @@ public static class SupportTicketManifest
     public const string ByCommentTicket = "by-comment-ticket";
     public const string ByCommentAuthor = "by-comment-author";
 
-    public static StorageManifest Create() => Create(PhysicalizationPolicy.Portable);
+    // Bounded query identities, one per repository operation.
+    public const string FindByTicketNumber = "find-by-ticket-number";
+    public const string ListByCustomer = "list-by-customer";
+    public const string ListByStatus = "list-by-status";
+    public const string ListByAssignee = "list-by-assignee";
+    public const string ListByPriority = "list-by-priority";
+    public const string ListCommentsByTicket = "list-comments-by-ticket";
+    public const string ListCommentsByAuthor = "list-comments-by-author";
 
-    public static StorageManifest Create(
-        PhysicalizationPolicy physicalization,
-        IReadOnlySet<string>? physicalizedIndexes = null) =>
+    // Stable serialized paths addressed by runtime DocumentQuery comparisons.
+    public const string TicketNumberPath = "ticketNumber";
+    public const string CustomerIdPath = "customerId";
+    public const string StatusPath = "status";
+    public const string AssigneeIdPath = "assigneeId";
+    public const string PriorityPath = "priority";
+    public const string CommentAuthorIdPath = "authorId";
+
+    public static StorageManifest Create() =>
         new(
             new StorageManifestIdentity("support-tickets"),
             new StorageManifestOwner("groundwork.sample.support"),
             new StorageManifestVersion(SchemaVersion),
-            [
-                TicketUnit(physicalization, physicalizedIndexes ?? EmptyPhysicalizedIndexes),
-                CommentUnit(physicalization, physicalizedIndexes ?? EmptyPhysicalizedIndexes)
-            ],
+            [TicketUnit(), CommentUnit()],
             new HashSet<string> { "schema-history", "optimistic-concurrency" },
             []);
 
-    private static readonly IReadOnlySet<string> EmptyPhysicalizedIndexes = new HashSet<string>(StringComparer.Ordinal);
-
-    private static StorageUnit TicketUnit(PhysicalizationPolicy physicalization, IReadOnlySet<string> physicalizedIndexes) =>
-        new(
-            new StorageUnitIdentity(DocumentKind),
+    private static StorageUnit TicketUnit() =>
+        Unit(
+            DocumentKind,
             "Support ticket",
-            StorageIntent.PortableDocument(),
-            LifecyclePolicy.Mutable,
-            IdentityPolicy.StringId(),
-            TenancyPolicy.Global,
-            ConcurrencyPolicy.Optimistic(),
-            SerializationPolicy.Json(),
-            TicketIndexes(physicalizedIndexes),
-            TicketQueries(),
-            physicalization);
+            [
+                Keyword(ByTicketNumber, TicketNumberPath, isUnique: true),
+                Keyword(ByCustomer, CustomerIdPath),
+                Keyword(ByStatus, StatusPath),
+                Keyword(ByAssignee, AssigneeIdPath),
+                Keyword(ByPriority, PriorityPath)
+            ],
+            [
+                PointLookup(FindByTicketNumber, ByTicketNumber),
+                List(ListByCustomer, ByCustomer),
+                List(ListByStatus, ByStatus),
+                List(ListByAssignee, ByAssignee),
+                List(ListByPriority, ByPriority)
+            ]);
 
-    private static StorageUnit CommentUnit(PhysicalizationPolicy physicalization, IReadOnlySet<string> physicalizedIndexes) =>
-        new(
-            new StorageUnitIdentity(CommentDocumentKind),
+    private static StorageUnit CommentUnit() =>
+        Unit(
+            CommentDocumentKind,
             "Support ticket comment",
+            [
+                Keyword(ByCommentTicket, TicketNumberPath),
+                Keyword(ByCommentAuthor, CommentAuthorIdPath)
+            ],
+            [
+                List(ListCommentsByTicket, ByCommentTicket),
+                List(ListCommentsByAuthor, ByCommentAuthor)
+            ]);
+
+    private static StorageUnit Unit(
+        string documentKind,
+        string displayName,
+        IReadOnlyList<LogicalIndexDeclaration> logicalIndexes,
+        IReadOnlyList<BoundedQueryDeclaration> boundedQueries) =>
+        StorageUnit.Create(
+            new StorageUnitIdentity(documentKind),
+            displayName,
             StorageIntent.PortableDocument(),
             LifecyclePolicy.Mutable,
             IdentityPolicy.StringId(),
             TenancyPolicy.Global,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            CommentIndexes(physicalizedIndexes),
-            CommentQueries(),
-            physicalization);
+            new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Default(),
+                logicalIndexes,
+                boundedQueries));
 
-    private static IReadOnlyList<IndexDeclaration> TicketIndexes(IReadOnlySet<string> physicalizedIndexes) =>
-    [
-        Keyword(ByTicketNumber, "ticketNumber", physicalizedIndexes, isUnique: true),
-        Keyword(ByCustomer, "customerId", physicalizedIndexes),
-        Keyword(ByStatus, "status", physicalizedIndexes),
-        Keyword(ByAssignee, "assigneeId", physicalizedIndexes),
-        Keyword(ByPriority, "priority", physicalizedIndexes)
-    ];
-
-    private static IReadOnlyList<IndexDeclaration> CommentIndexes(IReadOnlySet<string> physicalizedIndexes) =>
-    [
-        Keyword(ByCommentTicket, "ticketNumber", physicalizedIndexes),
-        Keyword(ByCommentAuthor, "authorId", physicalizedIndexes)
-    ];
-
-    private static IReadOnlyList<PortableQueryDeclaration> TicketQueries() =>
-    [
-        Query("find-by-ticket-number", ByTicketNumber),
-        Query("list-by-customer", ByCustomer, QuerySortSupport.Both, QueryPagingSupport.Offset),
-        Query("list-by-status", ByStatus, QuerySortSupport.Both, QueryPagingSupport.Offset),
-        Query("list-by-assignee", ByAssignee, QuerySortSupport.Both, QueryPagingSupport.Offset),
-        Query("list-by-priority", ByPriority, QuerySortSupport.Both, QueryPagingSupport.Offset)
-    ];
-
-    private static IReadOnlyList<PortableQueryDeclaration> CommentQueries() =>
-    [
-        Query("list-comments-by-ticket", ByCommentTicket, QuerySortSupport.Both, QueryPagingSupport.Offset),
-        Query("list-comments-by-author", ByCommentAuthor, QuerySortSupport.Both, QueryPagingSupport.Offset)
-    ];
-
-    private static IndexDeclaration Keyword(
-        string identity,
-        string field,
-        IReadOnlySet<string> physicalizedIndexes,
-        bool isUnique = false) =>
+    private static LogicalIndexDeclaration Keyword(string identity, string path, bool isUnique = false) =>
         new(
             identity,
-            [new IndexField(field)],
+            [new IndexField(path)],
             IndexValueKind.Keyword,
             isUnique,
-            true,
-            MissingValueBehavior.Excluded,
-            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-            physicalizedIndexes.Contains(identity)
-                ? IndexPhysicalizationPolicy.Optimized
-                : IndexPhysicalizationPolicy.Default);
+            MissingValueBehavior.Excluded);
 
-    private static PortableQueryDeclaration Query(
-        string identity,
-        string indexName,
-        QuerySortSupport sort = QuerySortSupport.None,
-        QueryPagingSupport paging = QueryPagingSupport.None) =>
+    private static readonly IReadOnlySet<PortableQueryOperation> EqualOnly =
+        new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
+
+    private static BoundedQueryDeclaration PointLookup(string identity, string indexIdentity) =>
         new(
             identity,
-            indexName,
-            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-            sort,
-            paging);
+            indexIdentity,
+            EqualOnly,
+            QuerySortSupport.None,
+            QueryPagingSupport.None,
+            BoundedQueryExecutionClass.ScaleBearing);
+
+    private static BoundedQueryDeclaration List(string identity, string indexIdentity) =>
+        new(
+            identity,
+            indexIdentity,
+            EqualOnly,
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true);
 }

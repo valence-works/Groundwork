@@ -32,7 +32,7 @@ indexes, durable operation tombstones, and bounded `ctid` cleanup.
 
 ## Factory and session lifecycle
 
-`PostgreSqlDocumentStoreFactory.CreateAsync` materializes through one short-lived pooled connection,
+`PostgreSqlDocumentStoreFactory.CreateAsync` (retired portable model, `GW0005`; use `OpenPhysicalAsync` per ADR 0006) materializes through one short-lived pooled connection,
 disposes it before returning, and returns `PostgreSqlDocumentStore` directly. The returned store is
 stateless: independent operations acquire concurrent pooled connections, while an explicit unit of
 work owns one connection and transaction until completion. Pool limits and timeouts—not a

@@ -19,8 +19,7 @@ public sealed class SupportTicketApiTests : IAsyncDisposable
             {
                 builder
                     .UseSetting("Groundwork:Provider", SupportTicketProvider.Sqlite.ToString())
-                    .UseSetting("Groundwork:ConnectionString", $"Data Source={databasePath}")
-                    .UseSetting("Groundwork:Physicalization", "Optimized");
+                    .UseSetting("Groundwork:ConnectionString", $"Data Source={databasePath}");
             });
     }
 
@@ -40,7 +39,7 @@ public sealed class SupportTicketApiTests : IAsyncDisposable
         var opened = await ReadTicketAsync(create);
 
         Assert.Equal(SupportTicketProvider.Sqlite.ToString(), health!.Provider);
-        Assert.Equal("Optimized", health.Physicalization);
+        Assert.Equal("physical-routes", health.Storage);
 
         var assign = await client.PostAsJsonAsync($"/tickets/{opened.Ticket.TicketNumber}/assign", new AssignTicketRequest("agent-alex", opened.Version));
         var assigned = await ReadTicketAsync(assign);
@@ -114,7 +113,7 @@ public sealed class SupportTicketApiTests : IAsyncDisposable
             ?? throw new InvalidOperationException("Inbox admission response was empty.");
     }
 
-    private sealed record SupportTicketHealthResponse(string Provider, string Physicalization);
+    private sealed record SupportTicketHealthResponse(string Provider, string Storage);
 
     private sealed record AdmitInboxMessageRequest(string Consumer, string MessageKey);
 

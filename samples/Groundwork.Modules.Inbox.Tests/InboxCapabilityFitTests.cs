@@ -2,6 +2,7 @@ using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Modules.Inbox;
 using Xunit;
 
@@ -20,7 +21,7 @@ public sealed class InboxCapabilityFitTests
             new StorageManifestOwner("community.inbox"),
             new StorageManifestVersion("1.0.0"),
             [
-                new StorageUnit(
+                StorageUnit.Create(
                     new StorageUnitIdentity("event-inbox"),
                     "Event inbox",
                     StorageIntent.Operational(
@@ -32,9 +33,9 @@ public sealed class InboxCapabilityFitTests
                     TenancyPolicy.Global,
                     ConcurrencyPolicy.Optimistic(),
                     SerializationPolicy.Json(),
-                    [],
-                    [],
-                    PhysicalizationPolicy.Portable)
+                    new StorageUnitPhysicalStorage(
+                        StorageUnitProvisioningMode.Declared,
+                        PhysicalStoragePolicy.Default()))
             ],
             new HashSet<string>(),
             []);

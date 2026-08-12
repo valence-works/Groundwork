@@ -1,6 +1,7 @@
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Modules.Inbox;
 using Groundwork.Sqlite;
 
@@ -19,7 +20,7 @@ public static class SupportTicketExternalModuleManifest
             new StorageManifestOwner("groundwork.sample.support"),
             new StorageManifestVersion("1.0.0"),
             [
-                new StorageUnit(
+                StorageUnit.Create(
                     new StorageUnitIdentity(InboxUnit),
                     "Incoming ticket event inbox",
                     StorageIntent.Operational(
@@ -31,9 +32,9 @@ public static class SupportTicketExternalModuleManifest
                     TenancyPolicy.Global,
                     ConcurrencyPolicy.Optimistic(),
                     SerializationPolicy.Json(),
-                    [],
-                    [],
-                    PhysicalizationPolicy.Portable)
+                    new StorageUnitPhysicalStorage(
+                        StorageUnitProvisioningMode.Declared,
+                        PhysicalStoragePolicy.Default()))
             ],
             new HashSet<string>(),
             []);

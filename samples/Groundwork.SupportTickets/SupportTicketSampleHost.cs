@@ -1,11 +1,15 @@
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.Manifests;
-using Groundwork.Core.Validation;
+using Groundwork.Core.PhysicalStorage;
+using Groundwork.Core.SchemaEvolution;
+using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.MongoDb.Documents;
 using Groundwork.Modules.Inbox;
 using Groundwork.Modules.Inbox.Sqlite;
+using Groundwork.PostgreSql;
 using Groundwork.PostgreSql.Documents;
+using Groundwork.SqlServer;
 using Groundwork.SqlServer.Documents;
 using Groundwork.Sqlite;
 using Groundwork.Sqlite.Documents;
@@ -54,10 +58,16 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
         SupportTicketStorageOptions options,
         CancellationToken cancellationToken = default)
     {
-        var manifest = SupportTicketManifest.Create(options.EffectivePhysicalization, options.EffectivePhysicalizedIndexes);
-        var (store, disposables) = await CreateStoreAsync(options, manifest, cancellationToken);
+        var manifest = SupportTicketManifest.Create();
+        var (store, ticketQueries, commentQueries, disposables) = await CreateStoreAsync(options, manifest, cancellationToken);
         var (inbox, externalModuleFit) = await CreateExternalModulesAsync(disposables, cancellationToken);
-        return new SupportTicketSampleHost(manifest, store, new SupportTicketRepository(store), inbox, externalModuleFit, disposables);
+        return new SupportTicketSampleHost(
+            manifest,
+            store,
+            new SupportTicketRepository(store, ticketQueries, commentQueries),
+            inbox,
+            externalModuleFit,
+            disposables);
     }
 
     public async ValueTask DisposeAsync()
@@ -66,7 +76,11 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
             await disposable.DisposeAsync();
     }
 
-    private static async Task<(IDocumentStore Store, List<IAsyncDisposable> Disposables)> CreateStoreAsync(
+    private static async Task<(
+        IDocumentStore Store,
+        IBoundedDocumentStore TicketQueries,
+        IBoundedDocumentStore CommentQueries,
+        List<IAsyncDisposable> Disposables)> CreateStoreAsync(
         SupportTicketStorageOptions options,
         StorageManifest manifest,
         CancellationToken cancellationToken)
@@ -76,20 +90,26 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
         {
             case SupportTicketProvider.Sqlite:
                 {
+                    var provider = Provider("groundwork-sqlite");
+                    var target = PhysicalSchemaTargetCompiler.Compile(
+                        manifest,
+                        provider,
+                        SqliteGroundworkCapabilities.PhysicalNames);
                     var builder = new SqliteConnectionStringBuilder(options.ConnectionString);
+                    SqlitePhysicalDocumentStore store;
                     if (builder.Mode == SqliteOpenMode.Memory || builder.DataSource == ":memory:")
                     {
                         var connection = new SqliteConnection(options.ConnectionString);
                         try
                         {
-                            var memoryStore = await SqliteDocumentStoreFactory.CreateAsync(
+                            store = await SqliteDocumentStoreFactory.OpenPhysicalAsync(
                                 connection,
                                 manifest,
-                                Provider("groundwork-sqlite"),
-                                Groundwork.Documents.Scoping.DocumentStoreAccess.Global,
+                                provider,
+                                DocumentStoreAccess.Global,
+                                options: AutoApplyOnStartup(),
                                 cancellationToken: cancellationToken);
                             disposables.Add(connection);
-                            return (memoryStore, disposables);
                         }
                         catch
                         {
@@ -97,46 +117,77 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
                             throw;
                         }
                     }
+                    else
+                    {
+                        store = await SqliteDocumentStoreFactory.OpenPhysicalAsync(
+                            options.ConnectionString,
+                            manifest,
+                            provider,
+                            DocumentStoreAccess.Global,
+                            options: AutoApplyOnStartup(),
+                            cancellationToken: cancellationToken);
+                    }
 
-                    var store = await SqliteDocumentStoreFactory.CreateAsync(
-                        options.ConnectionString,
-                        manifest,
-                        Provider("groundwork-sqlite"),
-                        Groundwork.Documents.Scoping.DocumentStoreAccess.Global,
-                        cancellationToken: cancellationToken);
-                    return (store, disposables);
+                    return (
+                        store,
+                        SqlitePhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.DocumentKind), provider),
+                        SqlitePhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.CommentDocumentKind), provider),
+                        disposables);
                 }
             case SupportTicketProvider.PostgreSql:
                 {
-                    var store = await PostgreSqlDocumentStoreFactory.CreateAsync(
+                    var provider = Provider("groundwork-postgresql");
+                    var target = PhysicalSchemaTargetCompiler.Compile(
+                        manifest,
+                        provider,
+                        PostgreSqlGroundworkCapabilities.PhysicalNames);
+                    var store = await PostgreSqlDocumentStoreFactory.OpenPhysicalAsync(
                         options.ConnectionString,
                         manifest,
-                        Provider("groundwork-postgresql"),
-                        Groundwork.Documents.Scoping.DocumentStoreAccess.Global,
+                        provider,
+                        DocumentStoreAccess.Global,
+                        options: AutoApplyOnStartup(),
                         cancellationToken: cancellationToken);
-                    return (store, disposables);
+                    return (
+                        store,
+                        PostgreSqlPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.DocumentKind), provider),
+                        PostgreSqlPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.CommentDocumentKind), provider),
+                        disposables);
                 }
             case SupportTicketProvider.SqlServer:
                 {
-                    var store = await SqlServerDocumentStoreFactory.CreateAsync(
+                    var provider = Provider("groundwork-sqlserver");
+                    var target = PhysicalSchemaTargetCompiler.Compile(
+                        manifest,
+                        provider,
+                        SqlServerGroundworkCapabilities.PhysicalNames);
+                    var store = await SqlServerDocumentStoreFactory.OpenPhysicalAsync(
                         options.ConnectionString,
                         manifest,
-                        Provider("groundwork-sqlserver"),
-                        Groundwork.Documents.Scoping.DocumentStoreAccess.Global,
+                        provider,
+                        DocumentStoreAccess.Global,
+                        options: AutoApplyOnStartup(),
                         cancellationToken: cancellationToken);
-                    return (store, disposables);
+                    return (
+                        store,
+                        SqlServerPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.DocumentKind), provider),
+                        SqlServerPhysicalQueryRuntime.Create(store, manifest, Route(target, SupportTicketManifest.CommentDocumentKind), provider),
+                        disposables);
                 }
             case SupportTicketProvider.MongoDb:
                 {
-                    var handle = await MongoDbDocumentStoreFactory.CreateAsync(
+                    var handle = await MongoDbDocumentStoreFactory.OpenPhysicalAsync(
                         options.ConnectionString,
                         options.DatabaseName ?? "groundwork_support_tickets",
                         manifest,
                         Provider("groundwork-mongodb"),
-                        Groundwork.Documents.Scoping.DocumentStoreAccess.Global,
+                        DocumentStoreAccess.Global,
+                        options: new MongoDbPhysicalDocumentStoreOptions { AutoApplyOnStartup = true },
                         cancellationToken: cancellationToken);
                     disposables.Add(handle);
-                    return (handle.Store, disposables);
+
+                    // The MongoDB physical store is also the bounded-query store for every unit.
+                    return (handle.Store, handle.Store, handle.Store, disposables);
                 }
             default:
                 throw new ArgumentOutOfRangeException(nameof(options), options.Provider, "Unsupported support-ticket provider.");
@@ -156,4 +207,9 @@ public sealed class SupportTicketSampleHost : IAsyncDisposable
     }
 
     private static ProviderIdentity Provider(string name) => new(name, "1.0.0");
+
+    private static GroundworkRuntimeSchemaAdmissionOptions AutoApplyOnStartup() => new() { AutoApplyOnStartup = true };
+
+    private static ExecutableStorageRoute Route(PhysicalSchemaTarget target, string documentKind) =>
+        target.Routes.Single(route => route.StorageUnit.Value == documentKind);
 }

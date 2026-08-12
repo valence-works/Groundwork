@@ -1,4 +1,3 @@
-using Groundwork.Core.Manifests;
 using Microsoft.Extensions.Configuration;
 
 namespace Groundwork.SupportTickets;
@@ -6,53 +5,20 @@ namespace Groundwork.SupportTickets;
 public sealed record SupportTicketStorageOptions(
     SupportTicketProvider Provider,
     string ConnectionString,
-    string? DatabaseName = null,
-    PhysicalizationPolicy? Physicalization = null,
-    IReadOnlySet<string>? PhysicalizedIndexes = null)
+    string? DatabaseName = null)
 {
-    public PhysicalizationPolicy EffectivePhysicalization => Physicalization ?? PhysicalizationPolicy.Portable;
-    public IReadOnlySet<string> EffectivePhysicalizedIndexes => PhysicalizedIndexes ?? EmptyPhysicalizedIndexes;
-
     public static SupportTicketStorageOptions FromConfiguration(IConfiguration configuration)
     {
         var section = configuration.GetSection("Groundwork");
         var provider = Enum.TryParse<SupportTicketProvider>(section["Provider"], ignoreCase: true, out var parsedProvider)
             ? parsedProvider
             : SupportTicketProvider.Sqlite;
-        var physicalization = Enum.TryParse<PhysicalizationKind>(section["Physicalization"], ignoreCase: true, out var parsedPhysicalization)
-            ? new PhysicalizationPolicy(parsedPhysicalization)
-            : PhysicalizationPolicy.Portable;
         var connectionString = section["ConnectionString"] ?? configuration.GetConnectionString("Groundwork")
             ?? (provider == SupportTicketProvider.Sqlite ? "Data Source=support-tickets.db" : null)
             ?? throw new InvalidOperationException($"A connection string must be configured for provider '{provider}'.");
-        var physicalizedIndexes = ParsePhysicalizedIndexes(section);
 
-        return new SupportTicketStorageOptions(
-            provider,
-            connectionString,
-            section["DatabaseName"],
-            physicalization,
-            physicalizedIndexes);
+        return new SupportTicketStorageOptions(provider, connectionString, section["DatabaseName"]);
     }
-
-    private static readonly IReadOnlySet<string> EmptyPhysicalizedIndexes = new HashSet<string>(StringComparer.Ordinal);
-
-    private static IReadOnlySet<string> ParsePhysicalizedIndexes(IConfigurationSection section)
-    {
-        var values = section
-            .GetSection("PhysicalizedIndexes")
-            .GetChildren()
-            .Select(child => child.Value)
-            .Concat(SplitPhysicalizedIndexes(section["PhysicalizedIndexes"]))
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => value!.Trim());
-
-        return new HashSet<string>(values, StringComparer.Ordinal);
-    }
-
-    private static IEnumerable<string> SplitPhysicalizedIndexes(string? value) =>
-        value?.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        ?? [];
 }
 
 public enum SupportTicketProvider

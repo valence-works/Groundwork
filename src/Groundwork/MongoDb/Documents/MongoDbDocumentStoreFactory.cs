@@ -163,6 +163,10 @@ public static class MongoDbDocumentStoreFactory
             cancellationToken);
     }
 
+    [Obsolete(
+        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+        DiagnosticId = "GW0005")]
     public static async Task<MongoDbDocumentStoreHandle> CreateAsync(
         string connectionString,
         string databaseName,
@@ -503,6 +507,10 @@ public sealed class MongoDbPhysicalDocumentStoreHandle(
     public ValueTask DisposeAsync() => clientLease.DisposeAsync();
 }
 
+[Obsolete(
+    "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+    + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+    DiagnosticId = "GW0005")]
 public sealed class MongoDbDocumentStoreHandle(IDisposable? client, MongoDbDocumentStore store) : IAsyncDisposable
 {
     private readonly MongoDbClientLease clientLease = new(client);

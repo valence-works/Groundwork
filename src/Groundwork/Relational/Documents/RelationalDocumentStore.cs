@@ -16,6 +16,11 @@ using Groundwork.Relational.Physicalization;
 
 namespace Groundwork.Relational.Documents;
 
+[Obsolete(
+    "The portable document model is retired (ADR 0006). Open route-driven stores with the provider "
+    + "factory's OpenPhysicalAsync and execute declared bounded DocumentQuery plans; removal follows "
+    + "with the announced breaking cleanup.",
+    DiagnosticId = "GW0005")]
 public class RelationalDocumentStore : IDocumentStore
 {
     private readonly DbConnection? connection;

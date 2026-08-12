@@ -51,6 +51,10 @@ public static class SqlServerDocumentStoreFactory
             target.Provider);
     }
 
+    [Obsolete(
+        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+        DiagnosticId = "GW0005")]
     public static Task<SqlServerDocumentStore> CreateAsync(
         string connectionString,
         StorageManifest manifest,
@@ -68,6 +72,10 @@ public static class SqlServerDocumentStoreFactory
             scopeObserver,
             cancellationToken);
 
+    [Obsolete(
+        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+        DiagnosticId = "GW0005")]
     internal static async Task<SqlServerDocumentStore> CreateAsync(
         string connectionString,
         StorageManifest manifest,

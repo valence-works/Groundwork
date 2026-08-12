@@ -6,6 +6,10 @@ using Microsoft.Data.Sqlite;
 
 namespace Groundwork.Sqlite.Documents;
 
+[Obsolete(
+    "The portable document model is retired (ADR 0006). Use SqliteDocumentStoreFactory.OpenPhysicalAsync "
+    + "and execute declared bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+    DiagnosticId = "GW0005")]
 public sealed class SqliteDocumentStore : RelationalDocumentStore
 {
     internal SqliteDocumentStore(SqliteConnection connection, StorageManifest manifest, DocumentStoreAccess access, IStorageScopeObserver? scopeObserver = null)

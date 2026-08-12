@@ -1,9 +1,17 @@
 using System.Text.Json;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Documents.Store;
 
 namespace Groundwork.SupportTickets;
 
-public sealed class SupportTicketRepository(IDocumentStore store)
+/// <summary>
+/// Persists tickets and comments through <see cref="IDocumentStore"/> and executes only the
+/// bounded queries declared by <see cref="SupportTicketManifest"/> through <see cref="IBoundedDocumentStore"/>.
+/// </summary>
+public sealed class SupportTicketRepository(
+    IDocumentStore documents,
+    IBoundedDocumentStore ticketQueries,
+    IBoundedDocumentStore commentQueries)
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
@@ -12,7 +20,7 @@ public sealed class SupportTicketRepository(IDocumentStore store)
         if (await LoadAsync(ticket.TicketNumber, cancellationToken) is not null)
             throw new SupportTicketConflictException($"Ticket '{ticket.TicketNumber}' already exists.");
 
-        var result = await store.SaveJsonAsync(
+        var result = await documents.SaveJsonAsync(
             SupportTicketManifest.DocumentKind,
             ticket.TicketNumber,
             SupportTicketManifest.SchemaVersion,
@@ -25,35 +33,43 @@ public sealed class SupportTicketRepository(IDocumentStore store)
 
     public async Task<SupportTicketDocument?> LoadAsync(string ticketNumber, CancellationToken cancellationToken = default)
     {
-        var envelope = await store.LoadAsync(SupportTicketManifest.DocumentKind, ticketNumber, cancellationToken);
+        var envelope = await documents.LoadAsync(SupportTicketManifest.DocumentKind, ticketNumber, cancellationToken);
         return envelope is null ? null : ToTicket(envelope);
     }
 
     public async Task<SupportTicketDocument?> FindByTicketNumberAsync(string ticketNumber, CancellationToken cancellationToken = default)
     {
-        var tickets = await QueryAsync(SupportTicketManifest.ByTicketNumber, ticketNumber, cancellationToken);
-        return tickets.SingleOrDefault();
+        var envelope = await ticketQueries.FirstOrDefaultAsync(
+            TicketQuery(SupportTicketManifest.FindByTicketNumber, SupportTicketManifest.TicketNumberPath, ticketNumber)
+                .Select(BoundedQueryResultOperation.First),
+            cancellationToken);
+
+        return envelope is null ? null : ToTicket(envelope);
     }
 
     public Task<IReadOnlyList<SupportTicketDocument>> ListByCustomerAsync(string customerId, CancellationToken cancellationToken = default) =>
-        QueryAsync(SupportTicketManifest.ByCustomer, customerId, cancellationToken);
+        QueryTicketsAsync(SupportTicketManifest.ListByCustomer, SupportTicketManifest.CustomerIdPath, customerId, cancellationToken);
 
     public Task<IReadOnlyList<SupportTicketDocument>> ListByStatusAsync(string status, CancellationToken cancellationToken = default) =>
-        QueryAsync(SupportTicketManifest.ByStatus, status, cancellationToken);
+        QueryTicketsAsync(SupportTicketManifest.ListByStatus, SupportTicketManifest.StatusPath, status, cancellationToken);
 
     public Task<IReadOnlyList<SupportTicketDocument>> ListByAssigneeAsync(string assigneeId, CancellationToken cancellationToken = default) =>
-        QueryAsync(SupportTicketManifest.ByAssignee, assigneeId, cancellationToken);
+        QueryTicketsAsync(SupportTicketManifest.ListByAssignee, SupportTicketManifest.AssigneeIdPath, assigneeId, cancellationToken);
 
     public Task<IReadOnlyList<SupportTicketDocument>> ListByPriorityAsync(string priority, CancellationToken cancellationToken = default) =>
-        QueryAsync(SupportTicketManifest.ByPriority, priority, cancellationToken);
+        QueryTicketsAsync(SupportTicketManifest.ListByPriority, SupportTicketManifest.PriorityPath, priority, cancellationToken);
 
     public async Task<IReadOnlyList<SupportTicketCommentDocument>> ListCommentsAsync(string ticketNumber, CancellationToken cancellationToken = default)
     {
-        var envelopes = await store.QueryAsync(
-            new DocumentStoreQuery(SupportTicketManifest.CommentDocumentKind, SupportTicketManifest.ByCommentTicket, ticketNumber),
+        var page = await commentQueries.QueryAsync(
+            EqualityQuery(
+                SupportTicketManifest.CommentDocumentKind,
+                SupportTicketManifest.ListCommentsByTicket,
+                SupportTicketManifest.TicketNumberPath,
+                ticketNumber),
             cancellationToken);
 
-        return envelopes
+        return page.Documents
             .Select(ToComment)
             .OrderBy(comment => comment.Comment.CreatedAt)
             .ThenBy(comment => comment.Comment.CommentId, StringComparer.Ordinal)
@@ -114,7 +130,7 @@ public sealed class SupportTicketRepository(IDocumentStore store)
             authorId,
             body,
             createdAt ?? DateTimeOffset.UtcNow);
-        var result = await store.SaveJsonAsync(
+        var result = await documents.SaveJsonAsync(
             SupportTicketManifest.CommentDocumentKind,
             comment.CommentId,
             SupportTicketManifest.SchemaVersion,
@@ -125,17 +141,24 @@ public sealed class SupportTicketRepository(IDocumentStore store)
         return ToSavedComment(result, $"Comment '{comment.CommentId}' already exists.");
     }
 
-    private async Task<IReadOnlyList<SupportTicketDocument>> QueryAsync(
-        string indexName,
+    private async Task<IReadOnlyList<SupportTicketDocument>> QueryTicketsAsync(
+        string queryIdentity,
+        string path,
         string value,
         CancellationToken cancellationToken)
     {
-        var envelopes = await store.QueryAsync(
-            new DocumentStoreQuery(SupportTicketManifest.DocumentKind, indexName, value),
-            cancellationToken);
-
-        return envelopes.Select(ToTicket).ToList();
+        var page = await ticketQueries.QueryAsync(TicketQuery(queryIdentity, path, value), cancellationToken);
+        return page.Documents.Select(ToTicket).ToList();
     }
+
+    private static DocumentQuery TicketQuery(string queryIdentity, string path, string value) =>
+        EqualityQuery(SupportTicketManifest.DocumentKind, queryIdentity, path, value);
+
+    private static DocumentQuery EqualityQuery(string documentKind, string queryIdentity, string path, string value) =>
+        new(
+            documentKind,
+            queryIdentity,
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal(path, value))]);
 
     private async Task<SupportTicketDocument> RequireAsync(string ticketNumber, CancellationToken cancellationToken)
     {
@@ -149,7 +172,7 @@ public sealed class SupportTicketRepository(IDocumentStore store)
         CancellationToken cancellationToken,
         string? conflictMessage = null)
     {
-        var result = await store.SaveJsonAsync(
+        var result = await documents.SaveJsonAsync(
             SupportTicketManifest.DocumentKind,
             ticket.TicketNumber,
             SupportTicketManifest.SchemaVersion,

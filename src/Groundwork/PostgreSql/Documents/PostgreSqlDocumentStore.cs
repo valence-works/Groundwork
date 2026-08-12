@@ -6,6 +6,10 @@ using Npgsql;
 
 namespace Groundwork.PostgreSql.Documents;
 
+[Obsolete(
+    "The portable document model is retired (ADR 0006). Use PostgreSqlDocumentStoreFactory.OpenPhysicalAsync "
+    + "and execute declared bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+    DiagnosticId = "GW0005")]
 public sealed class PostgreSqlDocumentStore : RelationalDocumentStore
 {
     internal PostgreSqlDocumentStore(NpgsqlConnection connection, StorageManifest manifest, DocumentStoreAccess access, IStorageScopeObserver? scopeObserver = null)

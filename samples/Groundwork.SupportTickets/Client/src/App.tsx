@@ -304,8 +304,8 @@ export function App() {
         <div className="provider-card quiet">
           <ShieldCheck size={18} />
           <div>
-            <span>Physicalization</span>
-            <strong>{formatPhysicalization(health?.physicalization)}</strong>
+            <span>Storage</span>
+            <strong>{formatStorage(health?.storage)}</strong>
           </div>
         </div>
       </aside>
@@ -637,12 +637,12 @@ function formatDate(value?: string | null) {
   }).format(new Date(value));
 }
 
-function formatPhysicalization(value?: string) {
+function formatStorage(value?: string) {
   if (!value) {
     return "Loading";
   }
 
-  return value.includes("Optimized") ? "Optimized" : "Portable";
+  return value === "physical-routes" ? "Physical routes" : value;
 }
 
 function nextAssignee(current: string) {

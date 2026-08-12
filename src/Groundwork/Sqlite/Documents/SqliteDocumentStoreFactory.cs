@@ -111,6 +111,10 @@ public static class SqliteDocumentStoreFactory
         return target;
     }
 
+    [Obsolete(
+        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+        DiagnosticId = "GW0005")]
     public static async Task<SqliteDocumentStore> CreateAsync(
         SqliteConnection connection,
         StorageManifest manifest,
@@ -132,6 +136,10 @@ public static class SqliteDocumentStoreFactory
         return new SqliteDocumentStore(connection, manifest, access, scopeObserver);
     }
 
+    [Obsolete(
+        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+        DiagnosticId = "GW0005")]
     public static Task<SqliteDocumentStore> CreateAsync(
         string connectionString,
         StorageManifest manifest,
@@ -149,6 +157,10 @@ public static class SqliteDocumentStoreFactory
             scopeObserver,
             cancellationToken);
 
+    [Obsolete(
+        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+        DiagnosticId = "GW0005")]
     internal static Task<SqliteDocumentStore> CreateAsync(
         string connectionString,
         StorageManifest manifest,
@@ -167,6 +179,10 @@ public static class SqliteDocumentStoreFactory
             scopeObserver,
             cancellationToken);
 
+    [Obsolete(
+        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
+        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+        DiagnosticId = "GW0005")]
     internal static async Task<SqliteDocumentStore> CreateAsync(
         string connectionString,
         StorageManifest manifest,

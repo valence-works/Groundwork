@@ -6,6 +6,10 @@ using Microsoft.Data.SqlClient;
 
 namespace Groundwork.SqlServer.Documents;
 
+[Obsolete(
+    "The portable document model is retired (ADR 0006). Use SqlServerDocumentStoreFactory.OpenPhysicalAsync "
+    + "and execute declared bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
+    DiagnosticId = "GW0005")]
 public sealed class SqlServerDocumentStore : RelationalDocumentStore
 {
     internal SqlServerDocumentStore(SqlConnection connection, StorageManifest manifest, DocumentStoreAccess access, IStorageScopeObserver? scopeObserver = null)
