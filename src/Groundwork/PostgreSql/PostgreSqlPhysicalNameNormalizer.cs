@@ -29,21 +29,8 @@ public sealed class PostgreSqlPhysicalNameNormalizer : IProviderPhysicalNameNorm
         return NormalizePhysicalName(logicalName);
     }
 
-    public string GetCollisionScope(ProviderPhysicalNameContext context) => context.ObjectKind switch
-    {
-        PhysicalObjectKind.PrimaryStorage or
-        PhysicalObjectKind.LinkedIndexStorage or
-        PhysicalObjectKind.CollectionElementStorage or
-        PhysicalObjectKind.PhysicalIndex or
-        PhysicalObjectKind.SchemaHistory => "schema-relations",
-        PhysicalObjectKind.EnvelopeField or PhysicalObjectKind.ProjectedField =>
-            $"{context.StorageUnit.Value}:columns",
-        PhysicalObjectKind.LinkedIndexField or PhysicalObjectKind.LinkedProjectedField =>
-            $"{context.StorageUnit.Value}:linked-columns",
-        PhysicalObjectKind.CollectionElementField =>
-            $"{context.StorageUnit.Value}:collection-element-columns",
-        _ => throw new ArgumentOutOfRangeException(nameof(context), context.ObjectKind, null)
-    };
+    public string GetCollisionScope(ProviderPhysicalNameContext context) =>
+        ProviderPhysicalNameNormalizerDefaults.GetCollisionScope(context, "schema-relations");
 
     private static string NormalizePhysicalName(string value)
     {
@@ -52,16 +39,6 @@ public sealed class PostgreSqlPhysicalNameNormalizer : IProviderPhysicalNameNorm
             return value;
         var suffix = "_" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..12].ToLowerInvariant();
         var prefixBudget = maximumBytes - Encoding.UTF8.GetByteCount(suffix);
-        var builder = new StringBuilder();
-        var used = 0;
-        foreach (var rune in value.EnumerateRunes())
-        {
-            var bytes = rune.Utf8SequenceLength;
-            if (used + bytes > prefixBudget)
-                break;
-            builder.Append(rune);
-            used += bytes;
-        }
-        return builder.Append(suffix).ToString();
+        return PhysicalNameBudget.TruncateUtf8(value, prefixBudget) + suffix;
     }
 }

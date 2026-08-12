@@ -6,6 +6,7 @@ using Groundwork.Core.Validation;
 using Groundwork.Materialization;
 using Groundwork.Provider.Relational;
 using Groundwork.Documents.Scoping;
+using Groundwork.Relational.Documents;
 using Groundwork.Sqlite.Materialization;
 using Groundwork.Sqlite.PhysicalStorage;
 using Microsoft.Data.Sqlite;
@@ -85,7 +86,7 @@ public static class SqliteDocumentStoreFactory
             target.Provider);
     }
 
-    private static async Task<PhysicalSchemaTarget> AdmitPhysicalAsync(
+    private static Task<PhysicalSchemaTarget> AdmitPhysicalAsync(
         SqliteConnection connection,
         StorageManifest manifest,
         ProviderIdentity provider,
@@ -95,20 +96,15 @@ public static class SqliteDocumentStoreFactory
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        ArgumentNullException.ThrowIfNull(manifest);
-        ArgumentNullException.ThrowIfNull(provider);
-        var target = PhysicalSchemaTargetCompiler.Compile(
+        return RelationalPhysicalStoreFactory.AdmitPhysicalAsync(
             manifest,
             provider,
             SqliteGroundworkCapabilities.PhysicalNames,
-            namePolicy);
-        var admission = await new SqlitePhysicalSchemaExecutor(connection).InspectRuntimeAdmissionAsync(
-            target,
+            namePolicy,
+            new SqlitePhysicalSchemaExecutor(connection),
             options,
             schemaAdmissionLog,
             cancellationToken);
-        admission.EnsureReady();
-        return target;
     }
 
     [Obsolete(

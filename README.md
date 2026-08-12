@@ -60,7 +60,7 @@ MongoDB exposes the same boolean on `MongoDbPhysicalDocumentStoreOptions`.
 The physical-storage macrobenchmark scaffolding and its current evidence limits are documented
 in [`benchmarks/Groundwork.PhysicalStorage.Benchmarks`](benchmarks/Groundwork.PhysicalStorage.Benchmarks/README.md).
 
-The support-ticket sample is an ASP.NET Core application backed by the same provider-neutral manifest used in its tests. It declares physical storage directly — logical indexes plus scale-bearing bounded queries resolved through the default physical-storage policy — and opens every provider through its `OpenPhysicalAsync` factory with safe startup auto-apply:
+The support-ticket sample is an ASP.NET Core application backed by the same provider-neutral manifest used in its tests. It declares physical storage directly — logical indexes plus scale-bearing bounded queries resolved through an explicit physical-entity-table definition with bounded projected columns — and opens every provider through its `OpenPhysicalAsync` factory with safe startup auto-apply:
 
 ```bash
 Groundwork__Provider=Sqlite \
@@ -100,7 +100,31 @@ var manifest = new StorageManifest(
             SerializationPolicy.Json(),
             new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
-                PhysicalStoragePolicy.Default(),
+                PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                    DocumentKind,
+                    [
+                        // 128 UTF-16 code units keeps the widest key (column + identity
+                        // tie-break) inside SQL Server's 1700-byte index-key budget.
+                        Column("assigneeId"),
+                        Column("customerId"),
+                        Column("priority"),
+                        Column("status"),
+                        Column("ticketNumber")
+                    ],
+                    indexes:
+                    [
+                        // The unique point-lookup index needs no tie-break column; the
+                        // offset-paged list indexes carry the identity tie-break.
+                        new PhysicalIndexDefinition(
+                            "by-ticket-number",
+                            [new PhysicalIndexColumnDefinition("ticketNumber", 0)],
+                            isUnique: true,
+                            missingValueBehavior: MissingValueBehavior.Excluded),
+                        ListIndex("by-customer", "customerId"),
+                        ListIndex("by-status", "status"),
+                        ListIndex("by-assignee", "assigneeId"),
+                        ListIndex("by-priority", "priority")
+                    ])),
                 logicalIndexes:
                 [
                     Keyword("by-ticket-number", "ticketNumber", isUnique: true),
@@ -120,6 +144,18 @@ var manifest = new StorageManifest(
     ],
     new HashSet<string> { "schema-history", "optimistic-concurrency" },
     []);
+
+static ProjectedColumnDefinition Column(string path) =>
+    new(path, path, PortablePhysicalType.String, Length: 128);
+
+static PhysicalIndexDefinition ListIndex(string identity, string column) =>
+    new(
+        identity,
+        [
+            new PhysicalIndexColumnDefinition(column, 0),
+            new PhysicalIndexColumnDefinition(new DocumentEnvelopeDefinition().IdComparisonKeyColumn, 1)
+        ],
+        missingValueBehavior: MissingValueBehavior.Excluded);
 
 static LogicalIndexDeclaration Keyword(string identity, string path, bool isUnique = false) =>
     new(
@@ -152,9 +188,12 @@ static IReadOnlySet<PortableQueryOperation> Equal() =>
     new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
 ```
 
-Marking every bounded query `ScaleBearing` makes the default policy project the addressed content
-paths into typed columns and synthesize one physical index per referenced logical index, so this
-declared unit resolves to a `PhysicalEntityTable`.
+Marking every bounded query `ScaleBearing` requires the addressed content paths to be projected
+into typed columns with one physical index per referenced logical index. The explicit
+`PhysicalEntityTable` definition above states exactly what the default policy would synthesize —
+same column and index names, missing-value behavior, and identity tie-break — while adding the
+bounded `Length` that key-width-limited providers such as SQL Server require for String index
+key columns.
 
 ### Physical storage declarations
 

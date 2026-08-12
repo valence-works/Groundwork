@@ -112,9 +112,6 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
         var value => value
     };
 
-    public override string? NormalizeDefault(ProjectedColumnDefinition definition) =>
-        definition.DefaultValue is null ? null : DefaultSql(definition);
-
     public override string? NormalizeComputedDefinition(string? definition)
     {
         if (definition is null)
@@ -128,11 +125,6 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
             normalized = normalized[1..^1];
         return normalized;
     }
-
-    public override string EnvelopeColumn(string name, RelationalEnvelopeColumnKind kind) =>
-        $"{QuoteIdentifier(name)} {EnvelopeType(kind)}" +
-        (EnvelopeCollation(kind) is { } collation ? $" COLLATE {CollationToken(collation)}" : string.Empty) +
-        " NOT NULL";
 
     public override RelationalPhysicalIdentityLayout IdentityLayout(
         IReadOnlyList<RelationalPhysicalIdentityColumn> identityColumns,
@@ -150,11 +142,6 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
 
     public override string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
         $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} NOT NULL;";
-
-    public override string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
-        excludedColumns.Count > 0
-            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{QuoteIdentifier(column)} IS NOT NULL"))})"
-            : null;
 
     public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
         $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)} " +
@@ -423,10 +410,9 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
             throw new InvalidOperationException($"SQL Server physical-schema fence {fence} is no longer owned for target '{target}'.");
     }
 
-    public override async Task EnsureInfrastructureAsync(DbConnection connection, CancellationToken cancellationToken)
-    {
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_locks", """
+    protected override IReadOnlyList<InfrastructureTable> InfrastructureTables =>
+    [
+        new("groundwork_physical_schema_locks", """
             CREATE TABLE groundwork_physical_schema_locks (
                 manifest_id nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
                 provider_name nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
@@ -436,8 +422,16 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
                 provider_key AS CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), provider_name))) PERSISTED NOT NULL,
                 CONSTRAINT PK_groundwork_physical_schema_locks PRIMARY KEY NONCLUSTERED (manifest_key, provider_key)
             );
-            """, cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_operations", """
+            """,
+        [
+            new("manifest_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            new("provider_name", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            new("owner_id", "nvarchar(32)", false, "Latin1_General_100_BIN2"),
+            new("fence", "bigint", false, null),
+            HashColumn("manifest_key", "manifest_id", 1),
+            HashColumn("provider_key", "provider_name", 2)
+        ]),
+        new("groundwork_physical_schema_operations", """
             CREATE TABLE groundwork_physical_schema_operations (
                 manifest_id nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
                 provider_name nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
@@ -449,8 +443,18 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
                 operation_key AS CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), operation_id))) PERSISTED NOT NULL,
                 CONSTRAINT PK_groundwork_physical_schema_operations PRIMARY KEY NONCLUSTERED (manifest_key, provider_key, operation_key)
             );
-            """, cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_state", """
+            """,
+        [
+            new("manifest_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            new("provider_name", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            new("operation_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            new("operation_fingerprint", "nvarchar(128)", false, "Latin1_General_100_BIN2"),
+            new("applied_utc", "datetimeoffset(7)", false, null),
+            HashColumn("manifest_key", "manifest_id", 1),
+            HashColumn("provider_key", "provider_name", 2),
+            HashColumn("operation_key", "operation_id", 3)
+        ]),
+        new("groundwork_physical_schema_state", """
             CREATE TABLE groundwork_physical_schema_state (
                 manifest_id nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
                 provider_name nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
@@ -460,8 +464,16 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
                 provider_key AS CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), provider_name))) PERSISTED NOT NULL,
                 CONSTRAINT PK_groundwork_physical_schema_state PRIMARY KEY NONCLUSTERED (manifest_key, provider_key)
             );
-            """, cancellationToken);
-        await EnsureInfrastructureTableAsync(connection, transaction, RelationalPhysicalStorageColumns.MutationOperationsTable, """
+            """,
+        [
+            new("manifest_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            new("provider_name", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            new("target_fingerprint", "nvarchar(128)", false, "Latin1_General_100_BIN2"),
+            new("applied_state_json", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
+            HashColumn("manifest_key", "manifest_id", 1),
+            HashColumn("provider_key", "provider_name", 2)
+        ]),
+        new(RelationalPhysicalStorageColumns.MutationOperationsTable, """
             CREATE TABLE groundwork_document_mutation_operations (
                 manifest_id nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
                 provider_name nvarchar(max) COLLATE Latin1_General_100_BIN2 NOT NULL,
@@ -480,38 +492,7 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
                 CONSTRAINT PK_groundwork_document_mutation_operations PRIMARY KEY NONCLUSTERED (
                     manifest_key, provider_key, storage_unit_key, storage_scope_key, operation_key)
             );
-            """, cancellationToken);
-
-        await ValidateInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_locks",
-        [
-            new("manifest_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            new("provider_name", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            new("owner_id", "nvarchar(32)", false, "Latin1_General_100_BIN2"),
-            new("fence", "bigint", false, null),
-            HashColumn("manifest_key", "manifest_id", 1),
-            HashColumn("provider_key", "provider_name", 2)
-        ], cancellationToken);
-        await ValidateInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_operations",
-        [
-            new("manifest_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            new("provider_name", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            new("operation_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            new("operation_fingerprint", "nvarchar(128)", false, "Latin1_General_100_BIN2"),
-            new("applied_utc", "datetimeoffset(7)", false, null),
-            HashColumn("manifest_key", "manifest_id", 1),
-            HashColumn("provider_key", "provider_name", 2),
-            HashColumn("operation_key", "operation_id", 3)
-        ], cancellationToken);
-        await ValidateInfrastructureTableAsync(connection, transaction, "groundwork_physical_schema_state",
-        [
-            new("manifest_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            new("provider_name", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            new("target_fingerprint", "nvarchar(128)", false, "Latin1_General_100_BIN2"),
-            new("applied_state_json", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
-            HashColumn("manifest_key", "manifest_id", 1),
-            HashColumn("provider_key", "provider_name", 2)
-        ], cancellationToken);
-        await ValidateInfrastructureTableAsync(connection, transaction, RelationalPhysicalStorageColumns.MutationOperationsTable,
+            """,
         [
             new("manifest_id", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
             new("provider_name", "nvarchar(max)", false, "Latin1_General_100_BIN2"),
@@ -527,11 +508,10 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
             HashColumn("storage_unit_key", "storage_unit", 3),
             HashColumn("storage_scope_key", "storage_scope", 4),
             HashColumn("operation_key", "operation_id", 5)
-        ], cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-    }
+        ])
+    ];
 
-    private async Task EnsureInfrastructureTableAsync(
+    protected override async Task EnsureInfrastructureTableAsync(
         DbConnection connection,
         DbTransaction transaction,
         string table,
@@ -608,49 +588,23 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
         return result;
     }
 
-    public override async Task<RelationalPhysicalIndexMetadata?> ReadIndexAsync(
-        DbConnection connection, DbTransaction transaction, string table, string index, CancellationToken cancellationToken)
-    {
-        await using var command = Command(connection, transaction, """
-            SELECT i.is_unique, c.name, ic.is_descending_key, i.filter_definition
-            FROM sys.indexes i
-            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-            JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-            WHERE i.object_id = OBJECT_ID(@table) AND i.name = @index AND ic.key_ordinal > 0
-            ORDER BY ic.key_ordinal;
-            """);
-        Add(command, "table", table);
-        Add(command, "index", index);
-        bool? unique = null;
-        string? filter = null;
-        var columns = new List<RelationalPhysicalIndexColumnMetadata>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            unique ??= reader.GetBoolean(0);
-            filter ??= reader.IsDBNull(3) ? null : reader.GetString(3);
-            columns.Add(new RelationalPhysicalIndexColumnMetadata(
-                reader.GetString(1),
-                reader.GetBoolean(2) ? PhysicalSortDirection.Descending : PhysicalSortDirection.Ascending));
-        }
-        return unique is null ? null : new RelationalPhysicalIndexMetadata(unique.Value, columns, filter);
-    }
+    protected override string IndexMetadataSql => """
+        SELECT i.is_unique, c.name, ic.is_descending_key, i.filter_definition
+        FROM sys.indexes i
+        JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+        JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+        WHERE i.object_id = OBJECT_ID(@table) AND i.name = @index AND ic.key_ordinal > 0
+        ORDER BY ic.key_ordinal;
+        """;
 
-    public override string ProjectedColumnSql(string column, ProjectedColumnDefinition definition) =>
-        $"{QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} {(definition.IsNullable ? "NULL" : "NOT NULL")}" +
-        (DefaultSql(definition) is { } value ? $" DEFAULT {value}" : string.Empty);
-
-    private string CollationSql(ProjectedColumnDefinition definition) =>
-        ProjectedCollation(definition) is { } value ? $" COLLATE {CollationToken(value)}" : string.Empty;
-
-    private static string CollationToken(string value)
+    protected override string CollationToken(string value)
     {
         if (value.Length == 0 || value.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '_'))
             throw new InvalidOperationException($"SQL Server collation '{value}' is not a valid provider collation identifier.");
         return value;
     }
 
-    private static string? DefaultSql(ProjectedColumnDefinition definition)
+    protected override string? DefaultSql(ProjectedColumnDefinition definition)
     {
         if (definition.DefaultValue is null)
             return null;
@@ -702,21 +656,5 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
                 return false;
         }
         return depth == 0;
-    }
-
-    private static DbCommand Command(DbConnection connection, DbTransaction transaction, string sql)
-    {
-        var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        return command;
-    }
-
-    private static void Add(DbCommand command, string name, object value)
-    {
-        var parameter = command.CreateParameter();
-        parameter.ParameterName = $"@{name}";
-        parameter.Value = value;
-        command.Parameters.Add(parameter);
     }
 }

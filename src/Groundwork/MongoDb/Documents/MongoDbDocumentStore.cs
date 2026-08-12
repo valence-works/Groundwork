@@ -608,146 +608,79 @@ public sealed class MongoDbDocumentStore : IDocumentStore
     private sealed class MongoDocumentUnitOfWork(
         MongoDbDocumentStore store,
         IClientSessionHandle session,
-        DocumentCommitScope commitScope) : IDocumentUnitOfWork
+        DocumentCommitScope commitScope) : MongoDbDocumentUnitOfWorkBase(session)
     {
-        private bool completed;
+        protected override string AlreadyCompletedMessage => "The document transaction has already been committed or rolled back.";
 
-        public async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
+        protected override Task CommitTransactionAsync(CancellationToken cancellationToken) =>
+            Session.CommitTransactionAsync(cancellationToken);
+
+        public override async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             commitScope.EnsureIncludes(request.DocumentKind);
-            try
+
+            Func<CancellationToken, Task<DocumentStoreWriteResult>>? ConvertFailure(Exception exception)
             {
-                var unit = store.GetUnit(request.DocumentKind);
-                var scope = store.ResolveScope(unit, StorageScopeOperation.Save);
-                var result = await store.SaveCoreAsync(unit, request, scope, session, cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Saved)
-                    await AbortAsync(CancellationToken.None);
-                return result;
+                if (exception is not MongoException mongoException || !IsTerminalTransactionWriteConflict(mongoException))
+                    return null;
+                return ct =>
+                {
+                    var unit = store.GetUnit(request.DocumentKind);
+                    var scope = store.ResolveScope(unit, StorageScopeOperation.Save);
+                    return store.ClassifySaveConflictOutsideSessionAsync(unit, request, scope, ct);
+                };
             }
-            catch (MongoException exception) when (IsTerminalTransactionWriteConflict(exception))
-            {
-                await AbortAsync(CancellationToken.None);
-                var unit = store.GetUnit(request.DocumentKind);
-                var scope = store.ResolveScope(unit, StorageScopeOperation.Save);
-                return await store.ClassifySaveConflictOutsideSessionAsync(unit, request, scope, cancellationToken);
-            }
-            catch
-            {
-                await AbortAsync(CancellationToken.None);
-                throw;
-            }
+
+            return await StageWriteAsync(
+                ct =>
+                {
+                    var unit = store.GetUnit(request.DocumentKind);
+                    var scope = store.ResolveScope(unit, StorageScopeOperation.Save);
+                    return store.SaveCoreAsync(unit, request, scope, Session, ct);
+                },
+                DocumentStoreWriteStatus.Saved,
+                cancellationToken,
+                ConvertFailure);
         }
 
-        public async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
+        public override async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             commitScope.EnsureIncludes(request.DocumentKind);
-            try
+
+            Func<CancellationToken, Task<DocumentStoreWriteResult>>? ConvertFailure(Exception exception)
             {
-                var unit = store.GetUnit(request.DocumentKind);
-                var scope = store.ResolveScope(unit, StorageScopeOperation.Delete);
-                var result = await store.DeleteCoreAsync(unit, request, scope, session, cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Deleted)
-                    await AbortAsync(CancellationToken.None);
-                return result;
+                if (exception is not MongoException mongoException || !IsTerminalTransactionWriteConflict(mongoException))
+                    return null;
+                return ct =>
+                {
+                    var unit = store.GetUnit(request.DocumentKind);
+                    var scope = store.ResolveScope(unit, StorageScopeOperation.Delete);
+                    return store.ClassifyDeleteConflictOutsideSessionAsync(unit, request, scope, ct);
+                };
             }
-            catch (MongoException exception) when (IsTerminalTransactionWriteConflict(exception))
-            {
-                await AbortAsync(CancellationToken.None);
-                var unit = store.GetUnit(request.DocumentKind);
-                var scope = store.ResolveScope(unit, StorageScopeOperation.Delete);
-                return await store.ClassifyDeleteConflictOutsideSessionAsync(unit, request, scope, cancellationToken);
-            }
-            catch
-            {
-                await AbortAsync(CancellationToken.None);
-                throw;
-            }
+
+            return await StageWriteAsync(
+                ct =>
+                {
+                    var unit = store.GetUnit(request.DocumentKind);
+                    var scope = store.ResolveScope(unit, StorageScopeOperation.Delete);
+                    return store.DeleteCoreAsync(unit, request, scope, Session, ct);
+                },
+                DocumentStoreWriteStatus.Deleted,
+                cancellationToken,
+                ConvertFailure);
         }
 
-        public async Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
+        public override async Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             commitScope.EnsureIncludes(documentKind);
             var unit = store.GetUnit(documentKind);
             var scope = store.ResolveScope(unit, StorageScopeOperation.Load);
             var identity = store.identityBindings[documentKind];
-            return await store.LoadCoreAsync(unit, identity.Project(id), identity, scope, session, cancellationToken);
-        }
-
-        public async Task CommitAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            try
-            {
-                await session.CommitTransactionAsync(cancellationToken);
-            }
-            finally
-            {
-                Complete();
-            }
-        }
-
-        public async Task RollbackAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            await AbortAsync(cancellationToken);
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            if (completed)
-                return;
-
-            try
-            {
-                if (session.IsInTransaction)
-                    await session.AbortTransactionAsync();
-            }
-            catch
-            {
-                // Best-effort rollback when disposed without an explicit commit/rollback.
-            }
-            finally
-            {
-                Complete();
-            }
-        }
-
-        private void Complete()
-        {
-            if (completed)
-                return;
-
-            completed = true;
-            session.Dispose();
-        }
-
-        private async Task AbortAsync(CancellationToken cancellationToken)
-        {
-            if (completed)
-                return;
-
-            try
-            {
-                if (session.IsInTransaction)
-                    await session.AbortTransactionAsync(cancellationToken);
-            }
-            catch (MongoException)
-            {
-                // A failed write or non-success result already makes the unit of work terminal.
-            }
-            finally
-            {
-                Complete();
-            }
-        }
-
-        private void EnsureActive()
-        {
-            if (completed)
-                throw new InvalidOperationException("The document transaction has already been committed or rolled back.");
+            return await store.LoadCoreAsync(unit, identity.Project(id), identity, scope, Session, cancellationToken);
         }
     }
 }

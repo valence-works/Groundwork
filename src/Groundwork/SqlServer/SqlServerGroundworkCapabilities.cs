@@ -33,7 +33,15 @@ public static class SqlServerGroundworkCapabilities
 
     public static ProviderIdentity Provider { get; } = new("groundwork-sqlserver", "1.0.0");
 
-    /// <summary>SQL Server identifier normalization with its native 128-character limit.</summary>
+    /// <summary>
+    /// SQL Server identifier normalization with its native 128-character limit. No collision-scope
+    /// delegate is supplied, so SQL Server uses the per-table Core default
+    /// (<see cref="ProviderPhysicalNameNormalizerDefaults"/>): index names collide per storage unit
+    /// and schema history is its own scope, whereas PostgreSQL and SQLite fold relations, indexes,
+    /// and schema history into one flat namespace ("schema-relations" / "schema-objects"). The
+    /// per-table model matches T-SQL's table-scoped index namespace, but the divergence from the
+    /// flat-namespace providers is recorded here rather than decided.
+    /// </summary>
     public static IProviderPhysicalNameNormalizer PhysicalNames { get; } =
         new DelegateProviderPhysicalNameNormalizer(context => SqlServerPhysicalName.Normalize(context.LogicalName));
 

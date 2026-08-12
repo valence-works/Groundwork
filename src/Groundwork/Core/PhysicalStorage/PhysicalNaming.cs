@@ -75,16 +75,42 @@ public sealed class DelegateProviderPhysicalNameNormalizer(
         _collisionScope?.Invoke(context) ?? ProviderPhysicalNameNormalizerDefaults.GetCollisionScope(context);
 }
 
-internal static class ProviderPhysicalNameNormalizerDefaults
+/// <summary>
+/// Canonical collision-scope arms shared by every provider normalizer. Field scopes are always
+/// per storage unit; the relation-level scopes come in two namespace models:
+/// <list type="bullet">
+/// <item><description>Per-table (no argument): storage relations share "primary-storage", schema
+/// history is its own scope, and indexes are scoped per storage unit — for engines whose index
+/// names live inside their table's namespace.</description></item>
+/// <item><description>Flat (pass <c>flatRelationNamespace</c>): storage relations, physical
+/// indexes, and schema history all share one provider-labeled scope — for engines such as
+/// PostgreSQL and SQLite whose relations and indexes share a schema-global namespace.</description></item>
+/// </list>
+/// Public so provider assemblies declare only their namespace model instead of copying the arms.
+/// </summary>
+public static class ProviderPhysicalNameNormalizerDefaults
 {
     public static string GetCollisionScope(ProviderPhysicalNameContext context) => context.ObjectKind switch
     {
         PhysicalObjectKind.PrimaryStorage or PhysicalObjectKind.LinkedIndexStorage or PhysicalObjectKind.CollectionElementStorage => "primary-storage",
+        PhysicalObjectKind.PhysicalIndex => $"{context.StorageUnit.Value}:physical-indexes",
+        PhysicalObjectKind.SchemaHistory => "schema-history",
+        _ => GetFieldCollisionScope(context)
+    };
+
+    /// <summary>Flat relation namespace: all relations, indexes, and schema history collide within one provider-chosen scope.</summary>
+    public static string GetCollisionScope(ProviderPhysicalNameContext context, string flatRelationNamespace) => context.ObjectKind switch
+    {
+        PhysicalObjectKind.PrimaryStorage or PhysicalObjectKind.LinkedIndexStorage or PhysicalObjectKind.CollectionElementStorage or
+        PhysicalObjectKind.PhysicalIndex or PhysicalObjectKind.SchemaHistory => flatRelationNamespace,
+        _ => GetFieldCollisionScope(context)
+    };
+
+    private static string GetFieldCollisionScope(ProviderPhysicalNameContext context) => context.ObjectKind switch
+    {
         PhysicalObjectKind.EnvelopeField or PhysicalObjectKind.ProjectedField => $"{context.StorageUnit.Value}:columns",
         PhysicalObjectKind.LinkedIndexField or PhysicalObjectKind.LinkedProjectedField => $"{context.StorageUnit.Value}:linked-columns",
         PhysicalObjectKind.CollectionElementField => $"{context.StorageUnit.Value}:collection-element-columns",
-        PhysicalObjectKind.PhysicalIndex => $"{context.StorageUnit.Value}:physical-indexes",
-        PhysicalObjectKind.SchemaHistory => "schema-history",
         _ => throw new ArgumentOutOfRangeException(nameof(context), context.ObjectKind, null)
     };
 }
