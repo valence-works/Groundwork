@@ -108,7 +108,7 @@ public static class SqliteDiagnosticRecordStoreFactory
         var store = new SqliteDiagnosticRecordStore(connectionString, definition);
         var snapshot = query.Continuation is null
             ? await ReadCursorHighWaterAsync(connectionString, query.Scope, query.Stream, cancellationToken)
-            : long.Parse(query.Continuation.SnapshotHighWater.Value);
+            : long.Parse(query.Continuation.SnapshotHighWater.Value, System.Globalization.CultureInfo.InvariantCulture);
         return await ExplainAsync(connectionString, store.Inner.BuildQueryCommand(query, snapshot), cancellationToken);
     }
 

@@ -15,7 +15,7 @@ namespace Groundwork.MongoDb.Tests;
 
 public sealed class MongoDbPhysicalStoreAdmissionTests : IAsyncLifetime
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder("mongo:7.0.24")
+    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
         .WithReplicaSet("groundwork-admission-rs")
         .Build();
 

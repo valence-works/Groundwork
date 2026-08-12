@@ -32,7 +32,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task SqlServer_combined_diagnostic_deployment_is_live_restart_safe_and_detects_drift()
     {
-        await using var container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04").Build();
+        await using var container = new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
         await container.StartAsync();
         var connection = await CreateSqlServerDiagnosticDatabaseAsync(container.GetConnectionString());
         await ExerciseDiagnosticDeploymentAsync(
@@ -46,7 +46,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task PostgreSql_combined_diagnostic_deployment_is_live_restart_safe_and_detects_drift()
     {
-        await using var container = new PostgreSqlBuilder("postgres:17.6-alpine3.22")
+        await using var container = new PostgreSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.PostgreSql)
             .WithDatabase("groundwork")
             .WithUsername("groundwork")
             .WithPassword("groundwork")
@@ -64,7 +64,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_combined_diagnostic_deployment_is_live_restart_safe_and_detects_drift()
     {
-        await using var container = new MongoDbBuilder("mongo:7.0.24")
+        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
             .WithReplicaSet("groundwork-diag-rs")
             .Build();
         await container.StartAsync();
@@ -81,7 +81,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task SqlServer_invalid_diagnostic_bounds_fail_preflight_without_document_mutation()
     {
-        await using var container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04").Build();
+        await using var container = new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
         await container.StartAsync();
         var connection = await CreateSqlServerDiagnosticDatabaseAsync(container.GetConnectionString());
 
@@ -105,7 +105,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_standalone_topology_fails_preflight_without_creating_locks_or_collections()
     {
-        await using var container = new MongoDbBuilder("mongo:7.0.24").Build();
+        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb).Build();
         await container.StartAsync();
         var connection = container.GetConnectionString();
         const string database = "groundwork_schema_tool_standalone_rejection";
@@ -130,7 +130,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task SqlServer_cli_lifecycle_is_live_restart_safe_authorized_and_secret_safe()
     {
-        await using var container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04").Build();
+        await using var container = new MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
         await container.StartAsync();
         var connection = container.GetConnectionString();
         await ExerciseAsync(
@@ -147,7 +147,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task PostgreSql_cli_lifecycle_is_live_restart_safe_authorized_and_secret_safe()
     {
-        await using var container = new PostgreSqlBuilder("postgres:17.6-alpine3.22")
+        await using var container = new PostgreSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.PostgreSql)
             .WithDatabase("groundwork")
             .WithUsername("groundwork")
             .WithPassword("groundwork")
@@ -168,7 +168,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_cli_lifecycle_is_live_restart_safe_authorized_and_secret_safe()
     {
-        await using var container = new MongoDbBuilder("mongo:7.0.24")
+        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
             .WithReplicaSet("groundwork-rs")
             .Build();
         await container.StartAsync();
@@ -188,7 +188,7 @@ public sealed class SchemaToolProviderParityTests
     [Trait("Category", "SchemaToolProviderParity")]
     public async Task MongoDb_cli_plans_applies_and_live_validates_bounded_mutation_bindings()
     {
-        await using var container = new MongoDbBuilder("mongo:7.0.24")
+        await using var container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
             .WithReplicaSet("groundwork-mutation-cli-rs")
             .Build();
         await container.StartAsync();

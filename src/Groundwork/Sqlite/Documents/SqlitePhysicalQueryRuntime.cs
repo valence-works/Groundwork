@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using System.Data.Common;
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
@@ -50,38 +49,14 @@ public static class SqlitePhysicalQueryRuntime
         return new RelationalPhysicalNativeQueryPlan("sqlite-query-plan", string.Join(Environment.NewLine, details));
     }
 
-    public static PhysicalQueryPlannerCapabilities Capabilities(ProviderIdentity provider)
-    {
-        var sources = new[]
-        {
-            PhysicalQuerySourceKind.CollectionElements,
-            PhysicalQuerySourceKind.LinkedIndex,
-            PhysicalQuerySourceKind.PrimaryProjectedColumns,
-            PhysicalQuerySourceKind.PrimaryEnvelope,
-            PhysicalQuerySourceKind.PrimaryCanonicalJson
-        };
-        return new PhysicalQueryPlannerCapabilities(
+    public static PhysicalQueryPlannerCapabilities Capabilities(ProviderIdentity provider) =>
+        RelationalPhysicalQueryRuntime.Capabilities(
             provider,
-            sources,
-            Enum.GetValues<PortableQueryOperation>().ToFrozenSet(),
-            sources.ToFrozenDictionary(source => source, source => $"sqlite:{source}"),
-            nativeFieldIdentifiers: null,
-            supportsCompoundPredicates: true,
-            supportsDisjunction: true,
-            supportsOffsetPaging: true,
-            supportsKeysetPaging: true,
-            supportsCount: true,
-            supportsAny: true,
-            supportsFirst: true,
-            supportsLatestPerKey: true,
-            sourceValueKinds: new Dictionary<PhysicalQuerySourceKind, IReadOnlySet<IndexValueKind>>
+            "sqlite",
+            new HashSet<IndexValueKind>
             {
-                [PhysicalQuerySourceKind.PrimaryCanonicalJson] = new HashSet<IndexValueKind>
-                {
-                    IndexValueKind.String,
-                    IndexValueKind.Keyword,
-                    IndexValueKind.Boolean
-                }
+                IndexValueKind.String,
+                IndexValueKind.Keyword,
+                IndexValueKind.Boolean
             });
-    }
 }

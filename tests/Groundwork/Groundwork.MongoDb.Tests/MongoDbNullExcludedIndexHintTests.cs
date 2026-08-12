@@ -38,7 +38,7 @@ namespace Groundwork.MongoDb.Tests;
 /// </remarks>
 public sealed class MongoDbNullExcludedIndexHintTests(ITestOutputHelper output) : IAsyncLifetime
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder("mongo:7.0.24")
+    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
         .WithReplicaSet("groundwork-null-excluded-rs")
         .Build();
 

@@ -233,7 +233,7 @@ public sealed class SqlServerNullExcludedIndexHintTests(
 public sealed class SqlServerNullExcludedIndexContainer : IAsyncLifetime
 {
     public Testcontainers.MsSql.MsSqlContainer Container { get; } =
-        new Testcontainers.MsSql.MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04").Build();
+        new Testcontainers.MsSql.MsSqlBuilder(Groundwork.TestInfrastructure.TestContainerImages.SqlServer).Build();
 
     public Task InitializeAsync() => Container.StartAsync();
     public Task DisposeAsync() => Container.DisposeAsync().AsTask();
