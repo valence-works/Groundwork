@@ -406,6 +406,168 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
+    public void DeclaredNumericPrecisionAndScaleBoundSynthesizedProjectedColumns()
+    {
+        var result = ResolveNumericDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Precision: 18, Scale: 4)],
+            IndexValueKind.Number,
+            false,
+            MissingValueBehavior.IncludedAsNull));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var definition = Assert.Single(result.Definitions).Definition;
+        Assert.Equal(PhysicalStorageForm.PhysicalEntityTable, definition.Form);
+        var projected = Assert.Single(definition.ProjectedColumns);
+        Assert.Equal("value", projected.Path);
+        Assert.Equal(PortablePhysicalType.Decimal, projected.Type);
+        Assert.Equal(18, projected.Precision);
+        Assert.Equal(4, projected.Scale);
+    }
+
+    [Fact]
+    public void DeclarationLevelNumericPrecisionAndScaleApplyWhenFieldsOmitThem()
+    {
+        var result = ResolveNumericDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value")],
+            IndexValueKind.Number,
+            false,
+            MissingValueBehavior.IncludedAsNull,
+            precision: 10,
+            scale: 2));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Equal(10, projected.Precision);
+        Assert.Equal(2, projected.Scale);
+    }
+
+    [Fact]
+    public void FieldNumericPrecisionAndScaleOverrideDeclarationDefaults()
+    {
+        var result = ResolveNumericDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Precision: 28, Scale: 6)],
+            IndexValueKind.Number,
+            false,
+            MissingValueBehavior.IncludedAsNull,
+            precision: 10,
+            scale: 2));
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Equal(28, projected.Precision);
+        Assert.Equal(6, projected.Scale);
+    }
+
+    [Fact]
+    public void PartialFieldShapeDoesNotInheritTheMissingComponentFromDeclarationDefaults()
+    {
+        var result = ResolveNumericDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Precision: 12)],
+            IndexValueKind.Number,
+            false,
+            MissingValueBehavior.IncludedAsNull,
+            precision: 28,
+            scale: 2));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-038");
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(29, 2)]
+    [InlineData(10, 11)]
+    [InlineData(10, -1)]
+    [InlineData(10, null)]
+    [InlineData(null, 2)]
+    public void InvalidDeclaredNumericPrecisionOrScaleIsRejected(int? precision, int? scale)
+    {
+        var result = ResolveNumericDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Precision: precision, Scale: scale)],
+            IndexValueKind.Number,
+            false,
+            MissingValueBehavior.IncludedAsNull));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-038");
+    }
+
+    [Fact]
+    public void DeclaredNumericPrecisionOnNonNumberFieldIsRejected()
+    {
+        var result = ResolveNumericDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value", Precision: 18, Scale: 4)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-038");
+    }
+
+    [Fact]
+    public void DeclarationLevelNumericPrecisionWithoutAnyNumberFieldIsRejected()
+    {
+        var result = ResolveNumericDemand(new LogicalIndexDeclaration(
+            "by-value",
+            [new IndexField("value")],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull,
+            precision: 18,
+            scale: 4));
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-038");
+    }
+
+    [Fact]
+    public void ConflictingDeclaredNumericShapesForOnePathAreRejected()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-value",
+                    [new IndexField("value", Precision: 18, Scale: 4)],
+                    IndexValueKind.Number,
+                    false,
+                    MissingValueBehavior.IncludedAsNull),
+                new LogicalIndexDeclaration(
+                    "by-value-alt",
+                    [new IndexField("value", Precision: 10, Scale: 2)],
+                    IndexValueKind.Number,
+                    false,
+                    MissingValueBehavior.IncludedAsNull)
+            ],
+            [
+                NumericScaleBearingQuery("list-by-value", "by-value"),
+                NumericScaleBearingQuery("list-by-value-alt", "by-value-alt")
+            ]);
+        var manifest = WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage);
+
+        var result = PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-038");
+    }
+
+    [Fact]
     public void DeclaredKeyLengthBoundsSynthesizedProjectedColumns()
     {
         var result = ResolveStringDemand(new LogicalIndexDeclaration(
@@ -2472,6 +2634,29 @@ public sealed class PhysicalStorageResolutionTests
         Assert.Empty(result.Definitions);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-PHYSICAL-014");
     }
+
+    private static PhysicalStorageResolutionResult ResolveNumericDemand(LogicalIndexDeclaration index)
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [index],
+            [NumericScaleBearingQuery("list-by-value", index.Identity)]);
+        var manifest = WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage);
+        return PhysicalStorageResolver.Resolve(
+            manifest,
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+    }
+
+    private static BoundedQueryDeclaration NumericScaleBearingQuery(string identity, string indexIdentity) =>
+        new(
+            identity,
+            indexIdentity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.None,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing);
 
     private static StorageManifest WithPhysicalStorage(
         StorageManifest manifest,

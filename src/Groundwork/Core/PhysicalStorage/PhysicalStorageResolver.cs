@@ -187,6 +187,7 @@ public static class PhysicalStorageResolver
                 }
 
                 var valueKind = matching[0].GetValueKind(field);
+                var isNumber = valueKind == IndexValueKind.Number;
                 demand.Add(new ScaleBearingPathDemand(
                     query.Identity,
                     query.IndexIdentity,
@@ -194,6 +195,8 @@ public static class PhysicalStorageResolver
                     sortDirections[order],
                     valueKind,
                     PhysicalStorageDeclarationValidator.IsStringKind(valueKind) ? matching[0].GetLength(field) : null,
+                    isNumber ? matching[0].GetPrecision(field) : null,
+                    isNumber ? matching[0].GetScale(field) : null,
                     matching[0].MissingValueBehavior,
                     Array.AsReadOnly(query.Operations.Order().ToArray()),
                     query.SortSupport,
@@ -236,6 +239,21 @@ public static class PhysicalStorageResolver
             diagnostics.Add(GroundworkDiagnostic.Error(
                 "GW-PHYSICAL-039",
                 $"Scale-bearing string paths must declare one key length per storage unit: {string.Join(", ", conflictingKeyLengths)}.",
+                $"storageUnits.{unitIdentity.Value}.physicalStorage.logicalIndexes"));
+        }
+
+        var conflictingNumericShapes = demand
+            .Where(x => x.Precision is not null)
+            .GroupBy(x => x.Path, StringComparer.Ordinal)
+            .Where(group => group.Select(x => (x.Precision, x.Scale)).Distinct().Count() > 1)
+            .Select(group => group.Key)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (conflictingNumericShapes.Length != 0)
+        {
+            diagnostics.Add(GroundworkDiagnostic.Error(
+                "GW-PHYSICAL-038",
+                $"Scale-bearing numeric paths must declare one decimal precision and scale per storage unit: {string.Join(", ", conflictingNumericShapes)}.",
                 $"storageUnits.{unitIdentity.Value}.physicalStorage.logicalIndexes"));
         }
 
@@ -322,16 +340,18 @@ public static class PhysicalStorageResolver
     private static IReadOnlyList<ProjectedColumnDefinition> SynthesizeProjectedColumns(
         IReadOnlyList<ScaleBearingPathDemand> demand) =>
         demand
-            .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind, x.Length) }
+            .SelectMany(x => new[] { new ProjectedPathDemand(x.Path, x.ValueKind, x.Length, x.Precision, x.Scale) }
                 .Concat(x.ResidualPredicateFields.Select(residual =>
-                    new ProjectedPathDemand(residual.Path, residual.ValueKind, null))))
+                    new ProjectedPathDemand(residual.Path, residual.ValueKind, null, null, null))))
             .Where(x => !PhysicalDocumentFieldPaths.IsEnvelope(x.Path))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Select(group => new ProjectedColumnDefinition(
                 FeatureDefaultColumnName(group.Key),
                 group.Key,
                 ToPortableType(group.First().ValueKind),
-                Length: group.Select(x => x.Length).FirstOrDefault(length => length is not null)))
+                Length: group.Select(x => x.Length).FirstOrDefault(length => length is not null),
+                Precision: group.Select(x => x.Precision).FirstOrDefault(precision => precision is not null),
+                Scale: group.Select(x => x.Scale).FirstOrDefault(scale => scale is not null)))
             .OrderBy(x => x.Path, StringComparer.Ordinal)
             .ToArray();
 
@@ -483,5 +503,5 @@ public static class PhysicalStorageResolver
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null)
     };
 
-    private sealed record ProjectedPathDemand(string Path, IndexValueKind ValueKind, int? Length);
+    private sealed record ProjectedPathDemand(string Path, IndexValueKind ValueKind, int? Length, int? Precision, int? Scale);
 }
