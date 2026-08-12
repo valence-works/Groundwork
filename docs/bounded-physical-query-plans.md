@@ -122,9 +122,20 @@ SQLite cannot be told otherwise.
 
 The pin is therefore decided per invocation, from the predicate rather than from the plan alone. A
 clause proves a column non-null only when *every* alternative in that disjunction rejects nulls on
-it. Equality against a non-null value, inequality, the range operations, `StartsWith` and `Contains`
-all reject nulls; equality against a null value renders `IS NULL` and does not, and `NotContains` does
-not, because it is defined to match a null or absent field.
+it. Equality against a non-null value, the range operations, `StartsWith` and `Contains` all reject
+nulls. Equality against a null value renders `IS NULL` and does not. Neither negation does either,
+because both are complements that match a null or absent field — except against a null value, where
+`NotEqual` renders `IS NOT NULL` and is the one negation that rejects nulls. See
+[Inequality is the complement of equality](#inequality-is-the-complement-of-equality).
+
+MongoDB reaches the same decision from the same shared rule, but reads two operators differently
+because its own predicates do. Its partial filter is `{field: {$exists: true}}`, so what has to be
+proved is presence rather than non-nullness — a document holding an explicit null is in the index.
+And `{$ne: v}` matches a document that has no such field, which is why inequality proves nothing there
+either. Unlike SQL Server, MongoDB accepts a hint whose partial filter the query does not imply: it
+serves the query from the smaller index and returns fewer documents with no error at all, which makes
+deciding the pin from the predicate the only thing standing between a null-excluding index and a
+silently short result set.
 
 When the predicate proves every excluded column non-null, the query keeps its pin and carries an
 `IS NOT NULL` conjunct per excluded column. Those conjuncts are redundant by construction — they are
@@ -137,6 +148,29 @@ When the predicate does not prove it, the index would drop rows the query can ma
 query is refused by name rather than degraded to a scan; any other query drops the pin and leaves the
 choice to the optimizer. PostgreSQL emits the filter but never pins an index, so it is unaffected by
 the pin decision while still honouring the declaration.
+
+## Inequality is the complement of equality
+
+`NotEqual` matches a document precisely when `Equal` does not, for the same value. A field that is
+null or absent is therefore *not* equal to `'archived'` and comes back from `NotEqual('archived')`;
+against a null value the complement runs the other way, so `NotEqual(null)` returns only documents
+that have a value.
+
+This is deliberately not SQL's three-valued `<>`, which is unknown for NULL and drops those rows. The
+providers used to disagree in silence — MongoDB's `{$ne: v}` already matched documents with no field
+— and nothing in the portable contract said which was right, so one manifest answered the same
+question two ways. Taking the complement settles it in the direction `NotContains` was already
+documented to have, and buys the property the split exists for: every document lands on exactly one
+side of `Equal`/`NotEqual` for every value, so a two-branch query can neither lose a document nor
+count it twice. Relational providers render the null branch explicitly, `(col IS NULL OR col <> @p)`,
+the same shape `NotContains` already used. Where the column cannot be null the two forms agree, so the
+sargable one is kept: document identity columns, and projected columns declared non-nullable. Anything
+whose nullability is not declared — a canonical-JSON path reads as NULL when the document omits it —
+takes the null-safe form, because guessing the other way drops rows.
+
+The pin decision follows from it: because inequality against a non-null value can now match a null
+row, it no longer proves a column non-null, and a scale-bearing query bound to a null-excluding index
+through such a predicate is refused rather than silently under-served.
 
 ## Isolation and failure rules
 

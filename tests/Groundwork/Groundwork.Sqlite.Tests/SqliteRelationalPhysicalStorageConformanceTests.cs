@@ -45,6 +45,35 @@ public sealed class SqliteRelationalPhysicalStorageConformanceTests : Relational
         await SortOnlyResidualPredicateConformance.VerifyAsync(store, runtime);
     }
 
+    /// <summary>
+    /// Every relational provider renders the predicate through the same handler, so proving the
+    /// complement here proves it for SQL Server and PostgreSQL too; the MongoDB half is asserted by the
+    /// same conformance in its own suite.
+    /// </summary>
+    [Fact]
+    public async Task Not_equal_is_the_complement_of_equal_including_rows_with_no_value()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var manifest = NotEqualNullSemanticsConformance.CreateManifest(instance);
+        var target = NotEqualNullSemanticsConformance.CreateTarget(
+            manifest,
+            SqliteTestManifests.Provider,
+            ProviderPhysicalNameNormalizer.Identity,
+            instance);
+        await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
+        var route = target.Routes.Single();
+        var store = new SqlitePhysicalDocumentStore(
+            connection,
+            manifest,
+            target.Routes,
+            DocumentStoreAccess.Global);
+        var runtime = SqlitePhysicalQueryRuntime.Create(store, manifest, route, target.Provider);
+
+        await NotEqualNullSemanticsConformance.VerifyAsync(store, runtime);
+    }
+
     [Theory]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
     [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]

@@ -3402,6 +3402,24 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         await SortOnlyResidualPredicateConformance.VerifyAsync(store, store);
     }
 
+    /// <summary>
+    /// The MongoDB half of the settled inequality reading. It already matched documents with no value,
+    /// which is the behavior the relational providers were brought to; asserting it here is what stops
+    /// the two from drifting apart again.
+    /// </summary>
+    [Fact]
+    public async Task Not_equal_is_the_complement_of_equal_including_documents_with_no_value()
+    {
+        var database = Database();
+        var manifest = NotEqualNullSemanticsConformance.CreateManifest(
+            Guid.NewGuid().ToString("N")[..8]);
+        var model = MongoDbPhysicalStorageModel.Compile(manifest);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Global);
+
+        await NotEqualNullSemanticsConformance.VerifyAsync(store, store);
+    }
+
     private IMongoDatabase Database() =>
         new MongoClient(container.GetConnectionString()).GetDatabase($"groundwork_{Guid.NewGuid():N}");
 
