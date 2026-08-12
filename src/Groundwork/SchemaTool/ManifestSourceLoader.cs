@@ -6,7 +6,10 @@ namespace Groundwork.SchemaTool;
 
 internal static class ManifestSourceLoader
 {
-    public static IPhysicalSchemaManifestSource Load(string assemblyPath, string? typeName)
+    public static IPhysicalSchemaManifestSource Load(
+        string assemblyPath,
+        string? typeName,
+        IReadOnlyDictionary<string, string>? manifestOptions = null)
     {
         var path = Path.GetFullPath(assemblyPath);
         if (!File.Exists(path))
@@ -42,9 +45,10 @@ internal static class ManifestSourceLoader
                         : "Manifest assembly contains multiple sources; specify '--manifest-type'.");
         }
 
+        IPhysicalSchemaManifestSource source;
         try
         {
-            return (IPhysicalSchemaManifestSource)(Activator.CreateInstance(sourceType)
+            source = (IPhysicalSchemaManifestSource)(Activator.CreateInstance(sourceType)
                 ?? throw new InvalidOperationException("The manifest source constructor returned null."));
         }
         catch (Exception exception) when (exception is not SchemaToolConfigurationException)
@@ -54,6 +58,43 @@ internal static class ManifestSourceLoader
                 "Manifest source must have an accessible parameterless constructor.",
                 exception);
         }
+
+        return Configure(source, manifestOptions);
+    }
+
+    /// <summary>
+    /// Hands the operator's options to a source that takes them. Options supplied to a source that does not
+    /// accept any are an error rather than a no-op: the operator asked for something specific, and applying
+    /// whatever the source defaults to would look like it worked.
+    /// </summary>
+    private static IPhysicalSchemaManifestSource Configure(
+        IPhysicalSchemaManifestSource source,
+        IReadOnlyDictionary<string, string>? manifestOptions)
+    {
+        if (source is not IConfigurablePhysicalSchemaManifestSource configurable)
+        {
+            if (manifestOptions is { Count: > 0 })
+            {
+                throw new SchemaToolConfigurationException(
+                    "GW-CLI-004",
+                    $"Manifest source '{source.GetType().FullName}' does not accept '--manifest-option'.");
+            }
+
+            return source;
+        }
+
+        try
+        {
+            configurable.Configure(manifestOptions ?? new Dictionary<string, string>(StringComparer.Ordinal));
+        }
+        catch (Exception exception) when (exception is not SchemaToolConfigurationException)
+        {
+            // The source is the authority on what its options mean, so its refusal is reported verbatim
+            // rather than restated. Swallowing it here would reintroduce the silent fallback.
+            throw new SchemaToolConfigurationException("GW-CLI-004", exception.Message, exception);
+        }
+
+        return configurable;
     }
 
     private static Assembly Load(string path) => new ManifestAssemblyLoadContext(path).LoadFromAssemblyPath(path);

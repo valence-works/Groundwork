@@ -27,7 +27,8 @@ internal sealed record SchemaToolOptions(
     bool ApplySafe,
     string? ExpectedPlanFingerprint,
     IReadOnlySet<string> AllowedDestructiveOperations,
-    IReadOnlySet<string> AllowedSemanticMigrations)
+    IReadOnlySet<string> AllowedSemanticMigrations,
+    IReadOnlyDictionary<string, string> ManifestOptions)
 {
     public static bool TryParse(
         IReadOnlyList<string> arguments,
@@ -45,6 +46,7 @@ internal sealed record SchemaToolOptions(
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var destructive = new HashSet<string>(StringComparer.Ordinal);
         var semantic = new HashSet<string>(StringComparer.Ordinal);
+        var manifestOptions = new Dictionary<string, string>(StringComparer.Ordinal);
         var offline = false;
         var safe = false;
         for (var index = 1; index < arguments.Count; index++)
@@ -82,6 +84,26 @@ internal sealed record SchemaToolOptions(
             if (option == "--allow-semantic")
             {
                 semantic.Add(value);
+                continue;
+            }
+            if (option == "--manifest-option")
+            {
+                var separator = value.IndexOf('=');
+                if (separator <= 0)
+                {
+                    diagnostic = "Option '--manifest-option' requires 'key=value'.";
+                    return false;
+                }
+
+                // Only the first '=' separates; the rest belongs to the value, so a path or connection
+                // fragment carrying one survives intact.
+                var key = value[..separator];
+                if (!manifestOptions.TryAdd(key, value[(separator + 1)..]))
+                {
+                    diagnostic = $"Manifest option '{key}' was supplied more than once.";
+                    return false;
+                }
+
                 continue;
             }
             if (!values.TryAdd(option, value))
@@ -164,7 +186,8 @@ internal sealed record SchemaToolOptions(
             safe,
             expectedPlanFingerprint,
             destructive,
-            semantic);
+            semantic,
+            manifestOptions);
         return true;
     }
 
@@ -179,7 +202,8 @@ internal sealed record SchemaToolOptions(
         "--output",
         "--expected-plan",
         "--allow-destructive",
-        "--allow-semantic"
+        "--allow-semantic",
+        "--manifest-option"
     };
 
     private static bool TryCommand(string value, out SchemaToolCommand command) =>
