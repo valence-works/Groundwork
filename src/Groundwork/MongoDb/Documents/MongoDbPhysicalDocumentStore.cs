@@ -378,6 +378,32 @@ public sealed class MongoDbPhysicalDocumentStore :
     {
         await transactionCapability.EnsureSupportedAsync(documentKinds, "physical storage", cancellationToken);
         await EnsureRolloutFenceAsync(cancellationToken);
+        return await ExecuteInTransactionAsync(
+            documentKinds,
+            (session, _) => action(session),
+            duplicateKeyOutcome: () => duplicateKeyResult is null
+                ? Task.FromResult(DocumentStoreWriteResult.ConcurrencyConflict)
+                : duplicateKeyResult(),
+            beforeCommit: null,
+            afterCommitBeforeAcknowledgement: null,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs one body inside a snapshot/majority transaction with the shared retry skeleton: rollout
+    /// fence conflicts and transient transaction conflicts retry within the attempt/timeout budget,
+    /// commit-acknowledgement uncertainty and other failures abort and rethrow. Duplicate-key policy is
+    /// the caller's: a non-null <paramref name="duplicateKeyOutcome"/> makes duplicate keys terminal by
+    /// returning its result after the abort; a null one retries them like transient conflicts.
+    /// </summary>
+    private async Task<T> ExecuteInTransactionAsync<T>(
+        IReadOnlyList<string> documentKinds,
+        Func<IClientSessionHandle, CancellationToken, Task<T>> body,
+        Func<Task<T>>? duplicateKeyOutcome,
+        Func<CancellationToken, ValueTask>? beforeCommit,
+        Func<CancellationToken, ValueTask>? afterCommitBeforeAcknowledgement,
+        CancellationToken cancellationToken)
+    {
         var retryStarted = timeProvider.GetTimestamp();
         for (var attempt = 1; ; attempt++)
         {
@@ -389,51 +415,35 @@ public sealed class MongoDbPhysicalDocumentStore :
             try
             {
                 await hooks.TransactionBodyStarting(session, attempt, cancellationToken);
-                var result = await action(session);
+                var result = await body(session, cancellationToken);
+                if (beforeCommit is not null)
+                    await beforeCommit(cancellationToken);
                 await CommitWithRetryAsync(session, documentKinds, cancellationToken);
+                if (afterCommitBeforeAcknowledgement is not null)
+                    await afterCommitBeforeAcknowledgement(cancellationToken);
                 return result;
             }
             catch (MongoDbCollectionRolloutFenceRetryException)
             {
                 await AbortTransactionIgnoringFailureAsync(session);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!CanRetry(
-                        attempt,
-                        retryStarted,
-                        options.MaximumTransactionAttempts,
-                        options.TransactionRetryTimeout))
-                {
-                    throw;
-                }
-                await DelayBeforeRetryAsync(attempt, cancellationToken);
-                if (timeProvider.GetElapsedTime(retryStarted) >= options.TransactionRetryTimeout)
+                if (!await TryWaitForTransactionRetryAsync(attempt, retryStarted, cancellationToken))
                     throw;
             }
             catch (MongoException exception) when (
                 !cancellationToken.IsCancellationRequested &&
+                duplicateKeyOutcome is not null &&
                 IsDuplicateKey(exception))
             {
                 await AbortTransactionIgnoringFailureAsync(session);
-                return duplicateKeyResult is null
-                    ? DocumentStoreWriteResult.ConcurrencyConflict
-                    : await duplicateKeyResult();
+                return await duplicateKeyOutcome();
             }
             catch (MongoException exception) when (
-                IsTransientTransactionConflict(exception) &&
-                !cancellationToken.IsCancellationRequested)
+                !cancellationToken.IsCancellationRequested &&
+                (IsTransientTransactionConflict(exception) ||
+                 (duplicateKeyOutcome is null && IsDuplicateKey(exception))))
             {
                 await AbortTransactionIgnoringFailureAsync(session);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!CanRetry(
-                        attempt,
-                        retryStarted,
-                        options.MaximumTransactionAttempts,
-                        options.TransactionRetryTimeout))
-                {
-                    throw;
-                }
-                await DelayBeforeRetryAsync(attempt, cancellationToken);
-                if (timeProvider.GetElapsedTime(retryStarted) >= options.TransactionRetryTimeout)
+                if (!await TryWaitForTransactionRetryAsync(attempt, retryStarted, cancellationToken))
                     throw;
             }
             catch (DocumentCommitAcknowledgementUncertainException)
@@ -448,6 +458,25 @@ public sealed class MongoDbPhysicalDocumentStore :
                 throw;
             }
         }
+    }
+
+    /// <summary>
+    /// Decides whether the failed transaction attempt may retry: false (rethrow the current failure)
+    /// when the attempt/timeout budget is exhausted, true after the backoff delay ran otherwise.
+    /// </summary>
+    private async Task<bool> TryWaitForTransactionRetryAsync(int attempt, long retryStarted, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!CanRetry(
+                attempt,
+                retryStarted,
+                options.MaximumTransactionAttempts,
+                options.TransactionRetryTimeout))
+        {
+            return false;
+        }
+        await DelayBeforeRetryAsync(attempt, cancellationToken);
+        return timeProvider.GetElapsedTime(retryStarted) < options.TransactionRetryTimeout;
     }
 
     private async Task CommitWithRetryAsync(
@@ -933,77 +962,23 @@ public sealed class MongoDbPhysicalDocumentStore :
             cancellationToken);
         await EnsureRolloutFenceAsync(cancellationToken);
         var route = Route(documentKind);
-        var retryStarted = timeProvider.GetTimestamp();
-        for (var attempt = 1; ; attempt++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            using var session = await startSessionAsync(cancellationToken);
-            session.StartTransaction(new TransactionOptions(
-                ReadConcern.Snapshot,
-                writeConcern: WriteConcern.WMajority));
-            try
+        return await ExecuteInTransactionAsync(
+            [documentKind],
+            async (session, ct) =>
             {
-                await hooks.TransactionBodyStarting(session, attempt, cancellationToken);
                 await MongoDbCollectionRolloutFence.AssertWriterCompatibleAsync(
                     database,
                     session,
                     route,
                     hooks.RolloutFenceMissingBeforeInsert,
                     hooks.RolloutFenceExistingBeforeTouch,
-                    cancellationToken);
-                var result = await action(session, cancellationToken);
-                if (beforeCommit is not null)
-                    await beforeCommit(cancellationToken);
-                await CommitWithRetryAsync(session, [documentKind], cancellationToken);
-                if (afterCommitBeforeAcknowledgement is not null)
-                    await afterCommitBeforeAcknowledgement(cancellationToken);
-                return result;
-            }
-            catch (MongoDbCollectionRolloutFenceRetryException)
-            {
-                await AbortTransactionIgnoringFailureAsync(session);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!CanRetry(
-                        attempt,
-                        retryStarted,
-                        options.MaximumTransactionAttempts,
-                        options.TransactionRetryTimeout))
-                {
-                    throw;
-                }
-                await DelayBeforeRetryAsync(attempt, cancellationToken);
-                if (timeProvider.GetElapsedTime(retryStarted) >= options.TransactionRetryTimeout)
-                    throw;
-            }
-            catch (MongoException exception) when (
-                !cancellationToken.IsCancellationRequested &&
-                (IsDuplicateKey(exception) || IsTransientTransactionConflict(exception)))
-            {
-                await AbortTransactionIgnoringFailureAsync(session);
-                if (!CanRetry(
-                        attempt,
-                        retryStarted,
-                        options.MaximumTransactionAttempts,
-                        options.TransactionRetryTimeout))
-                {
-                    throw;
-                }
-                await DelayBeforeRetryAsync(attempt, cancellationToken);
-                if (timeProvider.GetElapsedTime(retryStarted) >= options.TransactionRetryTimeout)
-                    throw;
-            }
-            catch (DocumentCommitAcknowledgementUncertainException)
-            {
-                await AbortTransactionIgnoringFailureAsync(session);
-                throw;
-            }
-            catch
-            {
-                await AbortTransactionIgnoringFailureAsync(session);
-                cancellationToken.ThrowIfCancellationRequested();
-                throw;
-            }
-        }
+                    ct);
+                return await action(session, ct);
+            },
+            duplicateKeyOutcome: null,
+            beforeCommit,
+            afterCommitBeforeAcknowledgement,
+            cancellationToken);
     }
 
     private static StorageScopePolicy ScopePolicy(StorageUnit unit) =>
@@ -1012,127 +987,78 @@ public sealed class MongoDbPhysicalDocumentStore :
     private sealed class UnitOfWork(
         MongoDbPhysicalDocumentStore store,
         IClientSessionHandle session,
-        DocumentCommitScope scope) : IDocumentUnitOfWork
+        DocumentCommitScope scope) : MongoDbDocumentUnitOfWorkBase(session)
     {
-        private bool completed;
-        public async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
+        protected override string AlreadyCompletedMessage => "The document transaction has completed.";
+
+        protected override Task CommitTransactionAsync(CancellationToken cancellationToken) =>
+            store.CommitWithRetryAsync(Session, scope.Kinds, cancellationToken);
+
+        protected override void BeforeRethrowStagedWriteFailure(CancellationToken cancellationToken) =>
+            cancellationToken.ThrowIfCancellationRequested();
+
+        public override async Task<DocumentStoreWriteResult> SaveAsync(SaveDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             scope.EnsureIncludes(request.DocumentKind);
             var (route, selection) = store.ResolveOperation(request.DocumentKind, StorageScopeOperation.Save);
-            try
+
+            Func<CancellationToken, Task<DocumentStoreWriteResult>>? ConvertFailure(Exception exception)
             {
-                var result = await store.SaveCoreAsync(request, route, selection, session, cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Saved)
-                    await AbortAsync(CancellationToken.None);
-                return result;
+                if (exception is MongoDbCollectionRolloutFenceRetryException)
+                    return _ => Task.FromResult(DocumentStoreWriteResult.ConcurrencyConflict);
+                if (exception is MongoException mongoException &&
+                    !cancellationToken.IsCancellationRequested &&
+                    (IsDuplicateKey(mongoException) || IsTransientTransactionConflict(mongoException)))
+                {
+                    return ct => IsDuplicateKey(mongoException)
+                        ? store.ClassifyDuplicateIdentityAsync(route, request.Id, selection.StorageKey!, ct)
+                        : Task.FromResult(DocumentStoreWriteResult.ConcurrencyConflict);
+                }
+                return null;
             }
-            catch (MongoDbCollectionRolloutFenceRetryException)
-            {
-                await AbortAsync(CancellationToken.None);
-                return DocumentStoreWriteResult.ConcurrencyConflict;
-            }
-            catch (MongoException exception) when (
-                !cancellationToken.IsCancellationRequested &&
-                (IsDuplicateKey(exception) || IsTransientTransactionConflict(exception)))
-            {
-                await AbortAsync(CancellationToken.None);
-                return IsDuplicateKey(exception)
-                    ? await store.ClassifyDuplicateIdentityAsync(
-                        route,
-                        request.Id,
-                        selection.StorageKey!,
-                        cancellationToken)
-                    : DocumentStoreWriteResult.ConcurrencyConflict;
-            }
-            catch
-            {
-                await AbortAsync(CancellationToken.None);
-                cancellationToken.ThrowIfCancellationRequested();
-                throw;
-            }
+
+            return await StageWriteAsync(
+                ct => store.SaveCoreAsync(request, route, selection, Session, ct),
+                DocumentStoreWriteStatus.Saved,
+                cancellationToken,
+                ConvertFailure);
         }
-        public async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
+
+        public override async Task<DocumentStoreWriteResult> DeleteAsync(DeleteDocumentRequest request, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             scope.EnsureIncludes(request.DocumentKind);
-            try
+
+            Func<CancellationToken, Task<DocumentStoreWriteResult>>? ConvertFailure(Exception exception)
             {
-                var (route, selection) = store.ResolveOperation(request.DocumentKind, StorageScopeOperation.Delete);
-                var result = await store.DeleteCoreAsync(request, route, selection, session, cancellationToken);
-                if (result.Status != DocumentStoreWriteStatus.Deleted)
-                    await AbortAsync(CancellationToken.None);
-                return result;
+                if (exception is MongoDbCollectionRolloutFenceRetryException ||
+                    (exception is MongoException mongoException &&
+                     !cancellationToken.IsCancellationRequested &&
+                     IsTransientTransactionConflict(mongoException)))
+                {
+                    return _ => Task.FromResult(DocumentStoreWriteResult.ConcurrencyConflict);
+                }
+                return null;
             }
-            catch (MongoDbCollectionRolloutFenceRetryException)
-            {
-                await AbortAsync(CancellationToken.None);
-                return DocumentStoreWriteResult.ConcurrencyConflict;
-            }
-            catch (MongoException exception) when (
-                !cancellationToken.IsCancellationRequested &&
-                IsTransientTransactionConflict(exception))
-            {
-                await AbortAsync(CancellationToken.None);
-                return DocumentStoreWriteResult.ConcurrencyConflict;
-            }
-            catch
-            {
-                await AbortAsync(CancellationToken.None);
-                cancellationToken.ThrowIfCancellationRequested();
-                throw;
-            }
+
+            return await StageWriteAsync(
+                ct =>
+                {
+                    var (route, selection) = store.ResolveOperation(request.DocumentKind, StorageScopeOperation.Delete);
+                    return store.DeleteCoreAsync(request, route, selection, Session, ct);
+                },
+                DocumentStoreWriteStatus.Deleted,
+                cancellationToken,
+                ConvertFailure);
         }
-        public Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
+
+        public override Task<DocumentEnvelope?> LoadAsync(string documentKind, string id, CancellationToken cancellationToken = default)
         {
             EnsureActive();
             scope.EnsureIncludes(documentKind);
             var (route, selection) = store.ResolveOperation(documentKind, StorageScopeOperation.Load);
-            return store.LoadCoreAsync(route, id, selection, session, cancellationToken);
-        }
-        public async Task CommitAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            try { await store.CommitWithRetryAsync(session, scope.Kinds, cancellationToken); }
-            finally { Complete(); }
-        }
-        public async Task RollbackAsync(CancellationToken cancellationToken = default)
-        {
-            EnsureActive();
-            await AbortAsync(cancellationToken);
-        }
-        public async ValueTask DisposeAsync()
-        {
-            if (completed) return;
-            try { if (session.IsInTransaction) await session.AbortTransactionAsync(); }
-            finally { Complete(); }
-        }
-        private void EnsureActive()
-        {
-            if (completed) throw new InvalidOperationException("The document transaction has completed.");
-        }
-        private async Task AbortAsync(CancellationToken cancellationToken)
-        {
-            if (completed) return;
-            try
-            {
-                if (session.IsInTransaction)
-                    await session.AbortTransactionAsync(cancellationToken);
-            }
-            catch (MongoException)
-            {
-                // A failed write already makes the unit of work terminal.
-            }
-            finally
-            {
-                Complete();
-            }
-        }
-        private void Complete()
-        {
-            if (completed) return;
-            completed = true;
-            session.Dispose();
+            return store.LoadCoreAsync(route, id, selection, Session, cancellationToken);
         }
     }
 }
