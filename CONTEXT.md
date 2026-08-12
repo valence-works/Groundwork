@@ -119,12 +119,14 @@ _Avoid_: Sidecar, physicalization table, optimized projection
 **Relationship Reference Storage**:
 The generated, runtime-maintained linked storage that makes one declared cross-unit reference
 queryable and fenceable. It is a write-path structure, not a schema-preparation step, so
-"materialization" does not name it.
+"materialization" does not name it. The shipped types still carry the older names; this is the
+vocabulary new work uses and the rename targets.
 _Avoid_: Relationship materialization, relationship sidecar
 
 **Reference Fence Generation**:
 The monotonic generation that fences a relationship reference against a concurrent change to its
-target, so a stale reference can never be read as proof of an active target.
+target, so a stale reference can never be read as proof of an active target. The shipped field is
+still named for materialization.
 _Avoid_: Materialization generation
 
 **Diagnostic Record Store**:

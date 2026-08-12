@@ -937,7 +937,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         dialect.ReadDocumentIdentityLookup(reader, ordinal);
     internal RelationalPhysicalEnvelopeRow ReadPhysicalEnvelope(DbDataReader reader) =>
         RelationalPhysicalEnvelopeRowLayout.Read(reader, dialect);
-    internal string P(string name) => dialect.Parameter(name);
+    internal string Parameter(string name) => dialect.Parameter(name);
     internal int MaxPhysicalParameters => dialect.MaxParameters;
     internal string Contains(string field, string parameter) => dialect.Contains(field, parameter);
     internal string StartsWith(string field, string parameter) => dialect.StartsWith(field, parameter);
@@ -1491,7 +1491,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         var parts = identity.Select(item => new RelationalPhysicalIdentityPredicatePart(
             item.Column,
             null,
-            P(item.Parameter))).ToArray();
+            Parameter(item.Parameter))).ToArray();
         var hashOnly = dialect.HashOnlyIdentityPredicate(parts);
         if (hashOnly is null)
             return;

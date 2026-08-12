@@ -278,8 +278,8 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         return new RelationalPhysicalQueryCommand(
             store.ApplyOffsetPage(
                 $"SELECT {selection} {built.FromAndWhere} {OrderBy(query, plan)}",
-                store.P("take"),
-                store.P("skip")),
+                store.Parameter("take"),
+                store.Parameter("skip")),
             parameters,
             built.PredicateFieldIdentifiers,
             PageReadLimit(query, plan),
@@ -316,8 +316,8 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             .ToArray();
         var limitedLookup = WithoutTerminator(store.ApplyOffsetPage(
             $"SELECT l.* {lookup.FromAndWhere} {LinkedOrderBy(query, plan, route, "l")}",
-            store.P("take"),
-            store.P("skip")));
+            store.Parameter("take"),
+            store.Parameter("skip")));
         var selection = EnvelopeSelection(route);
         if (plan.PagingSupport == QueryPagingSupport.Cursor)
         {
@@ -574,7 +574,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             })
             .ToArray();
         return new RelationalPhysicalQueryCommand(
-            store.ApplyOffsetPage(select, store.P("take"), store.P("skip")),
+            store.ApplyOffsetPage(select, store.Parameter("take"), store.Parameter("skip")),
             parameters,
             built.PredicateFieldIdentifiers
                 .Concat(order.Select(item => item.Field.Identifier))
@@ -614,8 +614,8 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         var winners = WithoutTerminator(store.ApplyOffsetPage(
             $"SELECT {rows}.* FROM (SELECT l.*, ROW_NUMBER() OVER (PARTITION BY {LinkedField(route, group, "l")} ORDER BY {winnerOrder}) AS {rank} {lookup.FromAndWhere}) AS {rows} " +
             $"WHERE {rank} = 1 ORDER BY {pageOrder}",
-            store.P("take"),
-            store.P("skip")));
+            store.Parameter("take"),
+            store.Parameter("skip")));
         var outerOrder = string.Join(", ", order.Select(item =>
             store.OrderPhysicalQueryExpression(LinkedField(route, item.Field, "s"), item.Direction)));
         return new RelationalPhysicalQueryCommand(
@@ -674,12 +674,12 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (!scope.AcrossScopes)
         {
             predicates.Add(store.ExactPhysicalIdentityPredicate(
-                [new(plan.Scope.Field.Identifier, Alias(plan.Scope.Field), store.P("scope"))]));
+                [new(plan.Scope.Field.Identifier, Alias(plan.Scope.Field), store.Parameter("scope"))]));
             parameters.Add(("scope", scope.StorageKey));
             predicateFieldIdentifiers.Add(plan.Scope.Field.Identifier);
         }
         predicates.Add(store.ExactPhysicalIdentityPredicate(
-            [new(plan.Discriminator.Identifier, Alias(plan.Discriminator), store.P("kind"))]));
+            [new(plan.Discriminator.Identifier, Alias(plan.Discriminator), store.Parameter("kind"))]));
         parameters.Add(("kind", route.Discriminator.Value));
         predicateFieldIdentifiers.Add(plan.Discriminator.Identifier);
 
@@ -945,7 +945,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
                 predicateFieldIdentifiers.Add(collection.Value.Column.Identifier);
                 membershipPredicates.Add(
                     $"EXISTS (SELECT 1 FROM {store.PhysicalQuerySource(collection.Storage.Name.Identifier, "c", collection.MembershipKey.Name.Identifier)} " +
-                    $"WHERE c.{store.QuoteIdentifier(collection.Value.Column.Identifier)} = {store.P(name)} AND " +
+                    $"WHERE c.{store.QuoteIdentifier(collection.Value.Column.Identifier)} = {store.Parameter(name)} AND " +
                     $"c.{store.QuoteIdentifier(collection.DocumentKind.Column.Identifier)} = p.{store.QuoteIdentifier(route.Discriminator.Column.Identifier)} AND " +
                     $"c.{store.QuoteIdentifier(collection.StorageScope.Column.Identifier)} = p.{store.QuoteIdentifier(route.ScopeKey.Column.Identifier)} AND " +
                     $"c.{store.QuoteIdentifier(collection.IdLookupKey.Column.Identifier)} = p.{store.QuoteIdentifier(route.Envelope.Identity.LookupKey.Identifier)} AND " +
@@ -1130,7 +1130,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (IsDocumentIdentityField(queryField))
             parameterValue = store.ConvertDocumentIdentityQueryValue(queryField, (string)parameterValue);
         parameters.Add((name, parameterValue));
-        var parameter = store.NormalizeQueryExpression(store.P(name), queryField.Source, queryField.ValueKind);
+        var parameter = store.NormalizeQueryExpression(store.Parameter(name), queryField.Source, queryField.ValueKind);
         return operation switch
         {
             QueryComparisonOperator.Equal => $"{field} = {parameter}",
@@ -1156,12 +1156,12 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         var range = store.ConvertDocumentIdentityPrefix(comparisonKey);
         var lowerName = $"q{parameterIndex++}";
         parameters.Add((lowerName, range.Lower));
-        var lower = store.NormalizeQueryExpression(store.P(lowerName), queryField.Source, queryField.ValueKind);
+        var lower = store.NormalizeQueryExpression(store.Parameter(lowerName), queryField.Source, queryField.ValueKind);
         if (range.Upper is null)
             return $"{field} >= {lower}";
         var upperName = $"q{parameterIndex++}";
         parameters.Add((upperName, range.Upper));
-        var upper = store.NormalizeQueryExpression(store.P(upperName), queryField.Source, queryField.ValueKind);
+        var upper = store.NormalizeQueryExpression(store.Parameter(upperName), queryField.Source, queryField.ValueKind);
         return $"({field} >= {lower} AND {field} < {upper})";
     }
 
@@ -1365,7 +1365,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (IsDocumentIdentityField(field) && parameterValue is string identityValue)
             parameterValue = store.ConvertDocumentIdentityQueryValue(field, identityValue);
         parameters.Add((name, parameterValue));
-        return store.NormalizeQueryExpression(store.P(name), field.Source, field.ValueKind);
+        return store.NormalizeQueryExpression(store.Parameter(name), field.Source, field.ValueKind);
     }
 
     private IReadOnlyList<DocumentQueryContinuationValue> ReadContinuationValues(

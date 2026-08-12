@@ -30,9 +30,9 @@ cleanup either an applied change in this slice or a tracked successor.
 
 Three evidence sources, all reproducible:
 
-1. **The shipped surface.** Every public type declaration under `src/Groundwork` (623 declarations
-   across 12 packages) plus the diagnostic-code families, CLI terms, and capability identifiers they
-   emit.
+1. **The shipped surface.** Every public type declaration under `src/Groundwork` — 623 across 12
+   packages when this review opened, 610 after the removals below — plus the 156 distinct
+   diagnostic codes, the CLI terms, and the capability identifiers they emit.
 2. **Consumer pressure.** The coordination notes on #63 from Elsa Foundation (#629/#646, #130/#131,
    #135/#136, #139, #140, #141, PR #154), plus a direct usage count of each candidate contract in the
    `elsa-foundation` tree. That count is what separates "remove now" from "sequence the bridge".
@@ -63,9 +63,11 @@ Consumer usage, counted by files referencing the type:
   proposed shipped intact and survived MongoDB, which consumes it for collections without a rename.
   ADR 0005 independently located the kernel seam at the same type, which is corroboration.
 - **"Bounded" won; "closed" and "portable" did not.** Every contract added since #45 is named
-  `Bounded*` — declaration, query, mutation, grouped reduction. `Closed*` survives only in
-  `ClosedQueryCapabilityModel`, `ClosedQueryNativeSupport`, `ClosedQueryIndexSupport`,
-  `ClosedQueryIndexResolver`, and `StorageUnitClosedQuerySupport`, all serving the legacy lane.
+  `Bounded*` — declaration, query, mutation, grouped reduction. `Closed*` survives in
+  `ClosedQueryCapabilityModel`, `ClosedQueryNativeSupport`, `ClosedQueryIndexResolver`,
+  `ClosedQueryIndexSupport`, `ClosedQuerySupportResult`, and `StorageUnitClosedQuerySupport`. Every
+  one of them is reached only from `RelationalDocumentStore` and `MongoDbDocumentStore` — the legacy
+  stores — so the family retires with the legacy lane rather than needing its own decision.
 - **`Portable` is now three unrelated jobs in one word**, and one of them is *not* legacy:
   `PortableQueryOperation` is the live operator enum that `BoundedQueryDeclaration` consumes. #28
   assumed "portable" would retire with the legacy query family; it cannot, because the live bounded
@@ -87,9 +89,10 @@ Consumer usage, counted by files referencing the type:
 - **One provider's identifier limit still defines every relational provider.** #28 flagged
   `RelationalPhysicalizationNames`' hard-coded 63-character cap as PostgreSQL leakage; it is still
   public, still capped, and still not obsolete-marked.
-- **The diagnostic-code area vocabulary was never ratified.** Eighteen `GW-<AREA>-NNN` families are in
-  use, including provider-specific (`GW-MONGO-ROUTE`), legacy (`GW-MAT`, `GW-PHYSICAL-LEGACY`), and
-  near-duplicate (`GW-SCHEMA` vs `GW-RELATIONAL-SCHEMA`) areas.
+- **The diagnostic-code area vocabulary was never ratified.** 156 distinct codes are spread over
+  seventeen `GW-<AREA>-NNN` families, including provider-specific (`GW-MONGO-ROUTE`), legacy
+  (`GW-MAT`, `GW-PHYSICAL-LEGACY`), and near-duplicate (`GW-SCHEMA` vs `GW-RELATIONAL-SCHEMA`) areas.
+  The compiler-facing `GW0001`–`GW0004` transition ids are a separate, correctly scoped family.
 
 ## Inventory of the shipped surface
 
@@ -97,7 +100,7 @@ Consumer usage, counted by files referencing the type:
 
 | Package | Role after runtime delivery | Assessment |
 |---|---|---|
-| `Groundwork.Core` | Manifests, capabilities, physical storage, schema evolution, identity, scoping, text. | Keep, but ADR 0005 splits the generic physical-object definition out of `PhysicalTableDefinition`; spec 023 owns that seam. |
+| `Groundwork.Core` | Manifests, capabilities, physical storage, schema evolution, identity, scoping, text. | Keep, but ADR 0005 seam A splits the generic physical-object definition out of `PhysicalTableDefinition`. That seam is sequenced after seam B and has no spec yet. |
 | `Groundwork.Documents` | Document contract family: stores, queries, mutations, unit of work, scoping. | Keep. This is a contract family in ADR 0005 terms, not a kernel facility. |
 | `Groundwork.Materialization` | Compatibility plan/planner for the legacy document lane only. | Retire with the legacy lane. It is not a package boundary anyone should learn. |
 | `Groundwork.Relational` | Shared relational document store, physical storage, planning, legacy physicalization naming. | Keep, minus the legacy planning/physicalization members. |
@@ -112,13 +115,16 @@ authority for that concept. `Core.SchemaEvolution` is.
 ### Capability names
 
 `WellKnownCapabilities` declares exactly one built-in capability,
-`groundwork.operational.atomic-commit`. Its `operational` segment predates ADR 0004's retirement of
-`Groundwork.Operational` and is retained deliberately: capability ids reach executable-route
-fingerprints, so renaming one reads as physical schema drift. **This exception is ratified.** It is
-documented at the declaration and must stay documented; it is identifier stability, not vocabulary.
+`groundwork.operational.atomic-commit`. Its `operational` segment predates ADR 0004 and is retained
+deliberately: capability ids reach executable-route fingerprints, so renaming one reads as physical
+schema drift. **This exception is ratified.** It is documented at the declaration and must stay
+documented; it is identifier stability, not vocabulary.
 
-`StorageIntent.Operational(...)` carries the same retired word with none of the stability
-justification — it is an ordinary factory method whose name no longer denotes anything.
+`operational` more generally is **not** a residue to clean up. ADR 0004 retired the
+`Groundwork.Operational` *packages* while keeping the capability vocabulary in full, naming
+`StorageIntent.Operational` among the members it retains. The word denotes a consumer's declared
+workload demand, which is computed into provider fit — a live concept with a live meaning. This
+review confirms that reading and adds nothing to it.
 
 ### Transition diagnostics
 
@@ -150,7 +156,8 @@ vocabulary, and the "migrations" framing ADR 0003 permitted for operator familia
 Retired as a contract promise, as #28 required — but not yet absent. It survives in
 `MaterializationOperationKind.CreateOptimizedProjection`, `CreateOptimizedProjectionOperation`,
 `IndexPhysicalizationPolicy.Optimized`, `PhysicalizationKind.Optimized`, the `Groundwork__Physicalization=Optimized`
-sample switch, and the `README` quickstart. Every survival is inside the legacy lane. **Decision:**
+sample switch, and the `README` quickstart. Every survival is either the legacy lane itself or
+documentation of it. **Decision:**
 no new use; removal is bound to the legacy lane's retirement, not tracked separately.
 
 ### `projection`
@@ -173,7 +180,8 @@ the runtime added `ExecutableQueryPathRoute`, `ExecutableCollectionElementStorag
 `ExecutableMaintenanceRoute`, and friends without straining the word. **Decision:** ratified. One
 qualification the runtime forced and #28 did not anticipate: routes are also a *subordination*
 invariant — `PhysicalSchemaTarget` and `PhysicalSchemaAppliedSnapshot` both reject a provider
-definition that belongs to no route. ADR 0005 and spec 023 own relaxing that; the word itself is fine.
+definition that belongs to no route. ADR 0005 seam B and [spec 023](../../specs/023-groundwork-schema-subject-seam)
+own relaxing that; the word itself is fine.
 
 ### `storage unit`
 
@@ -188,13 +196,14 @@ constructor; the positional one is a bridge artefact.
 Confirmed, including for MongoDB. **Decision:** ratified for the document contract family. Under
 ADR 0005 the generic half (name, projected columns, indexes, schema version, evolution metadata)
 becomes a contract-family-neutral physical-object definition and only the document half (form,
-envelope, shared binding, linked key) keeps the "table" word. Spec 023 owns that split; this review
-confirms the word is right for what remains.
+envelope, shared binding, linked key) keeps the "table" word. That is ADR 0005 seam A, which the ADR
+sequences after seam B and which has no spec yet; this review confirms only that the word is right
+for what remains.
 
 ### `materialization`
 
-**Not reconciled — this is the finding that most needs a decision.** The shipped surface uses one word
-for two unrelated things:
+**Reconciled here for the first time.** #28 could not have seen this; the second use did not exist
+yet. The shipped surface now uses one word for two unrelated things:
 
 | Use | Meaning | Examples |
 |---|---|---|
@@ -209,8 +218,9 @@ than per deployment.
 The relationship family is renamed around **relationship reference storage** — a generated,
 runtime-maintained structure that makes a declared cross-unit reference queryable and fenceable. Its
 generation counter becomes a **reference fence generation**. Renaming is source-breaking on a surface
-with no external consumer, so it is tracked rather than folded into this slice, which is already
-carrying three removals.
+with no external consumer, so it is tracked rather than folded into this slice, and because a rename
+that touches persisted schema hashes deserves its own evidence rather than riding along with
+unrelated removals.
 
 ### `sidecar`
 
@@ -226,12 +236,11 @@ are the only public exceptions and are renamed with the relationship family abov
 |---|---|---|
 | `Groundwork.Core.Migrations.*` (`IGroundworkMigration`, `GroundworkMigration`, `GroundworkMigrationOperation(Kind)`, `GroundworkMigrationRunner`, `IGroundworkMigrationExecutor`, `GroundworkMigrationExecutionOptions`, `GroundworkMigrationResult`, `GroundworkMigrationRecord`) and `SqliteGroundworkMigrationExecutor` | A second, imperative schema-evolution pipeline with its own ordering, executor, options, result, and ledger. No production wiring, no consumer. | **Removed in this slice.** |
 | `Groundwork.Core.Materialization.MaterializationPlan` / `MaterializationOperation` / `SchemaHistoryEntry` | Duplicate records shadowing the active `Groundwork.Materialization` names with different shapes; zero references anywhere including their own package. | **Removed in this slice.** The file now holds only the genuinely shared `MaterializationOperationKind` and `IProviderMaterializationOperation` seam and is named for it. |
-| `RelationalServerPhysicalSchemaDialect.Q` | A public abstract single-letter member, asymmetric with `RelationalPhysicalDocumentDialect.QuoteIdentifier`, which already used the explicit name. | **Renamed in this slice** to `QuoteIdentifier`, together with every private `Q` helper in providers, tests, and benchmarks. |
+| `RelationalServerPhysicalSchemaDialect.Q` and `RelationalPhysicalDocumentStore.P` | Single-letter identifier-quoting and parameter members — one public abstract, one internal and reached from four files — asymmetric with `RelationalPhysicalDocumentDialect.QuoteIdentifier`, which already spelled its name out. This is the deferred #47 finding recorded on #63. | **Renamed in this slice** to `QuoteIdentifier` and `Parameter`, together with every private `Q` helper in providers, tests, and benchmarks. The two local aliases that became same-name shadows are inlined to the `dialect.` calls the rest of their file already used. |
 | `DocumentPlan` / `RelationalPlan` | Forwarding facades whose only members re-expose `MaterializationPlan`'s. Zero consumer usage. | Track. They retire with the legacy lane rather than separately. |
 | `RelationalPhysicalizationNames` | Public, unmarked, and hard-codes PostgreSQL's 63-character identifier cap for every relational provider. | Track. |
 | `PhysicalizationNameEncoder`, `RelationalPhysicalizationValues` | Public legacy helpers with no obsolete marker. | Track with the above. |
 | `StorageUnit` positional constructor | Requires three obsolete parameter types that current callers satisfy with empty/`Portable` placeholders. | Track. It is the last GW0001–GW0003 dependency that new code cannot avoid. |
-| `StorageIntent.Operational` | Retired ADR 0004 vocabulary with no identifier-stability justification. | Track. |
 | `MongoDbPhysicalStorageModel`, `MongoDbGroundworkNames`, `MongoDbDiagnosticRecordNames` | Provider mechanics on the public surface. #28 asked for these to become internal. | Track. |
 | `GW-MONGO-ROUTE-###`, `GW-MAT-###`, `GW-PHYSICAL-LEGACY-###`, `GW-RELATIONAL-SCHEMA-###` | Unratified diagnostic-code areas: one provider-specific, two legacy, one near-duplicate of `GW-SCHEMA`. | Track. |
 | `ClosedQuery*` family | Competes with `BoundedQuery*` for the same concept. | Track with the legacy lane. |
@@ -249,9 +258,9 @@ stands, with these post-runtime amendments.
 | **Materialization** | Preparing provider storage for a manifest. Nothing else. | Newly contested; the relationship family surrenders the word. |
 | **Relationship reference storage** | The generated, runtime-maintained structure that makes a declared cross-unit reference queryable and fenceable. | New. Replaces the relationship family's use of `materialization` and `sidecar`. |
 | **Reference fence generation** | The monotonic generation that fences a relationship reference against a concurrent target change. | New. Replaces `MaterializationGeneration`. |
-| **Executable storage route** | Unchanged from CONTEXT.md, with the added invariant that provider physical-schema definitions are subordinate to routes on both the desired and applied sides. | Invariant made explicit; ADR 0005 owns relaxing it. |
+| **Executable storage route** | Unchanged from CONTEXT.md, with the added invariant that provider physical-schema definitions are subordinate to routes on both the desired and applied sides. | Invariant made explicit; ADR 0005 seam B owns relaxing it. |
 | **Physicalization** | Legacy only. Never in new API, including naming and value helpers. | Tightened: #28 deprecated the declarations, this ratifies the helpers as legacy too. |
-| **`groundwork.operational.*` capability ids** | Frozen identifiers, not vocabulary. Retained for fingerprint stability under ADR 0004. | New ratified exception. |
+| **`groundwork.operational.*` capability ids** | Frozen identifiers. ADR 0004 keeps the operational capability vocabulary; the id is additionally frozen because capability ids reach executable-route fingerprints. | New ratified exception, and a correction: `operational` is live vocabulary, not a residue. |
 
 ## Bridge sequencing
 
@@ -260,9 +269,10 @@ bridge surfaces. Per the consumer coordination note, those warnings are migratio
 to suppress the diagnostics or add downstream aliases. This review ratifies that position and fixes
 the sequence:
 
-1. **Now (this slice).** Remove what has no consumer at all: the imperative migration pipeline, the
-   duplicate Core materialization records, and the terse dialect member. No bridge surface is touched,
-   so no consumer recompilation is forced by this slice.
+1. **Now (this slice).** Remove what has no consumer at all — the imperative migration pipeline and
+   the duplicate Core materialization records — and rename the single-letter dialect and store
+   members. No bridge surface is touched, and the renamed members are either unimplemented by any
+   consumer or `internal`, so this slice forces no consumer recompilation.
 2. **Warning stays warning** until the consumer's replacement work lands. Groundwork does not raise
    GW0001–GW0004 to errors while it is the only party that can see the whole migration.
 3. **Warning to error** in one announced pre-1.0 release, after the consumer confirms the replacement
@@ -281,9 +291,14 @@ obsolete-marked declaration plus `LegacyPhysicalStorageBridge`; there is no seco
 - Removed the unused duplicate `Groundwork.Core.Materialization` plan, operation, and schema-history
   records; the remaining shared kind enum and provider-operation interface now live in
   `ProviderMaterializationOperation.cs`.
-- Renamed `RelationalServerPhysicalSchemaDialect.Q` to `QuoteIdentifier` and every private `Q` helper
-  in providers, tests, and benchmarks.
-- Added the ratified terms to [`CONTEXT.md`](../../CONTEXT.md).
+- Renamed `RelationalServerPhysicalSchemaDialect.Q` to `QuoteIdentifier` and
+  `RelationalPhysicalDocumentStore.P` to `Parameter`, together with every private `Q`/`P` helper in
+  providers, tests, and benchmarks, closing the deferred #47 finding recorded on #63. Both renames
+  are mechanical: every retained file is byte-identical to its previous content with the identifier
+  substituted.
+- Added the ratified terms to [`CONTEXT.md`](../../CONTEXT.md), and de-staled the `README.md`
+  physical-storage section, which still said provider execution had not moved to resolved
+  definitions.
 - Cross-linked this report from [ADR 0003](../adr/0003-adopt-three-physical-storage-forms.md),
   [ADR 0002](../adr/0002-additive-index-backfill-in-materializer.md), the
   [#28 report](groundwork-vocabulary-and-public-api.md), and the
@@ -297,14 +312,16 @@ Every approved cleanup not applied above is filed against #25 and cross-linked f
 |---|---|
 | [#180](https://github.com/valence-works/Groundwork/issues/180) | Rename the relationship family off `materialization` and `sidecar`. |
 | [#181](https://github.com/valence-works/Groundwork/issues/181) | Rename `PortableQueryOperation` to `BoundedQueryOperation`; settle `Bounded` vs `Closed`. |
-| [#182](https://github.com/valence-works/Groundwork/issues/182) | Retire the unmarked legacy physicalization helpers, PostgreSQL's identifier cap, `StorageIntent.Operational`, and the public MongoDB mechanics. |
+| [#182](https://github.com/valence-works/Groundwork/issues/182) | Retire the unmarked legacy physicalization helpers and PostgreSQL's identifier cap; internalize the public MongoDB mechanics. |
 | [#183](https://github.com/valence-works/Groundwork/issues/183) | Give `StorageUnit` a constructor that does not require obsolete declaration types. |
 | [#184](https://github.com/valence-works/Groundwork/issues/184) | Ratify the `GW-<AREA>-NNN` diagnostic-code areas. |
 | [#185](https://github.com/valence-works/Groundwork/issues/185) | Retire the legacy document lane in one announced breaking release. |
 
-ADR 0005's kernel/contract-family seam — splitting the generic physical-object definition out of
-`PhysicalTableDefinition` and relaxing route subordination — is owned by
-[spec 023](../../specs/023-groundwork-schema-subject-seam), not by this review.
+ADR 0005's kernel/contract-family seams are not owned by this review. Seam B — making
+`ProviderPhysicalSchemaDefinition` a first-class schema subject and relaxing route subordination — is
+[spec 023](../../specs/023-groundwork-schema-subject-seam). Seam A — splitting the generic
+physical-object definition out of `PhysicalTableDefinition` — is sequenced after seam B and has no
+spec yet.
 
 ## Out of scope
 

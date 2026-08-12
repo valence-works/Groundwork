@@ -750,10 +750,10 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             $"{store.QuoteIdentifier(route.Envelope.CanonicalJson.Identifier)} = " +
             store.SetJsonValue(
                 $"p.{store.QuoteIdentifier(route.Envelope.CanonicalJson.Identifier)}",
-                store.P("assignmentPath"),
-                store.P("assignmentJson")),
+                store.Parameter("assignmentPath"),
+                store.Parameter("assignmentJson")),
             $"{store.QuoteIdentifier(route.Envelope.Version.Identifier)} = p.{store.QuoteIdentifier(route.Envelope.Version.Identifier)} + 1",
-            $"{store.QuoteIdentifier(RelationalPhysicalStorageColumns.UpdatedUtc)} = {store.P("assignmentUpdated")}"
+            $"{store.QuoteIdentifier(RelationalPhysicalStorageColumns.UpdatedUtc)} = {store.Parameter("assignmentUpdated")}"
         };
         var primaryProjections = route.ProjectedColumns
             .Where(column => column.Target == ExecutableStorageObjectRole.PrimaryStorage &&
@@ -807,7 +807,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         foreach (var projection in projections)
         {
             var name = $"assignmentProjection{parameters.Count}";
-            assignments.Add($"{store.QuoteIdentifier(projection.Column.Identifier)} = {store.P(name)}");
+            assignments.Add($"{store.QuoteIdentifier(projection.Column.Identifier)} = {store.Parameter(name)}");
             parameters.Add((
                 name,
                 store.ConvertPhysicalQueryValue(
@@ -870,11 +870,11 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
 
     private IReadOnlyList<RelationalPhysicalIdentityPredicatePart> OperationIdentityPredicate() =>
     [
-        new("manifest_id", null, store.P("manifestId")),
-        new("provider_name", null, store.P("providerName")),
-        new("storage_unit", null, store.P("storageUnit")),
-        new("storage_scope", null, store.P("storageScope")),
-        new("operation_id", null, store.P("operationId"))
+        new("manifest_id", null, store.Parameter("manifestId")),
+        new("provider_name", null, store.Parameter("providerName")),
+        new("storage_unit", null, store.Parameter("storageUnit")),
+        new("storage_scope", null, store.Parameter("storageScope")),
+        new("operation_id", null, store.Parameter("operationId"))
     ];
 
     private IReadOnlyList<(string Name, object? Value)> OperationIdentity(

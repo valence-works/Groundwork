@@ -248,13 +248,12 @@ bridge retires — is the
 
 ### Storage intent
 
-Storage intent declares whether a unit fits Groundwork's portable document/table contract or needs additional evidence or provider-specific behavior:
+Storage intent declares the provider capabilities a unit requires. Provider fit is computed from those declared requirements, never from author self-declaration:
 
-- `StorageIntent.PortableDocument()`: Groundwork's default portable document/table contract.
-- `StorageIntent.BenchmarkGated(...)`: possible future Groundwork support, but requires benchmark or correctness evidence.
-- `StorageIntent.SpecializedProvider(...)`: requires a provider or module-specific contract.
+- `StorageIntent.PortableDocument(descriptor)`: Groundwork's default portable document/table contract. It requires no capabilities beyond the base contract.
+- `StorageIntent.Operational(rationale, descriptor, requirements)`: declares one or more `CapabilityId` requirements plus the rationale for them. Use it when correctness depends on behavior beyond ordinary document storage — atomic commit across units, concurrency evidence, or operational diagnostics.
 
-Use specialized or benchmark-gated intent when correctness depends on behavior beyond ordinary document storage, such as atomic claiming, lease recovery, ordered consumption, retry recovery, idempotency, retention, atomic commit behavior, concurrency evidence, or operational diagnostics.
+`ProviderCapabilityValidator` compares a manifest's requirements against a provider's `ProviderCapabilityReport` and returns a `ProviderFit`; capabilities marked `EvidenceGatedByDefault` in the registry additionally need evidence through `WorkloadEvidencePolicy`. The `WorkloadIntent` descriptor on both factories is a non-binding diagnostic label — it never selects a physical form and never participates in fit.
 
 Configure SQLite by materializing the manifest, then create an `IDocumentStore` over the same connection:
 
