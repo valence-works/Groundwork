@@ -797,16 +797,19 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
     {
         if (plan.IndexName is null || plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
             return (null, []);
-        // A predicate that returns no rows cannot drop any, so every index serves it equally.
-        if (matchesNoRows)
-            return (plan.IndexName.Identifier, []);
         var index = route.Indexes.FirstOrDefault(candidate => candidate.Name == plan.IndexName);
         if (index is null)
             return (plan.IndexName.Identifier, []);
         var excluded = store.HintedIndexNullExcludedColumns(route, index);
         if (excluded.Count == 0)
             return (plan.IndexName.Identifier, []);
-        var unproven = excluded.Where(column => !nullRejectedColumns.Contains(column)).ToArray();
+        // A predicate that returns no rows cannot drop any, so every index serves it equally — but it
+        // still has to restate the exclusion. The conjuncts are what let the provider match the index's
+        // own filter, and a contradiction implies that filter no more than any other predicate does:
+        // SQLite answers an INDEXED BY it cannot satisfy with "no query solution" rather than no rows.
+        var unproven = matchesNoRows
+            ? []
+            : excluded.Where(column => !nullRejectedColumns.Contains(column)).ToArray();
         if (unproven.Length == 0)
         {
             var alias = Alias(index.Target);
