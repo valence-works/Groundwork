@@ -35,6 +35,10 @@ public static class SupportTicketManifest
     public const string ListCommentsByTicket = "list-comments-by-ticket";
     public const string ListCommentsByAuthor = "list-comments-by-author";
 
+    // Maximum UTF-16 code units per keyword key column, so providers with sized index
+    // keys (SQL Server) can bound the synthesized physical indexes.
+    public const int KeywordKeyLength = 128;
+
     // Stable serialized paths addressed by runtime DocumentQuery comparisons.
     public const string TicketNumberPath = "ticketNumber";
     public const string CustomerIdPath = "customerId";
@@ -110,7 +114,8 @@ public static class SupportTicketManifest
             [new IndexField(path)],
             IndexValueKind.Keyword,
             isUnique,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.Excluded,
+            length: KeywordKeyLength);
 
     private static readonly IReadOnlySet<PortableQueryOperation> EqualOnly =
         new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
