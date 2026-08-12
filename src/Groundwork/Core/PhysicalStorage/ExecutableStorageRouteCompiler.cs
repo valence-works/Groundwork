@@ -51,6 +51,80 @@ public static class ExecutableStorageRouteCompiler
     {
         var target = $"physicalRoutes.{providerDefinition.Resolved.StorageUnit.Value}";
         var initialErrorCount = diagnostics.Count(diagnostic => diagnostic.IsError);
+        VerifyFingerprint(providerDefinition, target, diagnostics);
+
+        var definition = providerDefinition.Definition;
+        ValidateForm(definition, providerDefinition.Resolved.SharedStorageDefinition, target, diagnostics);
+        var envelopeDefinition = definition.Envelope ?? providerDefinition.Resolved.SharedStorageDefinition?.Envelope;
+        if (envelopeDefinition is null)
+        {
+            diagnostics.Add(Error(
+                "GW-ROUTE-003",
+                "Executable document routes require one complete envelope mapping.",
+                $"{target}.envelope"));
+            return null;
+        }
+
+        var (primaryName, linkedName, envelope, linkedRelationship, expectedNames) =
+            CompileEnvelopeAndLinked(providerDefinition, definition, envelopeDefinition, target, diagnostics);
+        var (projections, primaryColumns, linkedColumns) = CompileProjectedColumns(
+            providerDefinition,
+            definition,
+            envelopeDefinition,
+            envelope,
+            linkedRelationship,
+            linkedName,
+            expectedNames,
+            target,
+            diagnostics);
+        var collectionElementStorages = CompileCollectionElementStorages(
+            providerDefinition,
+            definition,
+            projections,
+            expectedNames,
+            target,
+            diagnostics);
+        var indexes = CompileIndexRoutes(
+            providerDefinition,
+            definition,
+            primaryColumns,
+            linkedColumns,
+            expectedNames,
+            target,
+            diagnostics);
+
+        ValidateUnexpectedNames(providerDefinition, expectedNames, target, diagnostics);
+        ValidateScaleBearingRoutes(
+            providerDefinition,
+            indexes,
+            collectionElementStorages,
+            projections,
+            envelope,
+            target,
+            diagnostics);
+        if (primaryName is null ||
+            envelope is null ||
+            (linkedName is null) != (linkedRelationship is null) ||
+            diagnostics.Count(diagnostic => diagnostic.IsError) != initialErrorCount)
+            return null;
+
+        return AssembleRoute(
+            providerDefinition,
+            definition,
+            primaryName,
+            linkedName,
+            envelope,
+            linkedRelationship,
+            projections,
+            collectionElementStorages,
+            indexes);
+    }
+
+    private static void VerifyFingerprint(
+        ProviderPhysicalTableDefinition providerDefinition,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
         if (string.IsNullOrWhiteSpace(providerDefinition.Fingerprint))
         {
             diagnostics.Add(Error(
@@ -69,19 +143,21 @@ public static class ExecutableStorageRouteCompiler
                 "Provider physical definition fingerprint does not match its resolved definition and names.",
                 $"{target}.definitionFingerprint"));
         }
+    }
 
-        var definition = providerDefinition.Definition;
-        ValidateForm(definition, providerDefinition.Resolved.SharedStorageDefinition, target, diagnostics);
-        var envelopeDefinition = definition.Envelope ?? providerDefinition.Resolved.SharedStorageDefinition?.Envelope;
-        if (envelopeDefinition is null)
-        {
-            diagnostics.Add(Error(
-                "GW-ROUTE-003",
-                "Executable document routes require one complete envelope mapping.",
-                $"{target}.envelope"));
-            return null;
-        }
-
+    private static (
+        ProviderPhysicalObjectName? PrimaryName,
+        ProviderPhysicalObjectName? LinkedName,
+        ExecutableDocumentEnvelopeRoute? Envelope,
+        ExecutableLinkedRelationshipRoute? LinkedRelationship,
+        HashSet<(PhysicalObjectKind Kind, string FeatureDefault)> ExpectedNames)
+        CompileEnvelopeAndLinked(
+            ProviderPhysicalTableDefinition providerDefinition,
+            PhysicalTableDefinition definition,
+            DocumentEnvelopeDefinition envelopeDefinition,
+            string target,
+            List<GroundworkDiagnostic> diagnostics)
+    {
         var primaryName = RequireName(
             providerDefinition,
             PhysicalObjectKind.PrimaryStorage,
@@ -110,9 +186,6 @@ public static class ExecutableStorageRouteCompiler
         var linkedRelationship = definition.LinkedKey is null
             ? null
             : CompileLinkedRelationship(providerDefinition, definition.LinkedKey, target, diagnostics, expectedNames);
-        var projectedTarget = linkedName is null
-            ? ExecutableStorageObjectRole.PrimaryStorage
-            : ExecutableStorageObjectRole.LinkedIndexStorage;
         if (definition.Form == PhysicalStorageForm.SharedDocuments &&
             linkedName is null &&
             (definition.ProjectedColumns.Count != 0 || definition.Indexes.Count != 0))
@@ -123,6 +196,27 @@ public static class ExecutableStorageRouteCompiler
                 $"{target}.linkedIndexStorage"));
         }
 
+        return (primaryName, linkedName, envelope, linkedRelationship, expectedNames);
+    }
+
+    private static (
+        List<ExecutableProjectedColumnRoute> Projections,
+        Dictionary<string, ExecutableColumnRoute> PrimaryColumns,
+        Dictionary<string, ExecutableColumnRoute> LinkedColumns)
+        CompileProjectedColumns(
+            ProviderPhysicalTableDefinition providerDefinition,
+            PhysicalTableDefinition definition,
+            DocumentEnvelopeDefinition envelopeDefinition,
+            ExecutableDocumentEnvelopeRoute? envelope,
+            ExecutableLinkedRelationshipRoute? linkedRelationship,
+            ProviderPhysicalObjectName? linkedName,
+            HashSet<(PhysicalObjectKind Kind, string FeatureDefault)> expectedNames,
+            string target,
+            List<GroundworkDiagnostic> diagnostics)
+    {
+        var projectedTarget = linkedName is null
+            ? ExecutableStorageObjectRole.PrimaryStorage
+            : ExecutableStorageObjectRole.LinkedIndexStorage;
         var projections = new List<ExecutableProjectedColumnRoute>();
         var primaryColumns = new Dictionary<string, ExecutableColumnRoute>(StringComparer.Ordinal);
         if (envelope is not null)
@@ -169,11 +263,22 @@ public static class ExecutableStorageRouteCompiler
             projections.Add(new ExecutableProjectedColumnRoute(projection, column, projectedTarget, name));
         }
 
+        return (projections, primaryColumns, linkedColumns);
+    }
+
+    private static List<ExecutableCollectionElementStorageRoute> CompileCollectionElementStorages(
+        ProviderPhysicalTableDefinition providerDefinition,
+        PhysicalTableDefinition definition,
+        IReadOnlyList<ExecutableProjectedColumnRoute> projections,
+        HashSet<(PhysicalObjectKind Kind, string FeatureDefault)> expectedNames,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
         var collectionElementStorages = new List<ExecutableCollectionElementStorageRoute>();
         foreach (var projection in projections.Where(projection =>
                      projection.Definition.Cardinality == ProjectionCardinality.CollectionElements))
         {
-            var featureDefault = CollectionElementStorageLogicalName(projection.Definition.LogicalName);
+            var featureDefault = CollectionElementNames.StorageLogicalName(projection.Definition.LogicalName);
             expectedNames.Add((PhysicalObjectKind.CollectionElementStorage, featureDefault));
             var name = RequireName(
                 providerDefinition,
@@ -185,7 +290,7 @@ public static class ExecutableStorageRouteCompiler
                 continue;
             ExecutableColumnRoute? Field(string suffix)
             {
-                var featureDefault = $"{projection.Definition.LogicalName}__{suffix}";
+                var featureDefault = CollectionElementNames.FieldLogicalName(projection.Definition.LogicalName, suffix);
                 expectedNames.Add((PhysicalObjectKind.CollectionElementField, featureDefault));
                 var fieldName = RequireName(
                     providerDefinition,
@@ -195,15 +300,15 @@ public static class ExecutableStorageRouteCompiler
                     diagnostics);
                 return fieldName is null ? null : new ExecutableColumnRoute(suffix, fieldName.Identifier);
             }
-            var documentKind = Field("document_kind");
-            var storageScope = Field("storage_scope");
-            var idComparison = Field("id_comparison_key");
-            var idLookup = Field("id_lookup_key");
-            var ordinal = Field("ordinal");
-            var value = Field("value");
+            var documentKind = Field(CollectionElementNames.DocumentKindColumn);
+            var storageScope = Field(CollectionElementNames.StorageScopeColumn);
+            var idComparison = Field(CollectionElementNames.IdComparisonKeyColumn);
+            var idLookup = Field(CollectionElementNames.IdLookupKeyColumn);
+            var ordinal = Field(CollectionElementNames.OrdinalColumn);
+            var value = Field(CollectionElementNames.ValueColumn);
             if (new[] { documentKind, storageScope, idComparison, idLookup, ordinal, value }.Any(field => field is null))
                 continue;
-            var keyFeatureDefault = CollectionElementOwnerOrdinalKeyLogicalName(projection.Definition.LogicalName);
+            var keyFeatureDefault = CollectionElementNames.OwnerOrdinalKeyLogicalName(projection.Definition.LogicalName);
             expectedNames.Add((PhysicalObjectKind.PhysicalIndex, keyFeatureDefault));
             var keyName = RequireName(
                 providerDefinition,
@@ -214,7 +319,7 @@ public static class ExecutableStorageRouteCompiler
             if (keyName is null)
                 continue;
             var membershipKeyFeatureDefault =
-                CollectionElementMembershipKeyLogicalName(projection.Definition.LogicalName);
+                CollectionElementNames.MembershipKeyLogicalName(projection.Definition.LogicalName);
             expectedNames.Add((PhysicalObjectKind.PhysicalIndex, membershipKeyFeatureDefault));
             var membershipKeyName = RequireName(
                 providerDefinition,
@@ -262,6 +367,18 @@ public static class ExecutableStorageRouteCompiler
                     ])));
         }
 
+        return collectionElementStorages;
+    }
+
+    private static List<ExecutablePhysicalIndexRoute> CompileIndexRoutes(
+        ProviderPhysicalTableDefinition providerDefinition,
+        PhysicalTableDefinition definition,
+        Dictionary<string, ExecutableColumnRoute> primaryColumns,
+        Dictionary<string, ExecutableColumnRoute> linkedColumns,
+        HashSet<(PhysicalObjectKind Kind, string FeatureDefault)> expectedNames,
+        string target,
+        List<GroundworkDiagnostic> diagnostics)
+    {
         var indexes = new List<ExecutablePhysicalIndexRoute>();
         foreach (var index in definition.Indexes)
         {
@@ -300,21 +417,20 @@ public static class ExecutableStorageRouteCompiler
             }
         }
 
-        ValidateUnexpectedNames(providerDefinition, expectedNames, target, diagnostics);
-        ValidateScaleBearingRoutes(
-            providerDefinition,
-            indexes,
-            collectionElementStorages,
-            projections,
-            envelope,
-            target,
-            diagnostics);
-        if (primaryName is null ||
-            envelope is null ||
-            (linkedName is null) != (linkedRelationship is null) ||
-            diagnostics.Count(diagnostic => diagnostic.IsError) != initialErrorCount)
-            return null;
+        return indexes;
+    }
 
+    private static ExecutableStorageRoute AssembleRoute(
+        ProviderPhysicalTableDefinition providerDefinition,
+        PhysicalTableDefinition definition,
+        ProviderPhysicalObjectName primaryName,
+        ProviderPhysicalObjectName? linkedName,
+        ExecutableDocumentEnvelopeRoute envelope,
+        ExecutableLinkedRelationshipRoute? linkedRelationship,
+        IReadOnlyList<ExecutableProjectedColumnRoute> projections,
+        IReadOnlyList<ExecutableCollectionElementStorageRoute> collectionElementStorages,
+        IReadOnlyList<ExecutablePhysicalIndexRoute> indexes)
+    {
         var shared = definition.Form == PhysicalStorageForm.SharedDocuments;
         var primaryStorage = new ExecutableStorageObjectRoute(
             ExecutableStorageObjectRole.PrimaryStorage,
@@ -396,15 +512,6 @@ public static class ExecutableStorageRouteCompiler
             fingerprint: string.Empty);
         return route.WithFingerprint(ExecutableStorageRouteSerializer.CreateFingerprint(route));
     }
-
-    internal static string CollectionElementStorageLogicalName(string projectionLogicalName) =>
-        $"{projectionLogicalName}__elements";
-
-    internal static string CollectionElementOwnerOrdinalKeyLogicalName(string projectionLogicalName) =>
-        $"{projectionLogicalName}__owner_ordinal_unique";
-
-    internal static string CollectionElementMembershipKeyLogicalName(string projectionLogicalName) =>
-        $"{projectionLogicalName}__value_owner";
 
     private static ExecutableDocumentEnvelopeRoute? CompileEnvelope(
         ProviderPhysicalTableDefinition definition,
