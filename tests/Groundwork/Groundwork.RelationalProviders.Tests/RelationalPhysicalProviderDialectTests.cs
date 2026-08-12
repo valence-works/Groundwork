@@ -127,7 +127,7 @@ public sealed class RelationalPhysicalProviderDialectTests
 
         var sql = dialect.CreateCollectionElementTableSql(storage);
         var expectedValue = storage.Value.Definition with { IsNullable = false };
-        var primaryKey = string.Join(", ", storage.OwnerOrdinalKey.Columns.Select(column => dialect.Q(column.Column.Identifier)));
+        var primaryKey = string.Join(", ", storage.OwnerOrdinalKey.Columns.Select(column => dialect.QuoteIdentifier(column.Column.Identifier)));
 
         Assert.Contains(dialect.ProjectedColumnSql(storage.Value.Column.Identifier, expectedValue), sql, StringComparison.Ordinal);
         Assert.Contains(

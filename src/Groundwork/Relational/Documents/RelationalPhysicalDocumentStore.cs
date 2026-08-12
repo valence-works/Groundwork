@@ -894,7 +894,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         command.Parameters.Add(parameter);
     }
 
-    internal string Q(string identifier) => dialect.QuoteIdentifier(identifier);
+    internal string QuoteIdentifier(string identifier) => dialect.QuoteIdentifier(identifier);
     internal string JsonValue(string expression, string path) => dialect.JsonValue(expression, path);
     internal string SetJsonValue(string expression, string pathParameter, string valueParameter) =>
         dialect.SetJsonValue(expression, pathParameter, valueParameter);
@@ -1498,7 +1498,7 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
 
         await using var command = CreatePhysicalCommand(
             transaction.Connection!,
-            $"SELECT {string.Join(", ", identity.Select(item => Q(item.Column)))} FROM {Q(table)} WHERE {hashOnly};",
+            $"SELECT {string.Join(", ", identity.Select(item => QuoteIdentifier(item.Column)))} FROM {QuoteIdentifier(table)} WHERE {hashOnly};",
             transaction);
         foreach (var item in identity)
             AddPhysicalParameter(command, item.Parameter, item.Value);

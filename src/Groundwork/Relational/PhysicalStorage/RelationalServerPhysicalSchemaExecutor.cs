@@ -450,7 +450,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             return;
         }
         await using (var count = Command(connection, transaction,
-                         $"SELECT COUNT(*) FROM {dialect.Q(table)} WHERE {dialect.Q(column.Column.Identifier)} IS NULL;"))
+                         $"SELECT COUNT(*) FROM {dialect.QuoteIdentifier(table)} WHERE {dialect.QuoteIdentifier(column.Column.Identifier)} IS NULL;"))
         {
             if (Convert.ToInt64(await count.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) != 0)
                 throw new InvalidDataException($"Projected column '{table}.{column.Column.Identifier}' cannot be made required because canonical backfill left null values.");
@@ -549,11 +549,11 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 await using (var delete = Command(
                                  connection,
                                  transaction,
-                                 $"DELETE FROM {dialect.Q(collection.Storage.Name.Identifier)} WHERE " +
-                                 $"{dialect.Q(collection.DocumentKind.Column.Identifier)} = @kind AND " +
-                                 $"{dialect.Q(collection.StorageScope.Column.Identifier)} = @scope AND " +
-                                 $"{dialect.Q(collection.IdLookupKey.Column.Identifier)} = @idLookup AND " +
-                                 $"{dialect.Q(collection.IdComparisonKey.Column.Identifier)} = @idComparison;"))
+                                 $"DELETE FROM {dialect.QuoteIdentifier(collection.Storage.Name.Identifier)} WHERE " +
+                                 $"{dialect.QuoteIdentifier(collection.DocumentKind.Column.Identifier)} = @kind AND " +
+                                 $"{dialect.QuoteIdentifier(collection.StorageScope.Column.Identifier)} = @scope AND " +
+                                 $"{dialect.QuoteIdentifier(collection.IdLookupKey.Column.Identifier)} = @idLookup AND " +
+                                 $"{dialect.QuoteIdentifier(collection.IdComparisonKey.Column.Identifier)} = @idComparison;"))
                 {
                     Add(delete, "kind", route.Discriminator.Value);
                     Add(delete, "scope", document.Scope);
@@ -575,8 +575,8 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                     await using var command = Command(
                         connection,
                         transaction,
-                        $"INSERT INTO {dialect.Q(collection.Storage.Name.Identifier)} " +
-                        $"({string.Join(", ", columns.Select(dialect.Q))}) VALUES " +
+                        $"INSERT INTO {dialect.QuoteIdentifier(collection.Storage.Name.Identifier)} " +
+                        $"({string.Join(", ", columns.Select(dialect.QuoteIdentifier))}) VALUES " +
                         $"({string.Join(", ", Enumerable.Range(0, columns.Length).Select(index => $"@v{index}"))});");
                     Add(command, "v0", route.Discriminator.Value);
                     Add(command, "v1", document.Scope);
@@ -598,9 +598,9 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                     return;
                 var values = RelationalPhysicalProjectionValues.Read(document.CanonicalJson, selected);
                 var identity = route.Envelope.Identity.Project(document.Id);
-                var assignments = string.Join(", ", selected.Select((column, index) => $"{dialect.Q(column.Column.Identifier)} = @v{index}"));
+                var assignments = string.Join(", ", selected.Select((column, index) => $"{dialect.QuoteIdentifier(column.Column.Identifier)} = @v{index}"));
                 await using var command = Command(connection, transaction,
-                    $"UPDATE {dialect.Q(route.PrimaryStorage.Name.Identifier)} SET {assignments} WHERE " +
+                    $"UPDATE {dialect.QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} SET {assignments} WHERE " +
                     dialect.ExactIdentityPredicate(
                     [
                         new(route.Discriminator.Column.Identifier, null, "@kind"),
@@ -689,9 +689,9 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         await using var command = Command(
             connection,
             transaction,
-            $"SELECT {dialect.Q(relationship.DocumentId.Identifier)}, " +
-            $"{dialect.Q(relationship.Identity.ComparisonKey.Identifier)} " +
-            $"FROM {dialect.Q(route.LinkedIndexStorage!.Name.Identifier)} WHERE " +
+            $"SELECT {dialect.QuoteIdentifier(relationship.DocumentId.Identifier)}, " +
+            $"{dialect.QuoteIdentifier(relationship.Identity.ComparisonKey.Identifier)} " +
+            $"FROM {dialect.QuoteIdentifier(route.LinkedIndexStorage!.Name.Identifier)} WHERE " +
             dialect.ExactIdentityPredicate(
             [
                 new(relationship.DocumentKind.Identifier, null, "@collisionKind"),
@@ -735,7 +735,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         await using var command = Command(
             connection,
             transaction,
-            $"SELECT {string.Join(", ", identity.Select(item => dialect.Q(item.Column)))} FROM {dialect.Q(table)} WHERE {predicate};");
+            $"SELECT {string.Join(", ", identity.Select(item => dialect.QuoteIdentifier(item.Column)))} FROM {dialect.QuoteIdentifier(table)} WHERE {predicate};");
         foreach (var item in identity)
             Add(command, item.Parameter, item.Value);
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -1439,7 +1439,7 @@ public abstract class RelationalServerPhysicalSchemaDialect
         string? ComputedDefinition = null);
 
     public abstract string ProviderDisplayName { get; }
-    public abstract string Q(string identifier);
+    public abstract string QuoteIdentifier(string identifier);
     public abstract string EnvelopeType(RelationalEnvelopeColumnKind kind);
     public abstract string? EnvelopeCollation(RelationalEnvelopeColumnKind kind);
     public abstract string ProjectedType(ProjectedColumnDefinition definition);
@@ -1472,7 +1472,7 @@ public abstract class RelationalServerPhysicalSchemaDialect
         ArgumentNullException.ThrowIfNull(parts);
         return string.Join(" AND ", parts.Select(part =>
         {
-            var column = part.Alias is null ? Q(part.ColumnIdentifier) : $"{part.Alias}.{Q(part.ColumnIdentifier)}";
+            var column = part.Alias is null ? QuoteIdentifier(part.ColumnIdentifier) : $"{part.Alias}.{QuoteIdentifier(part.ColumnIdentifier)}";
             return $"{column} = {part.ValueExpression}";
         }));
     }
@@ -1510,8 +1510,8 @@ public abstract class RelationalServerPhysicalSchemaDialect
         ], storage.OwnerOrdinalKey.Columns.Select(column => column.Column.Identifier).ToArray());
         var membershipColumns = new[] { storage.MembershipKey.Value.Column.Identifier }
             .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier));
-        return $"{table}; CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON " +
-               $"{Q(storage.Storage.Name.Identifier)} ({string.Join(", ", membershipColumns.Select(Q))})";
+        return $"{table}; CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON " +
+               $"{QuoteIdentifier(storage.Storage.Name.Identifier)} ({string.Join(", ", membershipColumns.Select(QuoteIdentifier))})";
     }
     public abstract string ProjectedColumnSql(string column, ProjectedColumnDefinition definition);
     public abstract string AddColumnSql(string table, string column, ProjectedColumnDefinition definition);

@@ -566,8 +566,8 @@ public sealed class SqliteBoundedMutationTests
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText =
-                $"UPDATE {Q(fixture.Route.PrimaryStorage.Name.Identifier)} SET " +
-                $"{Q(fixture.Route.Envelope.Version.Identifier)} = {Q(fixture.Route.Envelope.Version.Identifier)} + 1;";
+                $"UPDATE {QuoteIdentifier(fixture.Route.PrimaryStorage.Name.Identifier)} SET " +
+                $"{QuoteIdentifier(fixture.Route.Envelope.Version.Identifier)} = {QuoteIdentifier(fixture.Route.Envelope.Version.Identifier)} + 1;";
             await command.ExecuteNonQueryAsync(cancellationToken);
         });
         var request = Transition("primary-count-mismatch");
@@ -591,7 +591,7 @@ public sealed class SqliteBoundedMutationTests
                 return;
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = $"DELETE FROM {Q(fixture.Route.LinkedIndexStorage!.Name.Identifier)};";
+            command.CommandText = $"DELETE FROM {QuoteIdentifier(fixture.Route.LinkedIndexStorage!.Name.Identifier)};";
             await command.ExecuteNonQueryAsync(cancellationToken);
         });
         var request = Transition("linked-count-mismatch");
@@ -1047,7 +1047,7 @@ public sealed class SqliteBoundedMutationTests
         Assert.Null(await tenantA.LoadAsync(DocumentKind, "same-id"));
         Assert.NotNull(await tenantB.LoadAsync(DocumentKind, "same-id"));
         await using var count = connection.CreateCommand();
-        count.CommandText = $"SELECT COUNT(*) FROM {Q(elements.Storage.Name.Identifier)};";
+        count.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(elements.Storage.Name.Identifier)};";
         Assert.Equal(1L, Convert.ToInt64(await count.ExecuteScalarAsync()));
     }
 
@@ -1086,7 +1086,7 @@ public sealed class SqliteBoundedMutationTests
     private static int Priority(string json) =>
         JsonDocument.Parse(json).RootElement.GetProperty("priority").GetInt32();
 
-    private static string Q(string identifier) =>
+    private static string QuoteIdentifier(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
     private static ValueTask CancelMutation(CancellationTokenSource cancellation)
@@ -1255,11 +1255,11 @@ public sealed class SqliteBoundedMutationTests
         {
             await using var command = connection.CreateCommand();
             command.CommandText =
-                $"UPDATE {Q(Route.LinkedIndexStorage!.Name.Identifier)} SET " +
-                $"{Q(Route.LinkedRelationship!.DocumentId.Identifier)} = @originalId" +
+                $"UPDATE {QuoteIdentifier(Route.LinkedIndexStorage!.Name.Identifier)} SET " +
+                $"{QuoteIdentifier(Route.LinkedRelationship!.DocumentId.Identifier)} = @originalId" +
                 (comparisonKey is null
                     ? string.Empty
-                    : $", {Q(Route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey") +
+                    : $", {QuoteIdentifier(Route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey") +
                 ";";
             command.Parameters.AddWithValue("@originalId", originalId);
             if (comparisonKey is not null)
@@ -1319,7 +1319,7 @@ public sealed class SqliteBoundedMutationTests
         {
             await using var command = connection.CreateCommand();
             command.CommandText =
-                $"SELECT COUNT(*) FROM {Q(RelationalPhysicalStorageColumns.MutationOperationsTable)};";
+                $"SELECT COUNT(*) FROM {QuoteIdentifier(RelationalPhysicalStorageColumns.MutationOperationsTable)};";
             return Convert.ToInt64(await command.ExecuteScalarAsync());
         }
 
@@ -1327,7 +1327,7 @@ public sealed class SqliteBoundedMutationTests
         {
             var storage = Assert.Single(Route.CollectionElementStorages);
             await using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT COUNT(*) FROM {Q(storage.Storage.Name.Identifier)};";
+            command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(storage.Storage.Name.Identifier)};";
             return Convert.ToInt64(await command.ExecuteScalarAsync());
         }
 

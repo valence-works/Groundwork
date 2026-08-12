@@ -60,14 +60,14 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
 
     public override void ValidateRoute(ExecutableStorageRoute route) => identity.ValidateRoute(route);
     public override string ExactIdentityPredicate(IReadOnlyList<RelationalPhysicalIdentityPredicatePart> parts) =>
-        identity.ExactPredicate(parts, Q, includeOriginal: true);
+        identity.ExactPredicate(parts, QuoteIdentifier, includeOriginal: true);
     public override string? HashOnlyIdentityPredicate(IReadOnlyList<RelationalPhysicalIdentityPredicatePart> parts) =>
-        identity.ExactPredicate(parts, Q, includeOriginal: false);
+        identity.ExactPredicate(parts, QuoteIdentifier, includeOriginal: false);
     public override bool IsUniqueConstraintException(DbException exception) =>
         exception is SqlException { Number: 2601 or 2627 };
 
     public override string ProviderDisplayName => "SQL Server";
-    public override string Q(string identifier) => $"[{identifier.Replace("]", "]]", StringComparison.Ordinal)}]";
+    public override string QuoteIdentifier(string identifier) => $"[{identifier.Replace("]", "]]", StringComparison.Ordinal)}]";
 
     public override string EnvelopeType(RelationalEnvelopeColumnKind kind) => kind switch
     {
@@ -130,39 +130,39 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
     }
 
     public override string EnvelopeColumn(string name, RelationalEnvelopeColumnKind kind) =>
-        $"{Q(name)} {EnvelopeType(kind)}" +
+        $"{QuoteIdentifier(name)} {EnvelopeType(kind)}" +
         (EnvelopeCollation(kind) is { } collation ? $" COLLATE {CollationToken(collation)}" : string.Empty) +
         " NOT NULL";
 
     public override RelationalPhysicalIdentityLayout IdentityLayout(
         IReadOnlyList<RelationalPhysicalIdentityColumn> identityColumns,
         IReadOnlyList<string> logicalPrimaryKey) =>
-        identity.Layout(identityColumns, logicalPrimaryKey, Q);
+        identity.Layout(identityColumns, logicalPrimaryKey, QuoteIdentifier);
 
     public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey)
     {
-        var constraint = Q(SqlServerPhysicalName.Normalize($"PK_{table}"));
-        return $"CREATE TABLE {Q(table)} ({string.Join(", ", columns)}, CONSTRAINT {constraint} PRIMARY KEY NONCLUSTERED ({string.Join(", ", primaryKey.Select(Q))}));";
+        var constraint = QuoteIdentifier(SqlServerPhysicalName.Normalize($"PK_{table}"));
+        return $"CREATE TABLE {QuoteIdentifier(table)} ({string.Join(", ", columns)}, CONSTRAINT {constraint} PRIMARY KEY NONCLUSTERED ({string.Join(", ", primaryKey.Select(QuoteIdentifier))}));";
     }
 
     public override string AddColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
-        $"ALTER TABLE {Q(table)} ADD {ProjectedColumnSql(column, definition)};";
+        $"ALTER TABLE {QuoteIdentifier(table)} ADD {ProjectedColumnSql(column, definition)};";
 
     public override string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
-        $"ALTER TABLE {Q(table)} ALTER COLUMN {Q(column)} {ProjectedType(definition)}{CollationSql(definition)} NOT NULL;";
+        $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} NOT NULL;";
 
     public override string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
         excludedColumns.Count > 0
-            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{Q(column)} IS NOT NULL"))})"
+            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{QuoteIdentifier(column)} IS NOT NULL"))})"
             : null;
 
     public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
-        $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {Q(index.Name.Identifier)} ON {Q(table)} " +
-        $"({string.Join(", ", index.Columns.Select(column => $"{Q(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"))})" +
+        $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)} " +
+        $"({string.Join(", ", index.Columns.Select(column => $"{QuoteIdentifier(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"))})" +
         (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
 
     public override string DropIndexSql(string table, string index) =>
-        $"DROP INDEX {Q(index)} ON {Q(table)};";
+        $"DROP INDEX {QuoteIdentifier(index)} ON {QuoteIdentifier(table)};";
 
     public override string UpsertLinkedSql(
         string table,
@@ -177,26 +177,26 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
                 column,
                 null,
                 parameterByColumn[column])).ToArray(),
-            Q,
+            QuoteIdentifier,
             includeOriginal: true);
-        var insert = $"INSERT INTO {Q(table)} ({string.Join(", ", columns.Select(Q))}) VALUES ({string.Join(", ", columns.Select((_, index) => $"@v{index}"))});";
+        var insert = $"INSERT INTO {QuoteIdentifier(table)} ({string.Join(", ", columns.Select(QuoteIdentifier))}) VALUES ({string.Join(", ", columns.Select((_, index) => $"@v{index}"))});";
         return updateColumns.Count == 0
-            ? $"IF NOT EXISTS (SELECT 1 FROM {Q(table)} WITH (UPDLOCK, HOLDLOCK) WHERE {predicate}) {insert}"
-            : $"UPDATE {Q(table)} WITH (UPDLOCK, HOLDLOCK) SET {string.Join(", ", updateColumns.Select(column => $"{Q(column)} = {parameterByColumn[column]}"))} WHERE {predicate}; IF @@ROWCOUNT = 0 {insert}";
+            ? $"IF NOT EXISTS (SELECT 1 FROM {QuoteIdentifier(table)} WITH (UPDLOCK, HOLDLOCK) WHERE {predicate}) {insert}"
+            : $"UPDATE {QuoteIdentifier(table)} WITH (UPDLOCK, HOLDLOCK) SET {string.Join(", ", updateColumns.Select(column => $"{QuoteIdentifier(column)} = {parameterByColumn[column]}"))} WHERE {predicate}; IF @@ROWCOUNT = 0 {insert}";
     }
 
     public override string SelectCanonicalBatchSql(ExecutableStorageRoute route, int batchSize, bool hasCursor)
     {
         var cursor = hasCursor
-            ? $" AND ({Q(route.ScopeKey.Column.Identifier)} > @afterScope OR ({Q(route.ScopeKey.Column.Identifier)} = @afterScope AND {Q(route.Envelope.Id.Identifier)} > @afterId))"
+            ? $" AND ({QuoteIdentifier(route.ScopeKey.Column.Identifier)} > @afterScope OR ({QuoteIdentifier(route.ScopeKey.Column.Identifier)} = @afterScope AND {QuoteIdentifier(route.Envelope.Id.Identifier)} > @afterId))"
             : string.Empty;
         var kind = identity.ExactPredicate(
             [new(route.Discriminator.Column.Identifier, null, "@kind")],
-            Q,
+            QuoteIdentifier,
             includeOriginal: true);
-        return $"SELECT TOP ({batchSize}) {Q(route.ScopeKey.Column.Identifier)}, {Q(route.Envelope.Id.Identifier)}, {Q(route.Envelope.CanonicalJson.Identifier)} " +
-               $"FROM {Q(route.PrimaryStorage.Name.Identifier)} WHERE {kind}{cursor} " +
-               $"ORDER BY {Q(route.ScopeKey.Column.Identifier)}, {Q(route.Envelope.Id.Identifier)};";
+        return $"SELECT TOP ({batchSize}) {QuoteIdentifier(route.ScopeKey.Column.Identifier)}, {QuoteIdentifier(route.Envelope.Id.Identifier)}, {QuoteIdentifier(route.Envelope.CanonicalJson.Identifier)} " +
+               $"FROM {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} WHERE {kind}{cursor} " +
+               $"ORDER BY {QuoteIdentifier(route.ScopeKey.Column.Identifier)}, {QuoteIdentifier(route.Envelope.Id.Identifier)};";
     }
 
     public override object? ConvertStorageValue(object? value, ProjectedColumnDefinition definition) => value switch
@@ -559,7 +559,7 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
             primaryKeyOrder,
             IsComputed: true,
             IsPersisted: true,
-            ComputedDefinition: SqlServerUnboundedIdentityHash.Expression(Q(retainedColumn)));
+            ComputedDefinition: SqlServerUnboundedIdentityHash.Expression(QuoteIdentifier(retainedColumn)));
 
     public override async Task<bool> TableExistsAsync(
         DbConnection connection, DbTransaction transaction, string table, CancellationToken cancellationToken)
@@ -637,7 +637,7 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
     }
 
     public override string ProjectedColumnSql(string column, ProjectedColumnDefinition definition) =>
-        $"{Q(column)} {ProjectedType(definition)}{CollationSql(definition)} {(definition.IsNullable ? "NULL" : "NOT NULL")}" +
+        $"{QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} {(definition.IsNullable ? "NULL" : "NOT NULL")}" +
         (DefaultSql(definition) is { } value ? $" DEFAULT {value}" : string.Empty);
 
     private string CollationSql(ProjectedColumnDefinition definition) =>

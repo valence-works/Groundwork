@@ -22,7 +22,7 @@ This bucket succeeds the completed [Groundwork Persistence Readiness](groundwork
 - provider-neutral schema evolution and an operations CLI;
 - pooled sessions, executable capability claims, and provider conformance.
 
-Implementation specs and issues must link to that ADR and must not silently reopen its decisions. Vocabulary and public API names are reconciled by the [Groundwork vocabulary and public API review](../reports/groundwork-vocabulary-and-public-api.md) and should be implemented through its staged compatibility strategy.
+Implementation specs and issues must link to that ADR and must not silently reopen its decisions. Vocabulary and public API names were first reconciled by the pre-runtime [Groundwork vocabulary and public API review](../reports/groundwork-vocabulary-and-public-api.md) (issue #28) and are now governed by the [post-runtime reconciliation](../reports/groundwork-vocabulary-and-public-api-post-runtime.md) (issue #63), which ratifies the vocabulary after the provider runtimes shipped and sequences the remaining pre-1.0 cleanup.
 
 ## In Scope
 
@@ -147,7 +147,8 @@ storage, session, materialization, migration, and provider-health signals remain
 - [ADR 0001: Separate runtime provider and materialization capabilities](../adr/0001-separate-runtime-provider-and-materialization-capabilities.md)
 - [ADR 0002: Additive-index backfill lives in the declarative materializer](../adr/0002-additive-index-backfill-in-materializer.md)
 - [ADR 0003: Adopt three physical storage forms](../adr/0003-adopt-three-physical-storage-forms.md)
-- [Groundwork vocabulary and public API reconciliation](../reports/groundwork-vocabulary-and-public-api.md)
+- [Groundwork vocabulary and public API reconciliation](../reports/groundwork-vocabulary-and-public-api.md) (pre-runtime, issue #28)
+- [Groundwork vocabulary and public API: post-runtime reconciliation](../reports/groundwork-vocabulary-and-public-api-post-runtime.md) (issue #63)
 - [Physical schema diffs and durable applied state](../physical-schema-diffs.md)
 - [Bounded physical query plans](../bounded-physical-query-plans.md)
 - [Relational physical storage runtime](../relational-physical-storage-runtime.md)

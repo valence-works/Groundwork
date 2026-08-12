@@ -366,7 +366,7 @@ public sealed class SqliteBenchmarkTarget(
         await using var connection = new SqliteConnection(ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {Q(table)} WHERE {Q(category.Column.Identifier)} = @category;";
+        command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(table)} WHERE {QuoteIdentifier(category.Column.Identifier)} = @category;";
         command.Parameters.AddWithValue("@category", "migration");
         var projectionCount = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
 
@@ -471,7 +471,7 @@ public sealed class SqliteBenchmarkTarget(
     private static Task<long> CountAsync(SqliteConnection connection, string table, CancellationToken cancellationToken) =>
         ScalarAsync(connection, $"SELECT COUNT(*) FROM \"{table.Replace("\"", "\"\"")}\";", cancellationToken);
 
-    private static string Q(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+    private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
     private static void TryDelete(string path)
     {

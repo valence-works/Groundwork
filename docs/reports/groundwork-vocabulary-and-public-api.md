@@ -1,6 +1,12 @@
 # Groundwork vocabulary and public API reconciliation
 
-Status: source-verified design follow-up under accepted [ADR 0003](../adr/0003-adopt-three-physical-storage-forms.md); this report does not reopen the governing storage-form decision.
+Status: **superseded in part.** This is the pre-runtime review (issue #28) and remains the record of the
+surface before any of ADR 0003's physical storage forms had a provider runtime. Its forward-looking
+decisions are superseded by the
+[post-runtime reconciliation](groundwork-vocabulary-and-public-api-post-runtime.md) (issue #63);
+where the two disagree, that one governs. Source-verified design follow-up under accepted
+[ADR 0003](../adr/0003-adopt-three-physical-storage-forms.md); this report does not reopen the
+governing storage-form decision.
 
 Date: 2026-07-12.
 

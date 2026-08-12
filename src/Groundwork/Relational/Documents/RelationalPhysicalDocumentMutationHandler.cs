@@ -270,20 +270,20 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             : $" AND EXISTS (SELECT 1 FROM {restrictionTable} AS s WHERE " +
               PrimarySelectionJoin(route, "p", "s", includeIncarnation: true) + ")";
         var identity = linkedIdentityOnly
-            ? $"l.{store.Q(route.LinkedRelationship!.DocumentKind.Identifier)}, " +
-              $"l.{store.Q(route.LinkedRelationship.StorageScope.Identifier)}, " +
-              $"l.{store.Q(route.LinkedRelationship.DocumentId.Identifier)}, " +
-              $"l.{store.Q(route.LinkedRelationship.Identity.ComparisonKey.Identifier)}, " +
-              $"l.{store.Q(route.LinkedRelationship.Identity.LookupKey.Identifier)}"
-            : $"p.{store.Q(route.Envelope.DocumentKind.Identifier)}, " +
-              $"p.{store.Q(route.Envelope.StorageScope.Identifier)}, " +
-              $"p.{store.Q(route.Envelope.Id.Identifier)}, " +
-              $"p.{store.Q(route.Envelope.Identity.ComparisonKey.Identifier)}, " +
-              $"p.{store.Q(route.Envelope.Identity.LookupKey.Identifier)}";
+            ? $"l.{store.QuoteIdentifier(route.LinkedRelationship!.DocumentKind.Identifier)}, " +
+              $"l.{store.QuoteIdentifier(route.LinkedRelationship.StorageScope.Identifier)}, " +
+              $"l.{store.QuoteIdentifier(route.LinkedRelationship.DocumentId.Identifier)}, " +
+              $"l.{store.QuoteIdentifier(route.LinkedRelationship.Identity.ComparisonKey.Identifier)}, " +
+              $"l.{store.QuoteIdentifier(route.LinkedRelationship.Identity.LookupKey.Identifier)}"
+            : $"p.{store.QuoteIdentifier(route.Envelope.DocumentKind.Identifier)}, " +
+              $"p.{store.QuoteIdentifier(route.Envelope.StorageScope.Identifier)}, " +
+              $"p.{store.QuoteIdentifier(route.Envelope.Id.Identifier)}, " +
+              $"p.{store.QuoteIdentifier(route.Envelope.Identity.ComparisonKey.Identifier)}, " +
+              $"p.{store.QuoteIdentifier(route.Envelope.Identity.LookupKey.Identifier)}";
         var state = identityOnly
             ? "0, ''"
-            : $"p.{store.Q(route.Envelope.Version.Identifier)}, " +
-              $"p.{store.Q(RelationalPhysicalStorageColumns.CreatedUtc)}";
+            : $"p.{store.QuoteIdentifier(route.Envelope.Version.Identifier)}, " +
+              $"p.{store.QuoteIdentifier(RelationalPhysicalStorageColumns.CreatedUtc)}";
         return new RelationalPhysicalQueryCommand(
             $"SELECT {identity}, {state} {predicate.FromAndWhere}{restriction}",
             predicate.Parameters,
@@ -401,7 +401,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         DocumentMutation mutation,
         PhysicalMutationPlan plan,
         DocumentScopeSelection scope) => new(
-        $"SELECT request_fingerprint, affected_count FROM {store.Q(RelationalPhysicalStorageColumns.MutationOperationsTable)} " +
+        $"SELECT request_fingerprint, affected_count FROM {store.QuoteIdentifier(RelationalPhysicalStorageColumns.MutationOperationsTable)} " +
         $"WHERE {store.MutationOperationIdentityPredicate(OperationIdentityPredicate())};",
         OperationIdentity(mutation, plan, scope),
         OperationIdentityPredicate().Select(part => part.ColumnIdentifier).ToArray());
@@ -504,14 +504,14 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             connection,
             transaction,
             $"INSERT INTO {ProvisionalTableExpression} ({SelectionColumns}) " +
-            $"SELECT p.{store.Q(route.Envelope.DocumentKind.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.StorageScope.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Id.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Identity.ComparisonKey.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Identity.LookupKey.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Version.Identifier)}, " +
-            $"p.{store.Q(RelationalPhysicalStorageColumns.CreatedUtc)} " +
-            $"FROM {store.Q(route.PrimaryStorage.Name.Identifier)} AS p " +
+            $"SELECT p.{store.QuoteIdentifier(route.Envelope.DocumentKind.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.StorageScope.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Id.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Identity.ComparisonKey.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Identity.LookupKey.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Version.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(RelationalPhysicalStorageColumns.CreatedUtc)} " +
+            $"FROM {store.QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} AS p " +
             $"WHERE EXISTS (SELECT 1 FROM {CandidateTableExpression} AS s WHERE " +
             PrimarySelectionJoin(route, "p", "s", includeVersion: false, includeIncarnation: true) + ");",
             [],
@@ -526,14 +526,14 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             connection,
             transaction,
             $"INSERT INTO {CandidateTableExpression} ({SelectionColumns}) " +
-            $"SELECT p.{store.Q(route.Envelope.DocumentKind.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.StorageScope.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Id.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Identity.ComparisonKey.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Identity.LookupKey.Identifier)}, " +
-            $"p.{store.Q(route.Envelope.Version.Identifier)}, " +
-            $"p.{store.Q(RelationalPhysicalStorageColumns.CreatedUtc)} " +
-            $"FROM {store.Q(route.PrimaryStorage.Name.Identifier)} AS p " +
+            $"SELECT p.{store.QuoteIdentifier(route.Envelope.DocumentKind.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.StorageScope.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Id.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Identity.ComparisonKey.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Identity.LookupKey.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(route.Envelope.Version.Identifier)}, " +
+            $"p.{store.QuoteIdentifier(RelationalPhysicalStorageColumns.CreatedUtc)} " +
+            $"FROM {store.QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} AS p " +
             $"WHERE EXISTS (SELECT 1 FROM {DiscoveryTableExpression} AS s WHERE " +
             PrimarySelectionJoin(route, "p", "s", includeVersion: false) + ");",
             [],
@@ -555,11 +555,11 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             new(route.Envelope.Identity.LookupKey.Identifier, "p", SelectionLookup, "s")
         ]);
         var sql = store.ApplyFirst(
-            $"SELECT s.{store.Q(SelectionId)}, p.{store.Q(route.Envelope.Id.Identifier)}, " +
-            $"s.{store.Q(SelectionLookup)} FROM {DiscoveryTableExpression} AS s " +
-            $"JOIN {store.Q(route.PrimaryStorage.Name.Identifier)} AS p ON {join} " +
-            $"WHERE p.{store.Q(route.Envelope.Identity.ComparisonKey.Identifier)} <> " +
-            $"s.{store.Q(SelectionComparison)}");
+            $"SELECT s.{store.QuoteIdentifier(SelectionId)}, p.{store.QuoteIdentifier(route.Envelope.Id.Identifier)}, " +
+            $"s.{store.QuoteIdentifier(SelectionLookup)} FROM {DiscoveryTableExpression} AS s " +
+            $"JOIN {store.QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} AS p ON {join} " +
+            $"WHERE p.{store.QuoteIdentifier(route.Envelope.Identity.ComparisonKey.Identifier)} <> " +
+            $"s.{store.QuoteIdentifier(SelectionComparison)}");
         await using var command = RelationalPhysicalDocumentStore.CreatePhysicalCommand(
             connection,
             sql,
@@ -645,7 +645,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
                 connection,
                 transaction,
                 store.DeleteByMutationSelection(
-                    store.Q(route.LinkedIndexStorage.Name.Identifier),
+                    store.QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier),
                     "l",
                     SelectionTableExpression,
                     LinkedSelectionJoin(route, "l", "s")),
@@ -657,7 +657,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             connection,
             transaction,
             store.DeleteByMutationSelection(
-                store.Q(route.PrimaryStorage.Name.Identifier),
+                store.QuoteIdentifier(route.PrimaryStorage.Name.Identifier),
                 "p",
                 SelectionTableExpression,
                 PrimarySelectionJoin(route, "p", "s")),
@@ -722,7 +722,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         };
         return new RelationalPhysicalQueryCommand(
             store.DeleteCollectionByMutationSelection(
-                store.Q(storage.Storage.Name.Identifier),
+                store.QuoteIdentifier(storage.Storage.Name.Identifier),
                 "c",
                 selectionTableExpression,
                 exactIdentity,
@@ -747,13 +747,13 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         };
         var primaryAssignments = new List<string>
         {
-            $"{store.Q(route.Envelope.CanonicalJson.Identifier)} = " +
+            $"{store.QuoteIdentifier(route.Envelope.CanonicalJson.Identifier)} = " +
             store.SetJsonValue(
-                $"p.{store.Q(route.Envelope.CanonicalJson.Identifier)}",
+                $"p.{store.QuoteIdentifier(route.Envelope.CanonicalJson.Identifier)}",
                 store.P("assignmentPath"),
                 store.P("assignmentJson")),
-            $"{store.Q(route.Envelope.Version.Identifier)} = p.{store.Q(route.Envelope.Version.Identifier)} + 1",
-            $"{store.Q(RelationalPhysicalStorageColumns.UpdatedUtc)} = {store.P("assignmentUpdated")}"
+            $"{store.QuoteIdentifier(route.Envelope.Version.Identifier)} = p.{store.QuoteIdentifier(route.Envelope.Version.Identifier)} + 1",
+            $"{store.QuoteIdentifier(RelationalPhysicalStorageColumns.UpdatedUtc)} = {store.P("assignmentUpdated")}"
         };
         var primaryProjections = route.ProjectedColumns
             .Where(column => column.Target == ExecutableStorageObjectRole.PrimaryStorage &&
@@ -764,7 +764,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             connection,
             transaction,
             store.UpdateByMutationSelection(
-                store.Q(route.PrimaryStorage.Name.Identifier),
+                store.QuoteIdentifier(route.PrimaryStorage.Name.Identifier),
                 "p",
                 primaryAssignments,
                 SelectionTableExpression,
@@ -788,7 +788,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             connection,
             transaction,
             store.UpdateByMutationSelection(
-                store.Q(route.LinkedIndexStorage.Name.Identifier),
+                store.QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier),
                 "l",
                 linkedAssignments,
                 SelectionTableExpression,
@@ -807,7 +807,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
         foreach (var projection in projections)
         {
             var name = $"assignmentProjection{parameters.Count}";
-            assignments.Add($"{store.Q(projection.Column.Identifier)} = {store.P(name)}");
+            assignments.Add($"{store.QuoteIdentifier(projection.Column.Identifier)} = {store.P(name)}");
             parameters.Add((
                 name,
                 store.ConvertPhysicalQueryValue(
@@ -847,7 +847,7 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
     {
         await using var command = RelationalPhysicalDocumentStore.CreatePhysicalCommand(
             connection,
-            $"INSERT INTO {store.Q(RelationalPhysicalStorageColumns.MutationOperationsTable)} " +
+            $"INSERT INTO {store.QuoteIdentifier(RelationalPhysicalStorageColumns.MutationOperationsTable)} " +
             "(manifest_id, provider_name, completed_provider_version, storage_unit, storage_scope, operation_id, request_fingerprint, affected_count, completed_utc) " +
             "VALUES (@manifestId, @providerName, @providerVersion, @storageUnit, @storageScope, @operationId, @fingerprint, @affected, @completed);",
             transaction);
@@ -948,9 +948,9 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
     private string ProvisionalTableExpression => store.MutationSelectionTable(ProvisionalTable);
     private string SelectionTableExpression => store.MutationSelectionTable(SelectionTable);
     private string SelectionColumns =>
-        $"{store.Q(SelectionKind)}, {store.Q(SelectionScope)}, {store.Q(SelectionId)}, " +
-        $"{store.Q(SelectionComparison)}, {store.Q(SelectionLookup)}, " +
-        $"{store.Q(SelectionVersion)}, {store.Q(SelectionIncarnation)}";
+        $"{store.QuoteIdentifier(SelectionKind)}, {store.QuoteIdentifier(SelectionScope)}, {store.QuoteIdentifier(SelectionId)}, " +
+        $"{store.QuoteIdentifier(SelectionComparison)}, {store.QuoteIdentifier(SelectionLookup)}, " +
+        $"{store.QuoteIdentifier(SelectionVersion)}, {store.QuoteIdentifier(SelectionIncarnation)}";
 
     private async Task<int> ExecuteAsync(
         DbConnection connection,
@@ -979,10 +979,10 @@ internal sealed class RelationalPhysicalDocumentMutationHandler : IPhysicalDocum
             new(route.Envelope.Identity.ComparisonKey.Identifier, primaryAlias, SelectionComparison, selectionAlias)
         ]) +
         (includeVersion
-            ? $" AND {primaryAlias}.{store.Q(route.Envelope.Version.Identifier)} = {selectionAlias}.{store.Q(SelectionVersion)}"
+            ? $" AND {primaryAlias}.{store.QuoteIdentifier(route.Envelope.Version.Identifier)} = {selectionAlias}.{store.QuoteIdentifier(SelectionVersion)}"
             : string.Empty) +
         (includeIncarnation
-            ? $" AND {primaryAlias}.{store.Q(RelationalPhysicalStorageColumns.CreatedUtc)} = {selectionAlias}.{store.Q(SelectionIncarnation)}"
+            ? $" AND {primaryAlias}.{store.QuoteIdentifier(RelationalPhysicalStorageColumns.CreatedUtc)} = {selectionAlias}.{store.QuoteIdentifier(SelectionIncarnation)}"
             : string.Empty);
 
     private string LinkedSelectionJoin(ExecutableStorageRoute route, string linkedAlias, string selectionAlias) =>

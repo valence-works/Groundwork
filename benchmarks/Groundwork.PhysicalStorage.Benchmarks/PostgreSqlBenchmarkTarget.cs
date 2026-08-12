@@ -218,7 +218,7 @@ public sealed class PostgreSqlBenchmarkTarget(
                 indexBytes += reader.GetInt64(1);
             }
             await using var count = connection.CreateCommand();
-            count.CommandText = $"SELECT COUNT(*) FROM {Q(table)};";
+            count.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(table)};";
             var rows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
             if (table == Model.Route.PrimaryStorage.Name.Identifier)
                 primaryRows = rows;
@@ -236,7 +236,7 @@ public sealed class PostgreSqlBenchmarkTarget(
         await using var connection = new NpgsqlConnection(serverConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"CREATE SCHEMA {Q(schemaName)};";
+        command.CommandText = $"CREATE SCHEMA {QuoteIdentifier(schemaName)};";
         await command.ExecuteNonQueryAsync(cancellationToken);
         connectionString = CreateProductionConnectionString();
     }
@@ -248,7 +248,7 @@ public sealed class PostgreSqlBenchmarkTarget(
         await using var connection = new NpgsqlConnection(serverConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"DROP SCHEMA IF EXISTS {Q(schemaName)} CASCADE;";
+        command.CommandText = $"DROP SCHEMA IF EXISTS {QuoteIdentifier(schemaName)} CASCADE;";
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -288,7 +288,7 @@ public sealed class PostgreSqlBenchmarkTarget(
         await using var connection = new NpgsqlConnection(ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {Q(table)} WHERE {Q(projection.Column.Identifier)} = @value;";
+        command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(table)} WHERE {QuoteIdentifier(projection.Column.Identifier)} = @value;";
         command.Parameters.AddWithValue("value", value);
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
     }
@@ -301,12 +301,12 @@ public sealed class PostgreSqlBenchmarkTarget(
         await connection.OpenAsync(cancellationToken);
         await using var statistics = connection.CreateCommand();
         statistics.CommandText = Model.Route.LinkedIndexStorage is null
-            ? $"SET default_statistics_target = 10000; ANALYZE {Q(Model.Route.PrimaryStorage.Name.Identifier)};"
+            ? $"SET default_statistics_target = 10000; ANALYZE {QuoteIdentifier(Model.Route.PrimaryStorage.Name.Identifier)};"
             : $"SET default_statistics_target = 10000; " +
-              $"ANALYZE {Q(Model.Route.PrimaryStorage.Name.Identifier)}; " +
-              $"ANALYZE {Q(Model.Route.LinkedIndexStorage.Name.Identifier)};";
+              $"ANALYZE {QuoteIdentifier(Model.Route.PrimaryStorage.Name.Identifier)}; " +
+              $"ANALYZE {QuoteIdentifier(Model.Route.LinkedIndexStorage.Name.Identifier)};";
         await statistics.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static string Q(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+    private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 }

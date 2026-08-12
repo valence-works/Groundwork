@@ -292,7 +292,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {Q(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
+        command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
         Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));
     }
 
@@ -413,28 +413,28 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await using (var connection = new SqlConnection(connectionString))
         {
             await connection.OpenAsync();
-            var table = Q(storage.Storage.Name.Identifier);
-            var value = Q(storage.Value.Column.Identifier);
-            var key = string.Join(", ", storage.OwnerOrdinalKey.Columns.Reverse().Select(column => Q(column.Column.Identifier)));
+            var table = QuoteIdentifier(storage.Storage.Name.Identifier);
+            var value = QuoteIdentifier(storage.Value.Column.Identifier);
+            var key = string.Join(", ", storage.OwnerOrdinalKey.Columns.Reverse().Select(column => QuoteIdentifier(column.Column.Identifier)));
             var recreateMembershipIndex =
-                $"CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {table} (" +
+                $"CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {table} (" +
                 $"{string.Join(", ", new[] { storage.MembershipKey.Value.Column.Identifier }
                     .Concat(storage.MembershipKey.OwnerColumns.Select(column => column.Column.Identifier))
-                    .Select(Q))});";
+                    .Select(QuoteIdentifier))});";
             var sql = drift switch
             {
                 CollectionElementDrift.WrongType =>
-                    $"DROP INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {table}; " +
+                    $"DROP INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {table}; " +
                     $"ALTER TABLE {table} ALTER COLUMN {value} int NOT NULL; {recreateMembershipIndex}",
                 CollectionElementDrift.WrongCollation =>
-                    $"DROP INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {table}; " +
+                    $"DROP INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {table}; " +
                     $"ALTER TABLE {table} ALTER COLUMN {value} nvarchar(128) COLLATE Latin1_General_100_CI_AS NOT NULL; " +
                     recreateMembershipIndex,
                 CollectionElementDrift.WrongDefault =>
-                    $"ALTER TABLE {table} ADD CONSTRAINT {Q($"DF_{Guid.NewGuid():N}")} DEFAULT N'unexpected' FOR {value};",
+                    $"ALTER TABLE {table} ADD CONSTRAINT {QuoteIdentifier($"DF_{Guid.NewGuid():N}")} DEFAULT N'unexpected' FOR {value};",
                 CollectionElementDrift.WrongPrimaryKeyOrder =>
-                    $"ALTER TABLE {table} DROP CONSTRAINT {Q(await PrimaryKeyAsync(connection, storage.Storage.Name.Identifier))}; " +
-                    $"ALTER TABLE {table} ADD CONSTRAINT {Q($"PK_{Guid.NewGuid():N}")} PRIMARY KEY NONCLUSTERED ({key});",
+                    $"ALTER TABLE {table} DROP CONSTRAINT {QuoteIdentifier(await PrimaryKeyAsync(connection, storage.Storage.Name.Identifier))}; " +
+                    $"ALTER TABLE {table} ADD CONSTRAINT {QuoteIdentifier($"PK_{Guid.NewGuid():N}")} PRIMARY KEY NONCLUSTERED ({key});",
                 _ => throw new ArgumentOutOfRangeException(nameof(drift), drift, null)
             };
             await using var command = connection.CreateCommand();
@@ -474,10 +474,10 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
             command.CommandText =
-                $"DROP INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {Q(storage.Storage.Name.Identifier)}; " +
-                $"CREATE INDEX {Q(storage.MembershipKey.Name.Identifier)} ON {Q(storage.Storage.Name.Identifier)} (" +
-                $"{string.Join(", ", storage.MembershipKey.OwnerColumns.Select(column => Q(column.Column.Identifier))
-                    .Append(Q(storage.MembershipKey.Value.Column.Identifier)))});";
+                $"DROP INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)}; " +
+                $"CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)} (" +
+                $"{string.Join(", ", storage.MembershipKey.OwnerColumns.Select(column => QuoteIdentifier(column.Column.Identifier))
+                    .Append(QuoteIdentifier(storage.MembershipKey.Value.Column.Identifier)))});";
             await command.ExecuteNonQueryAsync();
         }
 
@@ -548,7 +548,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var database = $"groundwork_startup_{suffix}";
-        await ExecuteAdminAsync($"CREATE DATABASE {Q(database)};");
+        await ExecuteAdminAsync($"CREATE DATABASE {QuoteIdentifier(database)};");
         var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
         {
             InitialCatalog = database
@@ -580,7 +580,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         {
             SqlConnection.ClearAllPools();
             await ExecuteAdminAsync(
-                $"ALTER DATABASE {Q(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {Q(database)};");
+                $"ALTER DATABASE {QuoteIdentifier(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {QuoteIdentifier(database)};");
         }
     }
 
@@ -820,7 +820,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
             "configurationDocument", "showplan-noise", "1", "{\"category\":\"tools\"}"))).Status);
         await SeedPlanNoiseAsync(route);
-        await ExecuteAdminAsync($"UPDATE STATISTICS {Q(route.PrimaryStorage.Name.Identifier)};");
+        await ExecuteAdminAsync($"UPDATE STATISTICS {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)};");
         var runtime = SqlServerPhysicalQueryRuntime.Create(store, model.Manifest, route, model.Target.Provider);
         var explainer = Assert.IsAssignableFrom<IPhysicalDocumentQueryExplainer>(runtime);
         var query = new DocumentQuery(
@@ -1029,7 +1029,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         Assert.Equal(5, lookup.CommandText.Split("varbinary(max)", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("varbinary(900)", lookup.CommandText, StringComparison.Ordinal);
 
-        await ExecuteAdminAsync($"UPDATE STATISTICS {Q(RelationalPhysicalStorageColumns.MutationOperationsTable)};");
+        await ExecuteAdminAsync($"UPDATE STATISTICS {QuoteIdentifier(RelationalPhysicalStorageColumns.MutationOperationsTable)};");
         var plan = await ExplainAsync(lookup, route);
 
         Assert.Contains("PK_groundwork_document_mutation_operations", plan, StringComparison.Ordinal);
@@ -1065,7 +1065,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var database = $"groundwork_bootstrap_{suffix}";
-        await ExecuteAdminAsync($"CREATE DATABASE {Q(database)};");
+        await ExecuteAdminAsync($"CREATE DATABASE {QuoteIdentifier(database)};");
         var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
         {
             InitialCatalog = database
@@ -1093,7 +1093,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         {
             SqlConnection.ClearAllPools();
             await ExecuteAdminAsync(
-                $"ALTER DATABASE {Q(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {Q(database)};");
+                $"ALTER DATABASE {QuoteIdentifier(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {QuoteIdentifier(database)};");
         }
     }
 
@@ -1113,7 +1113,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var database = $"groundwork_infrastructure_{suffix}";
-        await ExecuteAdminAsync($"CREATE DATABASE {Q(database)};");
+        await ExecuteAdminAsync($"CREATE DATABASE {QuoteIdentifier(database)};");
         var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
         {
             InitialCatalog = database
@@ -1151,7 +1151,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         {
             SqlConnection.ClearAllPools();
             await ExecuteAdminAsync(
-                $"ALTER DATABASE {Q(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {Q(database)};");
+                $"ALTER DATABASE {QuoteIdentifier(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {QuoteIdentifier(database)};");
         }
     }
 
@@ -1352,7 +1352,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
-            command.CommandText = $"CREATE TABLE {Q(model.Target.Routes.Single().PrimaryStorage.Name.Identifier)} ([wrong] int NOT NULL);";
+            command.CommandText = $"CREATE TABLE {QuoteIdentifier(model.Target.Routes.Single().PrimaryStorage.Name.Identifier)} ([wrong] int NOT NULL);";
             await command.ExecuteNonQueryAsync();
         }
 
@@ -1532,7 +1532,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
 
         var route = additive.Target.Routes.Single();
         var linkedLookup = route.LinkedRelationship!.Identity.LookupKey.Identifier;
-        var linkedLookupExpression = Q(linkedLookup);
+        var linkedLookupExpression = QuoteIdentifier(linkedLookup);
         var collisionLookups = new[] { "zz-collision-a", "zz-collision-b" }
             .Select(id => route.LinkedRelationship.Identity.Project(id).LookupKey)
             .Select(value => $"0x{value}")
@@ -1777,8 +1777,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             take: 1);
         await SeedPlanNoiseAsync(route);
         await ExecuteAdminAsync(route.LinkedIndexStorage is null
-            ? $"UPDATE STATISTICS {Q(route.PrimaryStorage.Name.Identifier)};"
-            : $"UPDATE STATISTICS {Q(route.PrimaryStorage.Name.Identifier)}; UPDATE STATISTICS {Q(route.LinkedIndexStorage.Name.Identifier)};");
+            ? $"UPDATE STATISTICS {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)};"
+            : $"UPDATE STATISTICS {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)}; UPDATE STATISTICS {QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier)};");
         var runtime = SqlServerPhysicalQueryRuntime.Create(store, manifest, route, provider);
         var explanation = await Assert.IsAssignableFrom<IPhysicalDocumentQueryExplainer>(runtime).ExplainAsync(query);
         return string.Join(Environment.NewLine, explanation.Commands.Select(command => command.NativePlan));
@@ -1793,8 +1793,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await using (var statistics = connection.CreateCommand())
         {
             statistics.CommandText = route.LinkedIndexStorage is null
-                ? $"UPDATE STATISTICS {Q(route.PrimaryStorage.Name.Identifier)};"
-                : $"UPDATE STATISTICS {Q(route.PrimaryStorage.Name.Identifier)}; UPDATE STATISTICS {Q(route.LinkedIndexStorage.Name.Identifier)};";
+                ? $"UPDATE STATISTICS {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)};"
+                : $"UPDATE STATISTICS {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)}; UPDATE STATISTICS {QuoteIdentifier(route.LinkedIndexStorage.Name.Identifier)};";
             await statistics.ExecuteNonQueryAsync();
         }
         await using (var enable = connection.CreateCommand())
@@ -2042,8 +2042,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText =
-            $"UPDATE {Q(route.PrimaryStorage.Name.Identifier)} SET " +
-            $"{Q(route.Envelope.Identity.LookupKey.Identifier)} = @lookupKey;";
+            $"UPDATE {QuoteIdentifier(route.PrimaryStorage.Name.Identifier)} SET " +
+            $"{QuoteIdentifier(route.Envelope.Identity.LookupKey.Identifier)} = @lookupKey;";
         command.Parameters.AddWithValue("@lookupKey", SqlServerDocumentIdentityEncoding.Lookup(lookupKey));
         await command.ExecuteNonQueryAsync();
     }
@@ -2057,9 +2057,9 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText =
-            $"UPDATE {Q(route.LinkedIndexStorage!.Name.Identifier)} SET " +
-            $"{Q(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
-            $"{Q(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey;";
+            $"UPDATE {QuoteIdentifier(route.LinkedIndexStorage!.Name.Identifier)} SET " +
+            $"{QuoteIdentifier(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
+            $"{QuoteIdentifier(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey;";
         command.Parameters.AddWithValue("@retainedId", retainedId);
         command.Parameters.AddWithValue("@comparisonKey", EncodeInjectedComparisonEvidence(comparisonKey));
         await command.ExecuteNonQueryAsync();
@@ -2075,10 +2075,10 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText =
-            $"UPDATE {Q(route.LinkedIndexStorage!.Name.Identifier)} SET " +
-            $"{Q(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
-            $"{Q(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey " +
-            $"WHERE {Q(route.LinkedRelationship.Identity.LookupKey.Identifier)} = @lookupKey;";
+            $"UPDATE {QuoteIdentifier(route.LinkedIndexStorage!.Name.Identifier)} SET " +
+            $"{QuoteIdentifier(route.LinkedRelationship!.DocumentId.Identifier)} = @retainedId, " +
+            $"{QuoteIdentifier(route.LinkedRelationship.Identity.ComparisonKey.Identifier)} = @comparisonKey " +
+            $"WHERE {QuoteIdentifier(route.LinkedRelationship.Identity.LookupKey.Identifier)} = @lookupKey;";
         command.Parameters.AddWithValue("@retainedId", retainedId);
         command.Parameters.AddWithValue("@comparisonKey", EncodeInjectedComparisonEvidence(comparisonKey));
         command.Parameters.AddWithValue("@lookupKey", SqlServerDocumentIdentityEncoding.Lookup(lookupKey));
@@ -2098,7 +2098,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await using var connection = new SqlConnection(container.GetConnectionString());
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT {Q(column)} FROM {Q(table)} ORDER BY {Q(orderBy)};";
+        command.CommandText = $"SELECT {QuoteIdentifier(column)} FROM {QuoteIdentifier(table)} ORDER BY {QuoteIdentifier(orderBy)};";
         var values = new List<int?>();
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -2163,11 +2163,11 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             .Where(index =>
                 index.Target == target &&
                 index.Columns.Any(column => column.Column.Identifier == comparison))
-            .Select(index => $"DROP INDEX {Q(index.Name.Identifier)} ON {Q(table)}; ");
+            .Select(index => $"DROP INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)}; ");
         command.CommandText =
             string.Concat(dependentIndexes) +
-            $"ALTER TABLE {Q(table)} DROP COLUMN {Q(SqlServerPhysicalIdentity.HiddenColumn(comparison))}; " +
-            $"ALTER TABLE {Q(table)} DROP COLUMN {Q(comparison)};";
+            $"ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(SqlServerPhysicalIdentity.HiddenColumn(comparison))}; " +
+            $"ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(comparison)};";
         await command.ExecuteNonQueryAsync();
     }
 
@@ -2247,20 +2247,20 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             readKey.Parameters.AddWithValue("@table", table);
             var constraint = (string)(await readKey.ExecuteScalarAsync())!;
             await using var drop = connection.CreateCommand();
-            drop.CommandText = $"ALTER TABLE {Q(table)} DROP CONSTRAINT {Q(constraint)}; ALTER TABLE {Q(table)} DROP COLUMN {Q(hidden)};";
+            drop.CommandText = $"ALTER TABLE {QuoteIdentifier(table)} DROP CONSTRAINT {QuoteIdentifier(constraint)}; ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(hidden)};";
             await drop.ExecuteNonQueryAsync();
         }
         var definition = tamper switch
         {
-            IdentityHashTamper.PlainBinary => $"{Q(hidden)} binary(32) NOT NULL",
+            IdentityHashTamper.PlainBinary => $"{QuoteIdentifier(hidden)} binary(32) NOT NULL",
             IdentityHashTamper.NonPersisted =>
-                $"{Q(hidden)} AS CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), {Q(retainedColumn)})))",
+                $"{QuoteIdentifier(hidden)} AS CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), {QuoteIdentifier(retainedColumn)})))",
             IdentityHashTamper.WrongExpression =>
-                $"{Q(hidden)} AS CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), N'wrong'))) PERSISTED NOT NULL",
+                $"{QuoteIdentifier(hidden)} AS CONVERT(binary(32), HASHBYTES('SHA2_256', CONVERT(varbinary(max), N'wrong'))) PERSISTED NOT NULL",
             _ => throw new ArgumentOutOfRangeException(nameof(tamper), tamper, null)
         };
         await using var add = connection.CreateCommand();
-        add.CommandText = $"ALTER TABLE {Q(table)} ADD {definition};";
+        add.CommandText = $"ALTER TABLE {QuoteIdentifier(table)} ADD {definition};";
         await add.ExecuteNonQueryAsync();
     }
 
@@ -2292,9 +2292,9 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             InfrastructureTamper.WrongStateCollation =>
                 "ALTER TABLE groundwork_physical_schema_state ALTER COLUMN target_fingerprint nvarchar(128) COLLATE Latin1_General_100_CI_AS NOT NULL;",
             InfrastructureTamper.MissingStatePrimaryKey =>
-                $"ALTER TABLE groundwork_physical_schema_state DROP CONSTRAINT {Q(await PrimaryKeyAsync(connection, "groundwork_physical_schema_state"))};",
+                $"ALTER TABLE groundwork_physical_schema_state DROP CONSTRAINT {QuoteIdentifier(await PrimaryKeyAsync(connection, "groundwork_physical_schema_state"))};",
             InfrastructureTamper.ReorderedOperationsPrimaryKey =>
-                $"ALTER TABLE groundwork_physical_schema_operations DROP CONSTRAINT {Q(await PrimaryKeyAsync(connection, "groundwork_physical_schema_operations"))}; " +
+                $"ALTER TABLE groundwork_physical_schema_operations DROP CONSTRAINT {QuoteIdentifier(await PrimaryKeyAsync(connection, "groundwork_physical_schema_operations"))}; " +
                 "ALTER TABLE groundwork_physical_schema_operations ADD CONSTRAINT PK_tampered_operations " +
                 "PRIMARY KEY NONCLUSTERED (provider_key, manifest_key, operation_key);",
             InfrastructureTamper.PlainHash or InfrastructureTamper.NonPersistedHash or InfrastructureTamper.WrongHashExpression =>
@@ -2326,9 +2326,9 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             };
             var reapplyPrimaryKey = tamper == InfrastructureTamper.NonPersistedHash
                 ? string.Empty
-                : $"ALTER TABLE groundwork_physical_schema_locks ADD CONSTRAINT {Q(constraint)} " +
+                : $"ALTER TABLE groundwork_physical_schema_locks ADD CONSTRAINT {QuoteIdentifier(constraint)} " +
                   "PRIMARY KEY NONCLUSTERED (manifest_key, provider_key);";
-            return $"ALTER TABLE groundwork_physical_schema_locks DROP CONSTRAINT {Q(constraint)}; " +
+            return $"ALTER TABLE groundwork_physical_schema_locks DROP CONSTRAINT {QuoteIdentifier(constraint)}; " +
                    "ALTER TABLE groundwork_physical_schema_locks DROP COLUMN manifest_key; " +
                    $"ALTER TABLE groundwork_physical_schema_locks ADD {definition}; " +
                    reapplyPrimaryKey;
@@ -2376,10 +2376,10 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             providerName);
 
     private Task<long> CountRowsAsync(string table) =>
-        CountScalarAsync($"SELECT COUNT_BIG(*) FROM {Q(table)};");
+        CountScalarAsync($"SELECT COUNT_BIG(*) FROM {QuoteIdentifier(table)};");
 
     private Task<long> CountProjectedValuesAsync(string table, string column) =>
-        CountScalarAsync($"SELECT COUNT_BIG(*) FROM {Q(table)} WHERE {Q(column)} IS NOT NULL;");
+        CountScalarAsync($"SELECT COUNT_BIG(*) FROM {QuoteIdentifier(table)} WHERE {QuoteIdentifier(column)} IS NOT NULL;");
 
     private async Task<long> CountAsync(string sql, string first, string second)
     {
@@ -2458,7 +2458,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             $"SQL Server session {blockedSessionId} was not observed waiting on session {blockerSessionId}.");
     }
 
-    private static string Q(string identifier) => $"[{identifier.Replace("]", "]]", StringComparison.Ordinal)}]";
+    private static string QuoteIdentifier(string identifier) => $"[{identifier.Replace("]", "]]", StringComparison.Ordinal)}]";
 
     private enum IdentityHashTamper
     {
