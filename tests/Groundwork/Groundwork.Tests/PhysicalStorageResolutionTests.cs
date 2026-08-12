@@ -494,6 +494,53 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
+    public void MixedDeclaredAndOmittedLengthsForOnePathAreRejected()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-customer-unbounded",
+                    [new IndexField("customerId")],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing),
+                new BoundedQueryDeclaration(
+                    "list-by-customer-unbounded",
+                    "by-customer-unbounded",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-038" &&
+            diagnostic.Message.Contains("customerId", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void ConflictingDeclaredLengthsForOnePathAreRejected()
     {
         var physicalStorage = new StorageUnitPhysicalStorage(

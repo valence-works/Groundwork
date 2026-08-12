@@ -577,8 +577,10 @@ public static class PhysicalStorageResolver
                 $"storageUnits.{unitIdentity.Value}.physicalStorage.boundedQueries"));
         }
 
+        // An omitted length is an unbounded contract, not a missing opinion: mixing it with a declared
+        // length for the same path would silently narrow the shared projected column and reject writes
+        // the unbounded declaration permits.
         var conflictingLengths = demand
-            .Where(x => x.Length is not null)
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Where(group => group.Select(x => x.Length).Distinct().Count() > 1)
             .Select(group => group.Key)
@@ -588,7 +590,7 @@ public static class PhysicalStorageResolver
         {
             diagnostics.Add(GroundworkDiagnostic.Error(
                 "GW-PHYSICAL-038",
-                $"Scale-bearing index paths must declare one length per storage unit: {string.Join(", ", conflictingLengths)}.",
+                $"Scale-bearing index paths must declare one length, or none, per storage unit: {string.Join(", ", conflictingLengths)}.",
                 $"storageUnits.{unitIdentity.Value}.physicalStorage.logicalIndexes"));
         }
 

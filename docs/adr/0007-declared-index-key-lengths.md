@@ -41,7 +41,10 @@ Declare the bound where the rest of the logical index contract lives:
 - Synthesis carries the resolved length through scale-bearing demand into the synthesized projected
   column, so declared-mode keyword indexes certify on SQL Server exactly like explicit bounded columns.
 - Validation (GW-PHYSICAL-038) rejects non-positive lengths, explicit lengths on fields whose kind
-  cannot be bounded, and conflicting declared lengths for one path within a storage unit.
+  cannot be bounded, and inconsistent lengths for one path within a storage unit — including one
+  index declaring a length while another leaves the same path unbounded. An omitted length is an
+  unbounded contract, not a missing opinion; letting a declared length win would silently narrow the
+  shared projected column and reject writes the unbounded declaration permits (GW-PHYSICAL-037).
 
 Unbounded string demand stays legal: providers without a key budget accept it unchanged, and SQL
 Server keeps rejecting it at certification time with its existing bounded-key diagnostic. This mirrors
