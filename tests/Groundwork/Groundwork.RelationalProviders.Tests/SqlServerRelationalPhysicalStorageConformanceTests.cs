@@ -1362,6 +1362,26 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     }
 
     [Fact]
+    public Task WideningANullExcludingIndexRebuildsItWithoutItsFilter() =>
+        RelationalPhysicalServerAssertions.WideningANullExcludingIndexRebuildsItWithoutItsFilterAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            () => new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()),
+            ReadIndexFilterAsync);
+
+    private async Task<string?> ReadIndexFilterAsync(string table, string index)
+    {
+        await using var connection = new SqlConnection(container.GetConnectionString());
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT filter_definition FROM sys.indexes WHERE object_id = OBJECT_ID(@table) AND name = @index;";
+        command.Parameters.AddWithValue("@table", table);
+        command.Parameters.AddWithValue("@index", index);
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    [Fact]
     public Task NullableUniqueProjectionUsesPortableNullDistinctSemantics() =>
         RelationalPhysicalServerAssertions.NullableUniqueProjectionUsesPortableNullDistinctSemanticsAsync(
             SqlServerGroundworkCapabilities.Provider,

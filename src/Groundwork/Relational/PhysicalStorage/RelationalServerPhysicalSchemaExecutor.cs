@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Text;
@@ -331,6 +332,10 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 ValidateRoute(create.Route);
                 await CreateIndexAsync(connection, transaction, create.Route, create.Storage.Name.Identifier, create.Index, ct);
                 break;
+            case RebuildPhysicalIndexOperation rebuild:
+                ValidateRoute(rebuild.Route);
+                await RebuildIndexAsync(connection, transaction, rebuild.Route, rebuild.Storage.Name.Identifier, rebuild.Index, ct);
+                break;
             case BackfillCanonicalJsonOperation backfill:
                 if (backfill.Route is not null)
                     ValidateRoute(backfill.Route);
@@ -462,12 +467,69 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         ExecutablePhysicalIndexRoute index,
         CancellationToken ct)
     {
-        var nullableColumns = NullableIndexColumns(route, index);
+        var excludedColumns = PhysicalIndexNullExclusion.Columns(route, index);
         var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
         if (existing is null)
-            await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, nullableColumns), ct);
+            await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, excludedColumns), ct);
         await ValidateIndexAsync(connection, transaction, route, table, index, ct);
     }
+
+    /// <summary>
+    /// Replaces the applied null-excluding index with the widened definition that supersedes it.
+    /// </summary>
+    /// <remarks>
+    /// Row exclusion is a filtered index, so widening it means dropping the object and creating it again;
+    /// creation alone cannot reach it. The live index has to be exactly the shape Groundwork emitted for
+    /// the narrower definition before it is dropped — one carrying this name but a shape Groundwork never
+    /// wrote is drift, and dropping it would destroy something nobody asked to replace. Anything else is
+    /// left alone for creation and validation to reject in their own words, which also makes a retry after
+    /// a lost acknowledgement a no-op: the index is already the widened shape by then. Both dialects run
+    /// DDL inside this operation's transaction, so a failure after the drop restores the original index
+    /// and no reader ever observes the index missing.
+    /// </remarks>
+    private async Task RebuildIndexAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        ExecutableStorageRoute route,
+        string table,
+        ExecutablePhysicalIndexRoute index,
+        CancellationToken ct)
+    {
+        var superseded = dialect.IndexFilter(
+            index,
+            PhysicalIndexNullExclusion.Columns(route, index, MissingValueBehavior.Excluded));
+        var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
+        if (existing is not null && IndexMatches(existing, index, superseded))
+            await ExecuteAsync(connection, transaction, dialect.DropIndexSql(table, index.Name.Identifier), ct);
+        await CreateIndexAsync(connection, transaction, route, table, index, ct);
+    }
+
+    /// <summary>
+    /// Whether the live index is exactly <paramref name="expected"/> carrying <paramref name="expectedFilter"/>.
+    /// </summary>
+    private static bool IndexMatches(
+        RelationalPhysicalIndexMetadata actual,
+        ExecutablePhysicalIndexRoute expected,
+        string? expectedFilter) =>
+        IndexShapeMatches(actual, expected, expectedFilter) &&
+        actual.Columns.Zip(expected.Columns).All(pair =>
+            pair.First.Name == pair.Second.Column.Identifier &&
+            pair.First.Direction == pair.Second.Direction);
+
+    /// <summary>
+    /// Whether the live index agrees with <paramref name="expected"/> on everything but the identity and
+    /// order of its columns, which validation reports one ordinal at a time.
+    /// </summary>
+    private static bool IndexShapeMatches(
+        RelationalPhysicalIndexMetadata actual,
+        ExecutablePhysicalIndexRoute expected,
+        string? expectedFilter) =>
+        actual.IsUnique == expected.IsUnique &&
+        actual.Columns.Count == expected.Columns.Count &&
+        string.Equals(
+            NormalizeIndexFilter(actual.Filter),
+            NormalizeIndexFilter(expectedFilter),
+            StringComparison.OrdinalIgnoreCase);
 
     private async Task BackfillAsync(
         DbConnection connection,
@@ -890,6 +952,25 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             dialect.ProjectedCollation(definition)), actual.GetValueOrDefault(column));
     }
 
+    /// <summary>
+    /// Reduces an index filter to a form that survives the round trip through a provider's catalog.
+    /// </summary>
+    /// <remarks>
+    /// Providers re-render the predicate they stored rather than echoing what was submitted: SQL Server
+    /// keeps <c>([name] IS NOT NULL)</c>, while PostgreSQL's <c>pg_get_expr</c> quotes nothing and
+    /// parenthesises every conjunct, turning one submitted pair into
+    /// <c>((name IS NOT NULL) AND (description IS NOT NULL))</c>. Comparing the raw text would report
+    /// drift that does not exist, so identifier quoting, grouping and whitespace are dropped first.
+    /// Filters are only ever conjunctions of <c>IS NOT NULL</c>, so dropping grouping cannot make two
+    /// meaningfully different predicates compare equal — a changed column set still shows up.
+    /// </remarks>
+    private static string? NormalizeIndexFilter(string? filter) =>
+        filter is null
+            ? null
+            : new string(filter.Where(character =>
+                character is not ('"' or '[' or ']' or '`' or '(' or ')') &&
+                !char.IsWhiteSpace(character)).ToArray());
+
     private async Task ValidateIndexAsync(
         DbConnection connection,
         DbTransaction transaction,
@@ -900,9 +981,10 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     {
         var actual = await dialect.ReadIndexAsync(connection, transaction, table, expected.Name.Identifier, ct)
             ?? throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' is missing from '{table}'.");
-        var expectedFilter = dialect.IndexFilter(expected, NullableIndexColumns(route, expected));
-        if (actual.IsUnique != expected.IsUnique || actual.Columns.Count != expected.Columns.Count ||
-            !string.Equals(actual.Filter, expectedFilter, StringComparison.OrdinalIgnoreCase))
+        var expectedFilter = dialect.IndexFilter(
+            expected,
+            PhysicalIndexNullExclusion.Columns(route, expected));
+        if (!IndexShapeMatches(actual, expected, expectedFilter))
             throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' has incompatible uniqueness, filter, or column count.");
         for (var index = 0; index < expected.Columns.Count; index++)
         {
@@ -1057,16 +1139,6 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         new(route.LinkedRelationship.Identity.ComparisonKey.Identifier, RelationalEnvelopeColumnKind.IdentityComparison),
         new(route.LinkedRelationship.Identity.LookupKey.Identifier, RelationalEnvelopeColumnKind.IdentityLookup)
     ];
-
-    private static string[] NullableIndexColumns(ExecutableStorageRoute route, ExecutablePhysicalIndexRoute index)
-    {
-        var indexed = index.Columns.Select(column => column.Column.Identifier).ToHashSet(StringComparer.Ordinal);
-        return route.ProjectedColumns
-            .Where(column => column.Target == index.Target && column.Definition.IsNullable && indexed.Contains(column.Column.Identifier))
-            .Select(column => column.Column.Identifier)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-    }
 
     protected static long ReadLockSessionId(IPhysicalSchemaApplicationLock applicationLock) =>
         applicationLock is ApplicationLock relationalLock
@@ -1444,8 +1516,17 @@ public abstract class RelationalServerPhysicalSchemaDialect
     public abstract string ProjectedColumnSql(string column, ProjectedColumnDefinition definition);
     public abstract string AddColumnSql(string table, string column, ProjectedColumnDefinition definition);
     public abstract string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition);
-    public abstract string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> nullableColumns);
-    public abstract string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> nullableColumns);
+    /// <summary>
+    /// The index filter that realises <see cref="MissingValueBehavior.Excluded"/>, or <see langword="null"/>
+    /// when <paramref name="excludedColumns"/> is empty and the index therefore keeps every row.
+    /// </summary>
+    public abstract string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
+    public abstract string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
+    /// <summary>
+    /// Drops an index so a widened definition can replace it. Only ever issued for an index this executor
+    /// has just proved it emitted itself.
+    /// </summary>
+    public abstract string DropIndexSql(string table, string index);
     public abstract string UpsertLinkedSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> keyColumns, IReadOnlyList<string> updateColumns);
     public abstract string SelectCanonicalBatchSql(ExecutableStorageRoute route, int batchSize, bool hasCursor);
     public abstract object? ConvertStorageValue(object? value, ProjectedColumnDefinition definition);

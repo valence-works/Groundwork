@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using Groundwork.Core.Capabilities;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
@@ -217,6 +218,133 @@ public sealed class PhysicalSchemaDiffPlannerTests
         Assert.False(plan.IsApplicable);
         Assert.Empty(plan.Operations);
         Assert.Equal("GW-SCHEMA-003", Assert.Single(plan.Diagnostics).Code);
+    }
+
+    /// <summary>
+    /// The defect: the scale-bearing index guard's primary remedy is to widen an index to keep rows with
+    /// no value, which on an applied schema used to collide with its own applied operation.
+    /// </summary>
+    [Fact]
+    public void Widening_an_applied_index_to_keep_missing_values_is_additive_and_rebuilds_it()
+    {
+        var applied = Complete(PhysicalSchemaDiffPlanner.Plan(
+            NullableCategoryTarget(MissingValueBehavior.Excluded),
+            PhysicalSchemaHistoryState.Empty,
+            PlannedAt));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            NullableCategoryTarget(MissingValueBehavior.IncludedAsNull),
+            PhysicalSchemaHistoryState.FromApplied(applied),
+            PlannedAt.AddHours(1));
+
+        Assert.True(plan.IsApplicable, JoinDiagnostics(plan));
+        Assert.Empty(plan.Diagnostics);
+        // The rebuild stands in for the create, and the backfill derived from the index follows it: both
+        // of those slots used to conflict, which is why one flip produced two diagnostics.
+        Assert.Collection(
+            plan.Operations,
+            operation => Assert.IsType<RebuildPhysicalIndexOperation>(operation),
+            operation => Assert.Equal(
+                CanonicalJsonBackfillSubjectKind.PhysicalIndex,
+                Assert.IsType<BackfillCanonicalJsonOperation>(operation).SubjectKind),
+            operation => Assert.IsType<ValidatePhysicalSchemaOperation>(operation),
+            operation => Assert.IsType<RecordPhysicalSchemaAppliedStateOperation>(operation));
+
+        var rebuild = plan.Operations.OfType<RebuildPhysicalIndexOperation>().Single();
+        var appliedIndex = Assert.Single(
+            applied.Snapshot.SemanticOperations,
+            operation => operation.Kind == PhysicalSchemaOperationKind.CreatePhysicalIndex);
+        Assert.Equal("by-category", rebuild.SubjectIdentity);
+        Assert.Equal(appliedIndex.Fingerprint, rebuild.SupersededFingerprint);
+        Assert.Equal(MissingValueBehavior.IncludedAsNull, rebuild.Index.MissingValueBehavior);
+    }
+
+    [Fact]
+    public void Narrowing_an_applied_index_to_omit_missing_values_is_rejected_as_non_additive()
+    {
+        var applied = Complete(PhysicalSchemaDiffPlanner.Plan(
+            NullableCategoryTarget(MissingValueBehavior.IncludedAsNull),
+            PhysicalSchemaHistoryState.Empty,
+            PlannedAt));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            NullableCategoryTarget(MissingValueBehavior.Excluded),
+            PhysicalSchemaHistoryState.FromApplied(applied),
+            PlannedAt.AddHours(1));
+
+        Assert.False(plan.IsApplicable);
+        Assert.Empty(plan.Operations);
+        Assert.Equal(2, plan.Diagnostics.Count);
+        Assert.All(plan.Diagnostics, diagnostic => Assert.Equal("GW-SCHEMA-003", diagnostic.Code));
+    }
+
+    /// <summary>
+    /// The suppression must not degenerate into "any index change passes as long as the behavior widened".
+    /// </summary>
+    [Fact]
+    public void Widening_an_applied_index_alongside_another_change_is_rejected_as_non_additive()
+    {
+        var applied = Complete(PhysicalSchemaDiffPlanner.Plan(
+            NullableCategoryTarget(MissingValueBehavior.Excluded),
+            PhysicalSchemaHistoryState.Empty,
+            PlannedAt));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            NullableCategoryTarget(MissingValueBehavior.IncludedAsNull, firstIndexSchemaVersion: 2),
+            PhysicalSchemaHistoryState.FromApplied(applied),
+            PlannedAt.AddHours(1));
+
+        Assert.False(plan.IsApplicable);
+        Assert.Empty(plan.Operations);
+        Assert.Equal(2, plan.Diagnostics.Count);
+        Assert.All(plan.Diagnostics, diagnostic => Assert.Equal("GW-SCHEMA-003", diagnostic.Code));
+    }
+
+    /// <summary>
+    /// The common case once the library default flips: excluding missing values restricts nothing when no
+    /// key column is nullable, so the applied index is already correct and must not be dropped.
+    /// </summary>
+    [Fact]
+    public void Widening_an_applied_index_that_keys_no_nullable_column_creates_rather_than_rebuilds()
+    {
+        var applied = Complete(PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(PhysicalStorageForm.DedicatedDocumentTable, includeSecondProjection: false),
+            PhysicalSchemaHistoryState.Empty,
+            PlannedAt));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(
+                PhysicalStorageForm.DedicatedDocumentTable,
+                includeSecondProjection: false,
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull),
+            PhysicalSchemaHistoryState.FromApplied(applied),
+            PlannedAt.AddHours(1));
+
+        Assert.True(plan.IsApplicable, JoinDiagnostics(plan));
+        Assert.Empty(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.Single(plan.Operations.OfType<CreatePhysicalIndexOperation>());
+    }
+
+    [Fact]
+    public void Restarting_after_a_widened_index_was_applied_produces_no_operations()
+    {
+        var widened = NullableCategoryTarget(MissingValueBehavior.IncludedAsNull);
+        var applied = Complete(PhysicalSchemaDiffPlanner.Plan(
+            NullableCategoryTarget(MissingValueBehavior.Excluded),
+            PhysicalSchemaHistoryState.Empty,
+            PlannedAt));
+        var rebuilt = Complete(PhysicalSchemaDiffPlanner.Plan(
+            widened,
+            PhysicalSchemaHistoryState.FromApplied(applied),
+            PlannedAt.AddHours(1)));
+
+        var restart = PhysicalSchemaDiffPlanner.Plan(
+            widened,
+            PhysicalSchemaHistoryState.FromApplied(rebuilt),
+            PlannedAt.AddHours(2));
+
+        Assert.True(restart.IsApplicable, JoinDiagnostics(restart));
+        Assert.Empty(restart.Operations);
     }
 
     [Fact]
@@ -727,6 +855,20 @@ public sealed class PhysicalSchemaDiffPlannerTests
         return plan.Complete(acknowledgements, AppliedAt);
     }
 
+    /// <summary>
+    /// A linked-index route whose keyed category column is nullable, so row exclusion is something the
+    /// index physically does and the index owns a dependent canonical-JSON backfill.
+    /// </summary>
+    private static PhysicalSchemaTarget NullableCategoryTarget(
+        MissingValueBehavior missingValueBehavior,
+        int firstIndexSchemaVersion = 1) =>
+        CreateTarget(
+            PhysicalStorageForm.DedicatedDocumentTable,
+            includeSecondProjection: false,
+            categoryNullable: true,
+            missingValueBehavior: missingValueBehavior,
+            firstIndexSchemaVersion: firstIndexSchemaVersion);
+
     private static PhysicalSchemaTarget CreateTarget(
         PhysicalStorageForm form,
         bool includeSecondProjection,
@@ -736,7 +878,10 @@ public sealed class PhysicalSchemaDiffPlannerTests
         ProviderIdentity? provider = null,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal,
         bool dedicatedWithoutLinked = false,
-        bool collectionProjection = false)
+        bool collectionProjection = false,
+        bool categoryNullable = false,
+        MissingValueBehavior missingValueBehavior = MissingValueBehavior.Excluded,
+        int firstIndexSchemaVersion = 1)
     {
         var template = SampleManifests.MetadataManifest();
         var projectedColumns = new List<ProjectedColumnDefinition>
@@ -746,16 +891,20 @@ public sealed class PhysicalSchemaDiffPlannerTests
                 "category",
                 PortablePhysicalType.String,
                 Length: 200,
-                IsNullable: collectionProjection,
+                IsNullable: collectionProjection || categoryNullable,
                 Cardinality: collectionProjection ? ProjectionCardinality.CollectionElements : ProjectionCardinality.Scalar,
                 MaxCollectionElements: collectionProjection ? 8 : null,
                 RebuildMode: rebuildMode)
         };
+        // Row exclusion is pinned rather than inherited so these fingerprints do not move with the
+        // library default; the tests that care about it state the behavior they mean.
         var indexes = new List<PhysicalIndexDefinition>
         {
             new(
                 firstIndexName,
-                [new PhysicalIndexColumnDefinition("storage_scope", 0), new PhysicalIndexColumnDefinition("category", 1)])
+                [new PhysicalIndexColumnDefinition("storage_scope", 0), new PhysicalIndexColumnDefinition("category", 1)],
+                schemaVersion: firstIndexSchemaVersion,
+                missingValueBehavior: missingValueBehavior)
         };
 
         if (includeSecondProjection)
@@ -763,7 +912,8 @@ public sealed class PhysicalSchemaDiffPlannerTests
             projectedColumns.Add(new ProjectedColumnDefinition("priority", "priority", PortablePhysicalType.Int32));
             indexes.Add(new PhysicalIndexDefinition(
                 "by-priority",
-                [new PhysicalIndexColumnDefinition("storage_scope", 0), new PhysicalIndexColumnDefinition("priority", 1)]));
+                [new PhysicalIndexColumnDefinition("storage_scope", 0), new PhysicalIndexColumnDefinition("priority", 1)],
+                missingValueBehavior: MissingValueBehavior.Excluded));
         }
 
         var binding = new SharedStorageBinding("runtime-documents");

@@ -24,6 +24,13 @@ internal sealed record RelationalPhysicalQueryExplainCommand(
 /// <summary>Reusable relational execution engine for one certified physical query source.</summary>
 public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHandler
 {
+    /// <summary>
+    /// The rendered contradiction used wherever a predicate can match nothing at all — an empty
+    /// membership set, or a clause with no comparisons. Named because the index-pin decision has to
+    /// recognise it: a predicate that returns no rows cannot drop any, so it constrains nothing.
+    /// </summary>
+    private const string MatchesNoRows = "0 = 1";
+
     private readonly RelationalPhysicalDocumentStore store;
     private readonly RelationalPhysicalQueryExplainExecutor? explain;
 
@@ -660,21 +667,6 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         bool detectIdentityCollision = false,
         IReadOnlyList<DocumentQueryContinuationValue>? continuation = null)
     {
-        var linked = plan.AccessKind == PhysicalQueryAccessKind.LinkedIndexThenPrimary;
-        var needsPrimaryJoin = linked && (detectIdentityCollision || requiresPrimaryLookup || PredicateFields(plan)
-            .Any(field => field.Target == ExecutableStorageObjectRole.PrimaryStorage));
-        var from = linked && needsPrimaryJoin
-            ? $"FROM {store.PhysicalQuerySource(route.LinkedIndexStorage!.Name.Identifier, "l", plan.IndexName?.Identifier)} " +
-              $"JOIN {store.PhysicalQuerySource(route.PrimaryStorage.Name.Identifier, "p", null)} ON " +
-              store.ExactPhysicalIdentityJoin(LinkedPrimaryJoin(route, detectIdentityCollision))
-            : linked
-                ? $"FROM {store.PhysicalQuerySource(route.LinkedIndexStorage!.Name.Identifier, "l", plan.IndexName?.Identifier)}"
-                : $"FROM {store.PhysicalQuerySource(
-                    route.PrimaryStorage.Name.Identifier,
-                    "p",
-                    plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary
-                        ? null
-                        : plan.IndexName?.Identifier)}";
         var parameters = new List<(string Name, object? Value)>();
         var predicateFieldIdentifiers = new HashSet<string>(StringComparer.Ordinal);
         var predicates = new List<string>();
@@ -701,22 +693,48 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         }
 
         var parameterIndex = 0;
+        var nullRejectedColumns = new HashSet<string>(StringComparer.Ordinal);
+        var matchesNoRows = false;
         foreach (var clause in query.Clauses)
         {
             if (clause.Comparisons.Count == 0)
             {
-                predicates.Add("0 = 1");
+                predicates.Add(MatchesNoRows);
+                matchesNoRows = true;
                 continue;
             }
-            var alternatives = clause.Comparisons.Select(comparison =>
-                Comparison(
+            var alternatives = new List<string>();
+            HashSet<string>? clauseRejected = null;
+            foreach (var comparison in clause.Comparisons)
+            {
+                var alternativeRejected = new HashSet<string>(StringComparer.Ordinal);
+                var rendered = Comparison(
                     plan,
                     route,
                     comparison,
                     parameters,
                     predicateFieldIdentifiers,
-                    ref parameterIndex)).ToArray();
+                    alternativeRejected,
+                    ref parameterIndex);
+                alternatives.Add(rendered);
+                // An alternative that matches nothing contributes no rows to the disjunction, so it
+                // neither widens what the clause can return nor constrains it. Folding it into the
+                // intersection would wrongly read it as "proves nothing".
+                if (rendered == MatchesNoRows)
+                    continue;
+                // Otherwise the clause is a disjunction, so it only rejects nulls on a column when
+                // every alternative does. One alternative that can match a null row is enough to make
+                // the whole clause able to.
+                if (clauseRejected is null)
+                    clauseRejected = alternativeRejected;
+                else
+                    clauseRejected.IntersectWith(alternativeRejected);
+            }
             predicates.Add($"({string.Join(" OR ", alternatives)})");
+            if (clauseRejected is null)
+                matchesNoRows = true;
+            else
+                nullRejectedColumns.UnionWith(clauseRejected);
         }
         if (continuation is not null)
         {
@@ -733,12 +751,107 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             throw new InvalidOperationException(
                 $"Document query '{query.QueryIdentity}' requires {parameters.Count + 2} parameters, exceeding the provider limit of {store.MaxPhysicalParameters}.");
         }
+        // The index pin depends on the predicate that was just built, so it is decided here rather
+        // than blindly from the plan: an index that excludes null rows cannot serve a predicate that
+        // can match them.
+        var (indexIdentifier, impliedPredicates) =
+            HintedIndex(query, plan, route, nullRejectedColumns, matchesNoRows);
+        predicates.AddRange(impliedPredicates);
+
+        var linked = plan.AccessKind == PhysicalQueryAccessKind.LinkedIndexThenPrimary;
+        var needsPrimaryJoin = linked && (detectIdentityCollision || requiresPrimaryLookup || PredicateFields(plan)
+            .Any(field => field.Target == ExecutableStorageObjectRole.PrimaryStorage));
+        var from = linked && needsPrimaryJoin
+            ? $"FROM {store.PhysicalQuerySource(route.LinkedIndexStorage!.Name.Identifier, "l", indexIdentifier)} " +
+              $"JOIN {store.PhysicalQuerySource(route.PrimaryStorage.Name.Identifier, "p", null)} ON " +
+              store.ExactPhysicalIdentityJoin(LinkedPrimaryJoin(route, detectIdentityCollision))
+            : linked
+                ? $"FROM {store.PhysicalQuerySource(route.LinkedIndexStorage!.Name.Identifier, "l", indexIdentifier)}"
+                : $"FROM {store.PhysicalQuerySource(route.PrimaryStorage.Name.Identifier, "p", indexIdentifier)}";
+
         var fromAndWhere = $"{from} WHERE {string.Join(" AND ", predicates)}";
         return new RelationalPhysicalQueryPredicate(
             fromAndWhere,
             parameters,
             predicateFieldIdentifiers.ToArray());
     }
+
+    /// <summary>
+    /// Decides whether the planned index may be pinned for the predicate just built, and returns the
+    /// conjuncts that make the null-rejection visible to the provider's optimizer.
+    /// </summary>
+    /// <remarks>
+    /// A pinned index that excludes null rows can only serve a predicate that provably rejects nulls on
+    /// every excluded column. Where that holds, the conjuncts are redundant by construction and exist
+    /// solely so the provider can match the index's own filter — SQL Server, for instance, reasons over
+    /// simple comparison forms and cannot see through <c>LOWER(column) LIKE @p</c>. Where it does not
+    /// hold, pinning the index would drop rows the predicate can match, so a scale-bearing query is
+    /// refused rather than silently under-served, and any other query falls back to the optimizer.
+    /// </remarks>
+    private (string? Identifier, IReadOnlyList<string> ImpliedPredicates) HintedIndex(
+        DocumentQuery query,
+        PhysicalQueryPlan plan,
+        ExecutableStorageRoute route,
+        IReadOnlySet<string> nullRejectedColumns,
+        bool matchesNoRows)
+    {
+        if (plan.IndexName is null || plan.AccessKind == PhysicalQueryAccessKind.CollectionElementsThenPrimary)
+            return (null, []);
+        // A predicate that returns no rows cannot drop any, so every index serves it equally.
+        if (matchesNoRows)
+            return (plan.IndexName.Identifier, []);
+        var index = route.Indexes.FirstOrDefault(candidate => candidate.Name == plan.IndexName);
+        if (index is null)
+            return (plan.IndexName.Identifier, []);
+        var excluded = store.HintedIndexNullExcludedColumns(route, index);
+        if (excluded.Count == 0)
+            return (plan.IndexName.Identifier, []);
+        var unproven = excluded.Where(column => !nullRejectedColumns.Contains(column)).ToArray();
+        if (unproven.Length == 0)
+        {
+            var alias = Alias(index.Target);
+            return (
+                plan.IndexName.Identifier,
+                excluded.Select(column => $"{alias}.{store.Q(column)} IS NOT NULL").ToArray());
+        }
+        if (plan.IsScaleBearing)
+        {
+            throw new InvalidOperationException(
+                $"Document query '{query.QueryIdentity}' is scale-bearing on physical index " +
+                $"'{plan.IndexName.Identifier}', which declares MissingValueBehavior.Excluded and so omits " +
+                $"rows whose {string.Join(" or ", unproven.Select(column => $"'{column}'"))} is null. Its " +
+                "predicate can match those rows, so the index cannot serve the query without dropping " +
+                "them. Declare the index MissingValueBehavior.IncludedAsNull so it keeps every row — an " +
+                "already-applied index is rebuilt under it, which is additive. A unique index that keys a " +
+                "nullable column cannot take that route, because null-distinct uniqueness is not portable " +
+                "(GW-ROUTE-007); bind the query to an index that keys no nullable column, make the column " +
+                "non-nullable, or declare a new index identity for the shape the query needs.");
+        }
+        return (null, []);
+    }
+
+    /// <summary>
+    /// Whether the comparison, as rendered, can only match rows whose field is non-null.
+    /// </summary>
+    /// <remarks>
+    /// Note the asymmetry between the two negations: <c>NotEqual</c> qualifies, because both
+    /// <c>&lt;&gt; @p</c> and its null form <c>IS NOT NULL</c> drop nulls, while <c>NotContains</c> does
+    /// not, because it is defined to match a null or absent field. <c>Equal</c> depends on the value —
+    /// a null one renders <c>IS NULL</c>, which matches precisely the rows an excluding index omits.
+    /// </remarks>
+    private static bool RejectsNulls(DocumentQueryComparison comparison) => comparison.Operator switch
+    {
+        QueryComparisonOperator.NotEqual => true,
+        QueryComparisonOperator.NotContains => false,
+        QueryComparisonOperator.In =>
+            comparison.Values.Count > 0 && comparison.Values.All(value => value is not null),
+        QueryComparisonOperator.Equal or
+            QueryComparisonOperator.GreaterThan or QueryComparisonOperator.GreaterThanOrEqual or
+            QueryComparisonOperator.LessThan or QueryComparisonOperator.LessThanOrEqual or
+            QueryComparisonOperator.Contains or QueryComparisonOperator.StartsWith =>
+            comparison.Values[0] is not null,
+        _ => false
+    };
 
     private static IReadOnlyList<RelationalPhysicalIdentityJoinPart> LinkedPrimaryJoin(
         ExecutableStorageRoute route,
@@ -795,6 +908,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         DocumentQueryComparison comparison,
         List<(string Name, object? Value)> parameters,
         ISet<string> predicateFieldIdentifiers,
+        ISet<string> nullRejectedColumns,
         ref int parameterIndex)
     {
         if (comparison.Path == PhysicalDocumentFieldPaths.Id)
@@ -822,7 +936,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
                 .Distinct(PhysicalQueryValueComparer.Instance)
                 .ToArray();
             if (distinctValues.Length == 0)
-                return "0 = 1";
+                return MatchesNoRows;
             var membershipPredicates = new List<string>();
             foreach (var value in distinctValues)
             {
@@ -851,6 +965,8 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
                 column.Target == predicate.Field.Target &&
                 column.Definition.Path == comparison.Path)
             : null;
+        if (projection is not null && RejectsNulls(comparison))
+            nullRejectedColumns.Add(projection.Column.Identifier);
         object? Convert(string? value) => value is null
             ? null
             : projection is null
@@ -859,7 +975,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (comparison.Operator == QueryComparisonOperator.In)
         {
             if (comparison.Values.Count == 0)
-                return "0 = 1";
+                return MatchesNoRows;
             var parts = new List<string>();
             foreach (var value in comparison.Values)
             {
@@ -910,7 +1026,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         if (comparison.Operator == QueryComparisonOperator.In)
         {
             if (bound.Values.Count == 0)
-                return "0 = 1";
+                return MatchesNoRows;
             var alternatives = new List<string>();
             foreach (var value in bound.Values)
             {
@@ -1072,8 +1188,10 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         return store.NormalizeQueryExpression(value, field.Source, field.ValueKind);
     }
 
-    private static string Alias(PhysicalQueryField field) =>
-        field.Target switch
+    private static string Alias(PhysicalQueryField field) => Alias(field.Target);
+
+    private static string Alias(ExecutableStorageObjectRole target) =>
+        target switch
         {
             ExecutableStorageObjectRole.LinkedIndexStorage => "l",
             ExecutableStorageObjectRole.CollectionElementStorage => "c",
@@ -1214,7 +1332,7 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
         predicateFieldIdentifiers.Add(order.Field.Identifier);
         var field = Field(order.Field);
         if (value.ScalarKind == DocumentQueryContinuationScalarKind.Null)
-            return order.Direction == PhysicalSortDirection.Ascending ? $"{field} IS NOT NULL" : "0 = 1";
+            return order.Direction == PhysicalSortDirection.Ascending ? $"{field} IS NOT NULL" : MatchesNoRows;
         var parameter = AddContinuationParameter(order.Field, value, parameters, ref parameterIndex);
         return order.Direction == PhysicalSortDirection.Ascending
             ? $"{field} > {parameter}"

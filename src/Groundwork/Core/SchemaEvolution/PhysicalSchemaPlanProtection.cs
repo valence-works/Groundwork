@@ -24,7 +24,7 @@ public sealed record PhysicalSchemaPlanProtection(
                 CreatePrimaryStorageOperation create => create.Storage.Evolution,
                 CreateLinkedStorageOperation create => create.Storage.Evolution,
                 CreatePhysicalEntityStorageOperation create => create.Storage.Evolution,
-                CreatePhysicalIndexOperation create => create.Index.Definition.Evolution,
+                IPhysicalIndexOperation index => index.Index.Definition.Evolution,
                 _ => null
             }
         )).ToArray();

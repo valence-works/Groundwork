@@ -1,3 +1,4 @@
+using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Validation;
 
@@ -78,8 +79,11 @@ public static class PhysicalSchemaDiffPlanner
         var appliedIdentities = applied?.Snapshot.SemanticOperations
             .Select(operation => operation.Identity)
             .ToHashSet(StringComparer.Ordinal) ?? [];
+        var appliedBySlot = applied?.Snapshot.SemanticOperations
+            .ToDictionary(operation => operation.SlotIdentity, StringComparer.Ordinal) ?? [];
         var pending = desiredSemanticOperations
             .Where(operation => !appliedIdentities.Contains(operation.Identity))
+            .Select(operation => Realize(operation, appliedBySlot))
             .ToList();
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
             return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint);
@@ -163,7 +167,8 @@ public static class PhysicalSchemaDiffPlanner
                         CanonicalJsonBackfillSubjectKind.PhysicalIndex,
                         index.Identity,
                         projectedPaths,
-                        createIndex.Fingerprint));
+                        createIndex.Fingerprint,
+                        createIndex.Superseded?.Fingerprint));
                 }
             }
         }
@@ -201,6 +206,9 @@ public static class PhysicalSchemaDiffPlanner
             var slot = current.SlotIdentity;
             if (desiredBySlot.TryGetValue(slot, out var replacement))
             {
+                if (Supersedes(replacement, current))
+                    continue;
+
                 diagnostics.Add(GroundworkDiagnostic.Error(
                     "GW-SCHEMA-003",
                     $"Applied operation '{current.Identity}' conflicts with changed definition '{replacement.Identity}'. #44 supports additive diffs only.",
@@ -216,6 +224,40 @@ public static class PhysicalSchemaDiffPlanner
 
         return diagnostics;
     }
+
+    /// <summary>
+    /// Whether <paramref name="applied"/> is the definition <paramref name="desired"/> supersedes rather
+    /// than a conflicting redefinition of the same slot.
+    /// </summary>
+    /// <remarks>
+    /// The comparison is on the canonical payload, not the identity, because an identity carries only the
+    /// first sixteen hex characters of its fingerprint. Payload equality is the stronger claim and implies
+    /// the identity anyway, since durable evidence is read back through
+    /// <see cref="PhysicalSchemaOperationIntegrity"/>.
+    /// </remarks>
+    private static bool Supersedes(PhysicalSchemaOperation desired, AppliedSemanticOperationSnapshot applied) =>
+        desired.Superseded is { } superseded &&
+        string.Equals(superseded.CanonicalPayload, applied.CanonicalPayload, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The operation that realises <paramref name="operation"/> against the applied state, which for a
+    /// superseded index is a rebuild rather than a create.
+    /// </summary>
+    /// <remarks>
+    /// Only an applied index that actually carries a null-exclusion predicate needs rebuilding. Excluding
+    /// missing values restricts nothing unless the index keys a nullable column, so widening one that does
+    /// not is a fingerprint change over an already-correct physical object: creation revalidates it and
+    /// costs nothing, where a rebuild would drop and recreate every such index for no gain.
+    /// </remarks>
+    private static PhysicalSchemaOperation Realize(
+        PhysicalSchemaOperation operation,
+        IReadOnlyDictionary<string, AppliedSemanticOperationSnapshot> appliedBySlot) =>
+        operation is CreatePhysicalIndexOperation create &&
+        appliedBySlot.TryGetValue(create.SlotIdentity, out var applied) &&
+        Supersedes(create, applied) &&
+        PhysicalIndexNullExclusion.Columns(create.Route, create.Index, MissingValueBehavior.Excluded).Length != 0
+            ? new RebuildPhysicalIndexOperation(create.Route, create.Index, applied.Fingerprint)
+            : operation;
 
     private static IReadOnlyList<GroundworkDiagnostic> ValidateIdentitySchema(
         PhysicalSchemaTarget target,
@@ -365,6 +407,7 @@ public static class PhysicalSchemaDiffPlanner
         } ? 2 : 6,
         PhysicalSchemaOperationKind.FinalizeProjectedColumn => 4,
         PhysicalSchemaOperationKind.CreatePhysicalIndex => 5,
+        PhysicalSchemaOperationKind.RebuildPhysicalIndex => 5,
         PhysicalSchemaOperationKind.ApplyProviderDefinition => 7,
         _ => 7
     };

@@ -8,6 +8,25 @@ namespace Groundwork.PhysicalStorage.Benchmarks.Tests;
 
 public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
 {
+    /// <summary>
+    /// Bound for the proof that aborts through caller cancellation. It is never meant to elapse, so it is far
+    /// wider than any plausible seed-and-spawn stall on a shared runner.
+    /// </summary>
+    private static readonly TimeSpan CancellationAbortBound = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Bound for the proof that aborts by exhausting the deadline, so that proof costs roughly this much wall
+    /// clock. The recovery execution bound also covers seeding and process spawn, which is why the proof warms
+    /// that setup first rather than betting a whole benchmark run on how fast a cold runner gets there.
+    /// </summary>
+    private static readonly TimeSpan DeadlineExhaustionBound = TimeSpan.FromSeconds(5);
+
+    /// <summary>The grace the harness itself allows an aborted child to exit within.</summary>
+    private static readonly TimeSpan CleanupGrace = TimeSpan.FromMilliseconds(RecoveryProtocol.CleanupTimeoutMilliseconds);
+
+    /// <summary>Slack for process scheduling on a contended CI runner, applied on top of a configured bound.</summary>
+    private static readonly TimeSpan SchedulingTolerance = TimeSpan.FromSeconds(2);
+
     private readonly string scratch = Path.Combine(Path.GetTempPath(), $"groundwork-recovery-{Guid.NewGuid():N}");
 
     [Theory]
@@ -106,6 +125,7 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
     [Fact]
     public async Task Recovery_proof_cli_retains_sanitized_evidence_and_emits_the_external_digest()
     {
+        await WarmRecoveryStartupAsync();
         var output = Path.Combine(scratch, "retained", "recovery-evidence.json");
         var exitCode = await Program.Main(
         [
@@ -199,49 +219,33 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
     public async Task Incomplete_child_cleanup_is_bounded_and_leaves_no_live_worker()
     {
         using var cancellation = new CancellationTokenSource();
-        var stopwatch = Stopwatch.StartNew();
-        var workerProcessId = 0;
 
-        var exception = await Record.ExceptionAsync(() => SqliteProcessFailureRecovery.RunAsync(
-            PhysicalStorageForm.SharedDocuments,
-            scratch,
-            RecoveryFailurePoint.PreCommit,
+        var proof = await RunAbortedProofAsync(
+            CancellationAbortBound,
             cancellation.Token,
-            TimeSpan.FromSeconds(1),
-            workerStarted: processId =>
-            {
-                workerProcessId = processId;
-                cancellation.Cancel();
-            }));
+            _ => cancellation.Cancel());
 
-        Assert.NotNull(exception);
-        Assert.InRange(stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(1));
-        Assert.True(workerProcessId > 0);
-        AssertProcessExited(workerProcessId);
+        AssertBoundedCleanupLeftNoLiveWorker(proof);
+
+        // The caller cancelled while the bound still had almost all of its 30 seconds left, so the abort has
+        // to be that cancellation rather than the harness running out of time.
+        Assert.IsAssignableFrom<OperationCanceledException>(proof.Exception);
     }
 
     [Fact]
     public async Task Exhausted_recovery_deadline_still_confirms_child_exit_within_the_cleanup_grace()
     {
-        var stopwatch = Stopwatch.StartNew();
-        var workerProcessId = 0;
-
-        var exception = await Record.ExceptionAsync(() => SqliteProcessFailureRecovery.RunAsync(
-            PhysicalStorageForm.SharedDocuments,
-            scratch,
-            RecoveryFailurePoint.PreCommit,
+        // Wait on the harness's own execution token rather than sleeping past a guessed deadline: it trips
+        // exactly when the configured bound is exhausted, however slowly this runner started the worker.
+        var proof = await RunAbortedProofAsync(
+            DeadlineExhaustionBound,
             CancellationToken.None,
-            TimeSpan.FromSeconds(1),
-            workerStarted: processId =>
-            {
-                workerProcessId = processId;
-                Thread.Sleep(TimeSpan.FromMilliseconds(1_100));
-            }));
+            recoveryExecution => recoveryExecution.WaitHandle.WaitOne(DeadlineExhaustionBound + SchedulingTolerance));
 
-        Assert.NotNull(exception);
-        Assert.InRange(stopwatch.Elapsed, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(7));
-        Assert.True(workerProcessId > 0);
-        AssertProcessExited(workerProcessId);
+        AssertBoundedCleanupLeftNoLiveWorker(proof);
+        Assert.True(
+            proof.Elapsed >= DeadlineExhaustionBound,
+            $"Recovery aborted after {proof.Elapsed} without exhausting its {DeadlineExhaustionBound} bound.");
     }
 
     [Fact]
@@ -338,6 +342,7 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
         RecoveryFailurePoint failurePoint,
         string relativeOutput)
     {
+        await WarmRecoveryStartupAsync();
         var output = Path.Combine(scratch, relativeOutput);
         var result = await SqliteProcessFailureRecovery.RunAsync(
             storageForm,
@@ -347,6 +352,81 @@ public sealed class SqliteProcessFailureRecoveryTests : IAsyncDisposable
             evidenceOutputPath: output);
         return (result, output);
     }
+
+    /// <summary>Runs a proof that aborts at the worker-started handshake, timing the cleanup that follows.</summary>
+    private async Task<AbortedProof> RunAbortedProofAsync(
+        TimeSpan recoveryExecutionBound,
+        CancellationToken cancellationToken,
+        Action<CancellationToken> abortAtWorkerStart)
+    {
+        await WarmRecoveryStartupAsync();
+        var stopwatch = Stopwatch.StartNew();
+        var workerProcessId = 0;
+        var abortedAt = TimeSpan.Zero;
+
+        var exception = await Record.ExceptionAsync(() => SqliteProcessFailureRecovery.RunAsync(
+            PhysicalStorageForm.SharedDocuments,
+            scratch,
+            RecoveryFailurePoint.PreCommit,
+            cancellationToken,
+            recoveryExecutionBound,
+            workerStarted: (processId, recoveryExecution) =>
+            {
+                workerProcessId = processId;
+                abortAtWorkerStart(recoveryExecution);
+                abortedAt = stopwatch.Elapsed;
+            }));
+
+        return new AbortedProof(
+            exception,
+            recoveryExecutionBound,
+            workerProcessId,
+            stopwatch.Elapsed,
+            stopwatch.Elapsed - abortedAt);
+    }
+
+    /// <summary>
+    /// Pays the one-off cost of the seeding path before a bounded proof is timed. Every recovery execution
+    /// bound — the default 15 seconds included — covers seeding and process spawn as well as the work under
+    /// test, and a cold start of that path costs seconds on a contended runner.
+    /// </summary>
+    private async Task WarmRecoveryStartupAsync()
+    {
+        RecoveryProtocol.CaptureSourceSnapshot();
+        var store = await SqliteBenchmarkTarget.InitializeRecoveryAsync(
+            PhysicalStorageForm.SharedDocuments,
+            "warmup_" + Guid.NewGuid().ToString("N")[..12],
+            Path.Combine(scratch, "warmup", "durable.db"),
+            CancellationToken.None);
+        await store.SaveAsync(
+            RecoveryProtocol.Save(RecoveryProtocol.Content("open", 1), expectedVersion: 0),
+            CancellationToken.None);
+    }
+
+    private static void AssertBoundedCleanupLeftNoLiveWorker(AbortedProof proof)
+    {
+        Assert.NotNull(proof.Exception);
+        Assert.True(
+            proof.WorkerProcessId > 0,
+            $"Recovery worker never started within the {proof.RecoveryExecutionBound} bound: {proof.Exception}");
+
+        // A cleanup that outran its grace is reported as a TimeoutException wrapping the child failure, so the
+        // exception shape confirms the bound was honoured independently of this runner's clock.
+        Assert.False(
+            proof.Exception is TimeoutException { InnerException: not null },
+            $"Cleanup exceeded its grace period: {proof.Exception}");
+        Assert.InRange(proof.CleanupElapsed, TimeSpan.Zero, CleanupGrace + SchedulingTolerance);
+        AssertProcessExited(proof.WorkerProcessId);
+    }
+
+    /// <summary>A recovery proof that was aborted at the worker-started handshake.</summary>
+    /// <param name="CleanupElapsed">Wall clock spent between that abort and the harness returning.</param>
+    private readonly record struct AbortedProof(
+        Exception? Exception,
+        TimeSpan RecoveryExecutionBound,
+        int WorkerProcessId,
+        TimeSpan Elapsed,
+        TimeSpan CleanupElapsed);
 
     private static void AssertDistinct(params int[] values) => Assert.Equal(values.Length, values.Distinct().Count());
 

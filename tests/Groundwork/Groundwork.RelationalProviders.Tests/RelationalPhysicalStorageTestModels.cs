@@ -37,6 +37,9 @@ internal static class RelationalPhysicalStorageTestModels
         IProviderPhysicalNameNormalizer? normalizer = null,
         bool categoryUnique = false,
         bool categoryNullable = false,
+        IReadOnlySet<PortableQueryOperation>? categoryOperations = null,
+        MissingValueBehavior categoryMissingValues = MissingValueBehavior.IncludedAsNull,
+        MissingValueBehavior compoundMissingValues = MissingValueBehavior.IncludedAsNull,
         string documentKind = "configurationDocument",
         Func<PhysicalNameContext, string>? namePolicy = null,
         RelationalMutationScenarioOptions? mutationOptions = null,
@@ -92,7 +95,8 @@ internal static class RelationalPhysicalStorageTestModels
         }
         var indexes = new List<PhysicalIndexDefinition>
         {
-            new("by-category", categoryIndexColumns, categoryUnique)
+            new("by-category", categoryIndexColumns, categoryUnique,
+                missingValueBehavior: categoryMissingValues)
         };
         if (includePriority)
         {
@@ -110,7 +114,8 @@ internal static class RelationalPhysicalStorageTestModels
             if (scoped)
                 priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
             priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("priority", priorityIndexColumns.Count));
-            indexes.Add(new PhysicalIndexDefinition("by-priority", priorityIndexColumns));
+            indexes.Add(new PhysicalIndexDefinition("by-priority", priorityIndexColumns,
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull));
             if (includeCategoryPriorityQuery)
             {
                 var compoundColumns = new List<PhysicalIndexColumnDefinition>();
@@ -124,7 +129,8 @@ internal static class RelationalPhysicalStorageTestModels
                         new DocumentEnvelopeDefinition().IdComparisonKeyColumn,
                         compoundColumns.Count));
                 }
-                indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns));
+                indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns,
+                    missingValueBehavior: compoundMissingValues));
             }
         }
         if (mutationOptions.IncludeTypedTransitions)
@@ -134,7 +140,8 @@ internal static class RelationalPhysicalStorageTestModels
                 columns.Add(new ProjectedColumnDefinition(field.Name, field.Name, field.PhysicalType, Length: field.Length));
                 indexes.Add(new PhysicalIndexDefinition(
                     $"by-{field.Name}",
-                    [new PhysicalIndexColumnDefinition(field.Name, 0)]));
+                    [new PhysicalIndexColumnDefinition(field.Name, 0)],
+                    missingValueBehavior: MissingValueBehavior.IncludedAsNull));
             }
         }
 
@@ -144,11 +151,11 @@ internal static class RelationalPhysicalStorageTestModels
             [new IndexField("category")],
             IndexValueKind.String,
             categoryUnique,
-            MissingValueBehavior.Excluded);
+            categoryMissingValues);
         var boundedQuery = new BoundedQueryDeclaration(
             "list-by-category",
             logicalIndex.Identity,
-            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            categoryOperations ?? new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
             QuerySortSupport.Ascending,
             categoryPaging,
             BoundedQueryExecutionClass.ScaleBearing,
@@ -171,7 +178,7 @@ internal static class RelationalPhysicalStorageTestModels
                 [new IndexField("permissions")],
                 collectionLogicalValueKind,
                 false,
-                MissingValueBehavior.Excluded);
+                MissingValueBehavior.IncludedAsNull);
             logicalIndexes.Add(permissions);
             boundedQueries.Add(new BoundedQueryDeclaration(
                 "list-by-permissions",
@@ -193,7 +200,7 @@ internal static class RelationalPhysicalStorageTestModels
                 [new IndexField("category"), new IndexField("priority", ToIndexValueKind(priorityType))],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.Excluded);
+                compoundMissingValues);
             logicalIndexes.Add(compound);
             var priorityOperations = mutationOptions.IncludeRangeDelete
                 ? new HashSet<PortableQueryOperation>
@@ -270,7 +277,7 @@ internal static class RelationalPhysicalStorageTestModels
                 [new IndexField("priority")],
                 IndexValueKind.Number,
                 false,
-                MissingValueBehavior.Excluded);
+                MissingValueBehavior.IncludedAsNull);
             logicalIndexes.Add(priorityIndex);
             boundedQueries.Add(new BoundedQueryDeclaration(
                 "list-by-priority",
@@ -292,7 +299,7 @@ internal static class RelationalPhysicalStorageTestModels
                     [new IndexField(field.Name)],
                     field.ValueKind,
                     false,
-                    MissingValueBehavior.Excluded);
+                    MissingValueBehavior.IncludedAsNull);
                 logicalIndexes.Add(index);
                 boundedQueries.Add(new BoundedQueryDeclaration(
                     $"list-by-{field.Name}",

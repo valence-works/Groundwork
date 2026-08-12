@@ -922,6 +922,98 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         Assert.Equal(0L, Convert.ToInt64(await state.ExecuteScalarAsync()));
     }
 
+    /// <summary>
+    /// Widening an applied index to keep rows with no value is additive, but a partial index cannot be
+    /// widened by creating it: the object already exists carrying the predicate. It has to be rebuilt.
+    /// </summary>
+    [Fact]
+    public async Task WideningAnAppliedIndexRebuildsItWithoutItsPartialPredicate()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var narrow = NullExcludingCategoryTarget(MissingValueBehavior.Excluded);
+        var widened = NullExcludingCategoryTarget(MissingValueBehavior.IncludedAsNull);
+        await PhysicalSchemaApplication.ApplyAsync(narrow, new SqlitePhysicalSchemaExecutor(connection));
+        var index = narrow.Routes.Single().Indexes.Single(candidate => candidate.Identity == "by-category");
+        Assert.True(await IsPartialIndexAsync(connection, index.Name.Identifier));
+
+        var result = await PhysicalSchemaApplication.ApplyAsync(widened, new SqlitePhysicalSchemaExecutor(connection));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Outcome);
+        Assert.Single(result.Plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.False(await IsPartialIndexAsync(connection, index.Name.Identifier));
+    }
+
+    /// <summary>
+    /// A rebuild is idempotent for the same reason a create is: replaying it after a lost acknowledgement
+    /// finds the widened index already in place and leaves it alone.
+    /// </summary>
+    [Fact]
+    public async Task ReapplyingAWidenedIndexIsANoChangeApplication()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var widened = NullExcludingCategoryTarget(MissingValueBehavior.IncludedAsNull);
+        await PhysicalSchemaApplication.ApplyAsync(
+            NullExcludingCategoryTarget(MissingValueBehavior.Excluded),
+            new SqlitePhysicalSchemaExecutor(connection));
+        await PhysicalSchemaApplication.ApplyAsync(widened, new SqlitePhysicalSchemaExecutor(connection));
+
+        var restart = await PhysicalSchemaApplication.ApplyAsync(widened, new SqlitePhysicalSchemaExecutor(connection));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, restart.Outcome);
+        Assert.Empty(restart.Plan.Operations);
+    }
+
+    /// <summary>
+    /// A rebuild drops an index, so it may only ever drop the one Groundwork itself emitted for the
+    /// narrower definition. An index wearing the same name over a shape nobody recorded is drift.
+    /// </summary>
+    [Fact]
+    public async Task WideningRejectsAnIndexGroundworkDidNotEmitRatherThanDroppingIt()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var narrow = NullExcludingCategoryTarget(MissingValueBehavior.Excluded);
+        await PhysicalSchemaApplication.ApplyAsync(narrow, new SqlitePhysicalSchemaExecutor(connection));
+        var route = narrow.Routes.Single();
+        var index = route.Indexes.Single(candidate => candidate.Identity == "by-category");
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = $"""
+                DROP INDEX "{index.Name.Identifier}";
+                CREATE INDEX "{index.Name.Identifier}" ON "{route.PrimaryStorage.Name.Identifier}" ("{route.Envelope.Id.Identifier}");
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => PhysicalSchemaApplication.ApplyAsync(
+            NullExcludingCategoryTarget(MissingValueBehavior.IncludedAsNull),
+            new SqlitePhysicalSchemaExecutor(connection)));
+
+        await using var actual = connection.CreateCommand();
+        actual.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = @name;";
+        actual.Parameters.AddWithValue("@name", index.Name.Identifier);
+        Assert.Contains(route.Envelope.Id.Identifier, (string)(await actual.ExecuteScalarAsync())!, StringComparison.Ordinal);
+    }
+
+    private static PhysicalSchemaTarget NullExcludingCategoryTarget(MissingValueBehavior categoryMissingValues) =>
+        CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false,
+            categoryNullable: true,
+            categoryMissingValues: categoryMissingValues).Target;
+
+    private static async Task<bool> IsPartialIndexAsync(SqliteConnection connection, string name)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = @name;";
+        command.Parameters.AddWithValue("@name", name);
+        var sql = await command.ExecuteScalarAsync() as string
+            ?? throw new InvalidOperationException($"Index '{name}' is missing.");
+        return sql.Contains(" WHERE ", StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task IncompatiblePreexistingIndexIsRejectedInsteadOfRecorded()
     {
@@ -1967,6 +2059,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         IProviderPhysicalNameNormalizer? normalizer = null,
         string? priorityCollation = null,
         bool categoryNullable = false,
+        MissingValueBehavior categoryMissingValues = MissingValueBehavior.IncludedAsNull,
         StringIdentityCasePolicy stringCasePolicy = StringIdentityCasePolicy.Ordinal,
         QueryPagingSupport categoryPaging = QueryPagingSupport.Offset,
         QueryPagingSupport compoundPaging = QueryPagingSupport.None,
@@ -2008,7 +2101,10 @@ public sealed class SqlitePhysicalSchemaExecutorTests
         }
         var indexes = new List<PhysicalIndexDefinition>
         {
-            new("by-category", categoryIndexColumns, isUnique: categoryUnique)
+            // These routes serve NotContains, null equality and residual predicates, all of which must
+            // return rows that have no category, so the index has to keep them.
+            new("by-category", categoryIndexColumns, isUnique: categoryUnique,
+                missingValueBehavior: categoryMissingValues)
         };
         if (includePriority)
         {
@@ -2028,7 +2124,8 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             if (scoped)
                 priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
             priorityIndexColumns.Add(new PhysicalIndexColumnDefinition("priority", priorityIndexColumns.Count));
-            indexes.Add(new PhysicalIndexDefinition("by-priority", priorityIndexColumns));
+            indexes.Add(new PhysicalIndexDefinition("by-priority", priorityIndexColumns,
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull));
             var compoundColumns = new List<PhysicalIndexColumnDefinition>();
             if (scoped)
                 compoundColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
@@ -2052,7 +2149,8 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                         : new DocumentEnvelopeDefinition().IdComparisonKeyColumn,
                     compoundColumns.Count));
             }
-            indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns));
+            indexes.Add(new PhysicalIndexDefinition("by-category-priority", compoundColumns,
+                missingValueBehavior: MissingValueBehavior.IncludedAsNull));
         }
 
         var binding = new SharedStorageBinding("runtime-documents");
@@ -2061,7 +2159,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
             [new IndexField("category")],
             IndexValueKind.String,
             categoryUnique,
-            MissingValueBehavior.Excluded);
+            categoryMissingValues);
         var boundedQuery = new BoundedQueryDeclaration(
             "list-by-category",
             logicalIndex.Identity,
@@ -2086,7 +2184,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                 [new IndexField("permissions")],
                 collectionLogicalValueKind,
                 false,
-                MissingValueBehavior.Excluded);
+                MissingValueBehavior.IncludedAsNull);
             logicalIndexes.Add(permissions);
             boundedQueries.Add(new BoundedQueryDeclaration(
                 "list-by-permissions",
@@ -2108,7 +2206,7 @@ public sealed class SqlitePhysicalSchemaExecutorTests
                 [new IndexField("category"), new IndexField("priority", ToIndexValueKind(priorityType))],
                 IndexValueKind.String,
                 false,
-                MissingValueBehavior.Excluded);
+                MissingValueBehavior.IncludedAsNull);
             logicalIndexes.Add(compound);
             boundedQueries.Add(compoundPaging == QueryPagingSupport.Cursor
                 ? new BoundedQueryDeclaration(

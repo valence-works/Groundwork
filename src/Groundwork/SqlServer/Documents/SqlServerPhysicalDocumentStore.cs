@@ -8,6 +8,7 @@ using Groundwork.Documents.Scoping;
 using Groundwork.Provider.Relational;
 using Groundwork.Relational.Documents;
 using Groundwork.Relational.Physicalization;
+using Groundwork.Relational.PhysicalStorage;
 using Groundwork.SqlServer.PhysicalStorage;
 using Microsoft.Data.SqlClient;
 
@@ -218,6 +219,16 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
         indexIdentifier is null
             ? $"{QuoteIdentifier(tableIdentifier)} AS {alias}"
             : $"{QuoteIdentifier(tableIdentifier)} AS {alias} WITH (INDEX({QuoteIdentifier(indexIdentifier)}))";
+
+    /// <summary>
+    /// An index declared <see cref="MissingValueBehavior.Excluded"/> is emitted with a filter that drops
+    /// rows without a value, so pinning it is only sound for a predicate that provably rejects nulls on
+    /// every excluded column.
+    /// </summary>
+    public override IReadOnlyList<string> HintedIndexNullExcludedColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index) =>
+        PhysicalIndexNullExclusion.Columns(route, index);
 
     public override string MutationQuerySource(string tableIdentifier, string alias, string? indexIdentifier)
     {

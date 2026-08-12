@@ -1111,7 +1111,7 @@ public sealed class GroundworkSchemaCliTests : IDisposable
                 new PhysicalIndexDefinition(
                         "by-category",
                         [new PhysicalIndexColumnDefinition("storage_scope", 0), new PhysicalIndexColumnDefinition("category", 1)],
-                        missingValueBehavior: MissingValueBehavior.Excluded)
+                        missingValueBehavior: MissingValueBehavior.IncludedAsNull)
             ],
             evolution: evolution);
         var unit = StorageUnit.Create(
@@ -1145,7 +1145,7 @@ public sealed class GroundworkSchemaCliTests : IDisposable
             [new IndexField("category")],
             IndexValueKind.Keyword,
             false,
-            MissingValueBehavior.Excluded);
+            MissingValueBehavior.IncludedAsNull);
         var guardedStorage = new StorageUnitPhysicalStorage(
             storage.ProvisioningMode,
             storage.Policy,

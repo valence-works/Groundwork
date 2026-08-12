@@ -10,16 +10,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs on a branch, but never cancel a run for main.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
 
 jobs:
-  build:
-    name: Build and core tests
+  build-and-test:
+    name: Build and test (no containers)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -35,43 +36,50 @@ jobs:
       - name: Restore
         run: dotnet restore Groundwork.slnx
 
-      - name: Build
-        run: >-
-          dotnet build Groundwork.slnx
-          --configuration Release
-          --no-restore
+      - name: Build solution
+        run: dotnet build Groundwork.slnx --configuration Release --no-restore
 
-      - name: Test
-        run: |
-          set -euo pipefail
-          projects=(
-            tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj
-            tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
-            tests/Groundwork/Groundwork.DiagnosticRecords.Tests/Groundwork.DiagnosticRecords.Tests.csproj
-            tests/Groundwork/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj
-            tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj
-            samples/Groundwork.Modules.Inbox.Tests/Groundwork.Modules.Inbox.Tests.csproj
-          )
-          for project in "${projects[@]}"; do
-            dotnet test "$project" --configuration Release --no-build
-          done
+      # Every suite that does not need a container. These cover Core, the document
+      # contracts, diagnostic records, materialization planning, the SQLite provider,
+      # the schema tool, and the external-module sample.
+      - name: Test Groundwork.Tests
+        run: dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj --configuration Release --no-build
 
-  providers:
-    name: ${{ matrix.name }}
+      - name: Test Groundwork.DiagnosticRecords.Tests
+        run: dotnet test tests/Groundwork/Groundwork.DiagnosticRecords.Tests/Groundwork.DiagnosticRecords.Tests.csproj --configuration Release --no-build
+
+      - name: Test Groundwork.Materialization.Tests
+        run: dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj --configuration Release --no-build
+
+      - name: Test Groundwork.Sqlite.Tests
+        run: dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj --configuration Release --no-build
+
+      - name: Test Groundwork.SchemaTool.Tests
+        run: dotnet test tests/Groundwork/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj --configuration Release --no-build
+
+      - name: Test Groundwork.Modules.Inbox.Tests
+        run: dotnet test samples/Groundwork.Modules.Inbox.Tests/Groundwork.Modules.Inbox.Tests.csproj --configuration Release --no-build
+
+  provider-tests:
+    name: Provider tests (${{ matrix.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Don't spin up database containers until the solution is known to compile.
+    needs: build-and-test
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: MongoDB provider
+          - name: MongoDB
             project: tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj
-          - name: Relational providers
+          - name: PostgreSQL and SQL Server
             project: tests/Groundwork/Groundwork.RelationalProviders.Tests/Groundwork.RelationalProviders.Tests.csproj
-          - name: Schema tool provider parity
+          - name: Schema tool parity
             project: tests/Groundwork/Groundwork.SchemaTool.ProviderTests/Groundwork.SchemaTool.ProviderTests.csproj
-          - name: Support tickets sample
+          - name: Benchmark harness contracts
+            project: tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj
+          - name: Support-ticket sample
             project: samples/Groundwork.SupportTickets.Tests/Groundwork.SupportTickets.Tests.csproj
 
     steps:
@@ -83,21 +91,16 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      # These suites use Testcontainers, which needs a working Docker daemon. Fail
+      # loudly here rather than letting every test report DockerUnavailableException.
+      - name: Verify Docker is available
+        run: docker info
+
       - name: Restore
-        run: dotnet restore Groundwork.slnx
+        run: dotnet restore ${{ matrix.project }}
 
       - name: Build
-        run: >-
-          dotnet build Groundwork.slnx
-          --configuration Release
-          --no-restore
+        run: dotnet build ${{ matrix.project }} --configuration Release --no-restore
 
-      # These suites provision their own containers through Testcontainers.
-      # ubuntu-latest runners ship a running Docker daemon, so no service block
-      # is needed; a suite that cannot reach one fails with
-      # DockerUnavailableException rather than skipping.
       - name: Test
-        run: >-
-          dotnet test ${{ matrix.project }}
-          --configuration Release
-          --no-build
+        run: dotnet test ${{ matrix.project }} --configuration Release --no-build

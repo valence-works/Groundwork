@@ -1,4 +1,5 @@
 using Groundwork.Core.Capabilities;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Queries;
 using Groundwork.Core.SchemaEvolution;
@@ -704,7 +705,11 @@ internal static class RelationalPhysicalServerAssertions
             includePriority: false,
             normalizer: normalizer,
             categoryUnique: true,
-            categoryNullable: true);
+            categoryNullable: true,
+            // Null-distinct uniqueness is exactly what Excluded means: the constraint applies only to
+            // rows that have a value, so any number of rows may have none. It used to fall out of a
+            // SQL Server implementation detail; now it is declared, and portable because of that.
+            categoryMissingValues: MissingValueBehavior.Excluded);
         await PhysicalSchemaApplication.ApplyAsync(model.Target, createExecutor());
         var store = createStore(model.Manifest, model.Target.Routes);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(
@@ -715,6 +720,50 @@ internal static class RelationalPhysicalServerAssertions
             new SaveDocumentRequest("configurationDocument", "present-a", "1", "{\"category\":\"same\"}", 0))).Status);
         Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, (await store.SaveAsync(
             new SaveDocumentRequest("configurationDocument", "present-b", "1", "{\"category\":\"same\"}", 0))).Status);
+    }
+
+    /// <summary>
+    /// Widening an applied index to keep rows with no value is additive, but row exclusion is a filtered
+    /// index, so creating it cannot reach the change: the object already exists carrying the predicate.
+    /// The plan has to rebuild it, and the filter has to be gone from the catalog afterwards.
+    /// </summary>
+    public static async Task WideningANullExcludingIndexRebuildsItWithoutItsFilterAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<IPhysicalSchemaExecutor> createExecutor,
+        Func<string, string, Task<string?>> readIndexFilter)
+    {
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            provider,
+            includePriority: false,
+            normalizer: normalizer,
+            categoryNullable: true,
+            categoryMissingValues: MissingValueBehavior.Excluded,
+            instance: instance);
+        await PhysicalSchemaApplication.ApplyAsync(model.Target, createExecutor());
+        var route = model.Target.Routes.Single();
+        var index = route.Indexes.Single(candidate => candidate.Identity == "by-category");
+        var table = route.PrimaryStorage.Name.Identifier;
+        Assert.NotNull(await readIndexFilter(table, index.Name.Identifier));
+
+        var widened = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            provider,
+            includePriority: false,
+            normalizer: normalizer,
+            categoryNullable: true,
+            categoryMissingValues: MissingValueBehavior.IncludedAsNull,
+            instance: instance);
+        var result = await PhysicalSchemaApplication.ApplyAsync(widened.Target, createExecutor());
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Outcome);
+        Assert.Single(result.Plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.Null(await readIndexFilter(table, index.Name.Identifier));
+        // The widened state is the durable one, so a replay reconciles rather than rebuilding again.
+        var restart = await PhysicalSchemaApplication.ApplyAsync(widened.Target, createExecutor());
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, restart.Outcome);
     }
 
     private static async Task<PhysicalSchemaAppliedState> PreparePendingStateAsync(

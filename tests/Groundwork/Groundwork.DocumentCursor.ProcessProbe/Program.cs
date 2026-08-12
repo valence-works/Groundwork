@@ -71,7 +71,7 @@ static (StorageManifest Manifest, PhysicalSchemaTarget Target) CreateModel()
         [new IndexField("category")],
         IndexValueKind.String,
         false,
-        MissingValueBehavior.Excluded);
+        MissingValueBehavior.IncludedAsNull);
     var query = new BoundedQueryDeclaration(
         "list-by-category",
         logical.Identity,

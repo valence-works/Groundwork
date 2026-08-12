@@ -271,6 +271,17 @@ internal sealed class SqlitePhysicalDocumentDialect : RelationalPhysicalDocument
             ? $"{QuoteIdentifier(tableIdentifier)} {alias}"
             : $"{QuoteIdentifier(tableIdentifier)} AS {alias} INDEXED BY {QuoteIdentifier(indexIdentifier)}";
 
+    /// <summary>
+    /// SQLite pins an index with <c>INDEXED BY</c>, and an index declared
+    /// <see cref="MissingValueBehavior.Excluded"/> is emitted as a partial index. SQLite only uses a
+    /// partial index for a query whose own predicate implies the index predicate, so the same soundness
+    /// rule as SQL Server applies here.
+    /// </summary>
+    public override IReadOnlyList<string> HintedIndexNullExcludedColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index) =>
+        PhysicalIndexNullExclusion.Columns(route, index);
+
     public override string CreateMutationSelectionTable(
         string tableExpression,
         string documentKindColumn,

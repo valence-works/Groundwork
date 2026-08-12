@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
+using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Core.Text;
@@ -327,7 +328,11 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
                 break;
             case CreatePhysicalIndexOperation create:
                 RelationalPhysicalStorageColumns.Validate(create.Route);
-                await CreateIndexAsync(create.Index, create.Storage.Name.Identifier, transaction, cancellationToken, validateObjects);
+                await CreateIndexAsync(create.Route, create.Index, create.Storage.Name.Identifier, transaction, cancellationToken, validateObjects);
+                break;
+            case RebuildPhysicalIndexOperation rebuild:
+                RelationalPhysicalStorageColumns.Validate(rebuild.Route);
+                await RebuildIndexAsync(rebuild.Route, rebuild.Index, rebuild.Storage.Name.Identifier, transaction, cancellationToken, validateObjects);
                 break;
             case BackfillCanonicalJsonOperation backfill:
                 if (backfill.Route is not null)
@@ -467,6 +472,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
             storage.Storage.Name.Identifier,
             storage.MembershipKey.Name.Identifier,
             expectedUnique: false,
+            expectedPartial: false,
             transaction,
             ct);
         if (!actualColumns.Select(column => column.Name).SequenceEqual(expectedColumns, StringComparer.Ordinal) ||
@@ -604,18 +610,79 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
     }
 
     private async Task CreateIndexAsync(
+        ExecutableStorageRoute route,
         ExecutablePhysicalIndexRoute index,
         string table,
         DbTransaction transaction,
         CancellationToken ct,
         bool validateObjects = true)
     {
+        await ExecuteAsync(CreateIndexSql(route, index, table, ifNotExists: true) + ";", transaction, ct);
+        if (validateObjects)
+            await ValidateIndexAsync(route, index, table, transaction, ct);
+    }
+
+    /// <summary>
+    /// Replaces the applied null-excluding index with the widened definition that supersedes it.
+    /// </summary>
+    /// <remarks>
+    /// Row exclusion is a partial index, so widening it means dropping the object and creating it again;
+    /// creation alone cannot reach it. The live index has to be exactly the statement Groundwork emitted
+    /// for the narrower definition before it is dropped — one carrying this name but a shape Groundwork
+    /// never wrote is drift, and dropping it would destroy something nobody asked to replace. Anything
+    /// else is left alone for creation and validation to reject in their own words, which also makes a
+    /// retry after a lost acknowledgement a no-op: the index is already the widened statement by then.
+    /// SQLite DDL is transactional, so a failure after the drop restores the original index.
+    /// </remarks>
+    private async Task RebuildIndexAsync(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        string table,
+        DbTransaction transaction,
+        CancellationToken ct,
+        bool validateObjects = true)
+    {
+        var superseded = CreateIndexSql(route, index, table, ifNotExists: false, MissingValueBehavior.Excluded);
+        if (await TryReadCreateSqlAsync("index", index.Name.Identifier, transaction, ct) == superseded)
+            await ExecuteAsync($"DROP INDEX {Q(index.Name.Identifier)};", transaction, ct);
+        await CreateIndexAsync(route, index, table, transaction, ct, validateObjects);
+    }
+
+    /// <summary>
+    /// The exact statement that creates <paramref name="index"/>. Passing a
+    /// <paramref name="missingValueBehavior"/> renders the statement it had under a definition it no
+    /// longer carries; SQLite stores this text verbatim less <c>IF NOT EXISTS</c>, so the unguarded form
+    /// compares directly against <c>sqlite_master</c>.
+    /// </summary>
+    private string CreateIndexSql(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        string table,
+        bool ifNotExists,
+        MissingValueBehavior? missingValueBehavior = null)
+    {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;
+        var guard = ifNotExists ? "IF NOT EXISTS " : string.Empty;
         var columns = string.Join(", ", index.Columns.Select(column =>
             $"{Q(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"));
-        await ExecuteAsync($"CREATE {unique}INDEX IF NOT EXISTS {Q(index.Name.Identifier)} ON {Q(table)} ({columns});", transaction, ct);
-        if (validateObjects)
-            await ValidateIndexAsync(index, table, transaction, ct);
+        var filter = IndexFilter(route, index, missingValueBehavior);
+        return $"CREATE {unique}INDEX {guard}{Q(index.Name.Identifier)} ON {Q(table)} ({columns})" +
+               (filter is null ? string.Empty : $" WHERE {filter}");
+    }
+
+    /// <summary>
+    /// The partial-index predicate that realises <see cref="MissingValueBehavior.Excluded"/>, or
+    /// <see langword="null"/> when the index keeps every row.
+    /// </summary>
+    private string? IndexFilter(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        MissingValueBehavior? missingValueBehavior = null)
+    {
+        var excluded = PhysicalIndexNullExclusion.Columns(route, index, missingValueBehavior);
+        return excluded.Length == 0
+            ? null
+            : $"({string.Join(" AND ", excluded.Select(column => $"{Q(column)} IS NOT NULL"))})";
     }
 
     private async Task BackfillAsync(BackfillCanonicalJsonOperation operation, DbTransaction transaction, CancellationToken ct)
@@ -887,7 +954,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
                 var table = index.Target == ExecutableStorageObjectRole.PrimaryStorage
                     ? route.PrimaryStorage.Name.Identifier
                     : route.LinkedIndexStorage!.Name.Identifier;
-                await ValidateIndexAsync(index, table, transaction, ct);
+                await ValidateIndexAsync(route, index, table, transaction, ct);
             }
         }
     }
@@ -993,6 +1060,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
     }
 
     private async Task ValidateIndexAsync(
+        ExecutableStorageRoute route,
         ExecutablePhysicalIndexRoute expected,
         string table,
         DbTransaction transaction,
@@ -1002,6 +1070,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
             table,
             expected.Name.Identifier,
             expected.IsUnique,
+            IndexFilter(route, expected) is not null,
             transaction,
             ct);
         if (actualColumns.Count != expected.Columns.Count)
@@ -1025,6 +1094,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         string table,
         string indexName,
         bool expectedUnique,
+        bool expectedPartial,
         DbTransaction transaction,
         CancellationToken ct)
     {
@@ -1046,7 +1116,9 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         }
         if (isUnique is null)
             throw new InvalidOperationException($"Physical index '{indexName}' is missing from '{table}'.");
-        if (isUnique != expectedUnique || isPartial)
+        // A partial index that lost its predicate silently starts serving rows it was declared to omit,
+        // and one that gained a predicate silently stops serving rows it should. Both are drift.
+        if (isUnique != expectedUnique || isPartial != expectedPartial)
         {
             throw new InvalidOperationException(
                 $"Physical index '{indexName}' has incompatible uniqueness or partial-index semantics.");
@@ -1097,6 +1169,14 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         string type,
         string name,
         DbTransaction transaction,
+        CancellationToken ct) =>
+        await TryReadCreateSqlAsync(type, name, transaction, ct)
+        ?? throw new InvalidOperationException($"Physical {type} '{name}' is missing its creation SQL.");
+
+    private async Task<string?> TryReadCreateSqlAsync(
+        string type,
+        string name,
+        DbTransaction transaction,
         CancellationToken ct)
     {
         await using var command = connection.CreateCommand();
@@ -1104,8 +1184,7 @@ public sealed class SqlitePhysicalSchemaExecutor : IPhysicalSchemaExecutor, IPhy
         command.CommandText = "SELECT sql FROM sqlite_master WHERE type = @type AND name = @name;";
         command.Parameters.AddWithValue("@type", type);
         command.Parameters.AddWithValue("@name", name);
-        return await command.ExecuteScalarAsync(ct) as string
-            ?? throw new InvalidOperationException($"Physical {type} '{name}' is missing its creation SQL.");
+        return await command.ExecuteScalarAsync(ct) as string;
     }
 
     private async Task<IReadOnlyList<string>> ReadIndexCreationSqlAsync(

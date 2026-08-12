@@ -477,6 +477,33 @@ public sealed class MongoDbDocumentStoreTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task UnitOfWorkCreateOnlySaveLosingToAnUncommittedRivalIsAConcurrencyConflict()
+    {
+        await using var harness = await MongoDbDocumentStoreHarness.Create(container.GetConnectionString());
+        await using var winner = await harness.Store.BeginAsync(
+            Groundwork.Documents.UnitOfWork.DocumentCommitScope.Of("configurationDocument"));
+        await using var loser = await harness.Store.BeginAsync(
+            Groundwork.Documents.UnitOfWork.DocumentCommitScope.Of("configurationDocument"));
+        Assert.Null(await loser.LoadAsync("configurationDocument", "contested"));
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await winner.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "contested", "1", """{"key":"winner"}""", ExpectedVersion: 0))).Status);
+        // The winner stays open, so its row is invisible to the classifier's read outside the session. A create-only
+        // claim can still never be NotFound: an absent document is exactly what it expects to find.
+        Assert.Null(await harness.Store.LoadAsync("configurationDocument", "contested"));
+
+        var conflict = await loser.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "contested", "1", """{"key":"loser"}""", ExpectedVersion: 0));
+
+        Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, conflict.Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            loser.LoadAsync("configurationDocument", "contested"));
+        await winner.CommitAsync();
+        using var retained = JsonDocument.Parse(
+            (await harness.Store.LoadAsync("configurationDocument", "contested"))!.ContentJson);
+        Assert.Equal("winner", retained.RootElement.GetProperty("key").GetString());
+    }
+
+    [Fact]
     public async Task UnitOfWorkDeleteWriteConflictClassifiesOutsideSessionWithoutReplay()
     {
         await using var harness = await MongoDbDocumentStoreHarness.Create(container.GetConnectionString());
