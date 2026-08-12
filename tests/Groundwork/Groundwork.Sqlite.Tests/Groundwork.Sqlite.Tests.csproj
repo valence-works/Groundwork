@@ -20,10 +20,11 @@
     <Compile Include="..\TestInfrastructure\DocumentIdentityAcceptanceConformance.cs" Link="TestInfrastructure\DocumentIdentityAcceptanceConformance.cs" />
     <Compile Include="..\TestInfrastructure\NullExcludedIndexConformance.cs" Link="TestInfrastructure\NullExcludedIndexConformance.cs" />
     <Compile Include="..\TestInfrastructure\RepositoryRootLocator.cs" Link="TestInfrastructure\RepositoryRootLocator.cs" />
+    <Compile Include="..\TestInfrastructure\TestManifests.cs" Link="TestInfrastructure\TestManifests.cs" />
     <Compile Include="..\TestInfrastructure\SortOnlyResidualPredicateConformance.cs" Link="TestInfrastructure\SortOnlyResidualPredicateConformance.cs" />
     <Compile Include="..\TestInfrastructure\NotEqualNullSemanticsConformance.cs" Link="TestInfrastructure\NotEqualNullSemanticsConformance.cs" />
     <Compile Include="..\TestInfrastructure\StorageScopeDocumentStoreConformance.cs" Link="TestInfrastructure\StorageScopeDocumentStoreConformance.cs" />
-    <Compile Include="..\TestInfrastructure\RelationalPhysicalStorageConformance.cs" Link="TestInfrastructure\RelationalPhysicalStorageConformance.cs" />
+    <Compile Include="..\TestInfrastructure\PhysicalStorageConformance.cs" Link="TestInfrastructure\PhysicalStorageConformance.cs" />
   </ItemGroup>
 
   <ItemGroup>

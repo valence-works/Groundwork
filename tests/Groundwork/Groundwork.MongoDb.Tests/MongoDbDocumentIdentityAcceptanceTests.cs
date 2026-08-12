@@ -7,7 +7,6 @@ using Groundwork.MongoDb.Documents;
 using Groundwork.TestInfrastructure;
 using MongoDB.Bson;
 using MongoDB.Driver;
-using Testcontainers.MongoDb;
 using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
@@ -217,18 +216,8 @@ public sealed class MongoDbDocumentIdentityAcceptanceEvidenceTests
     };
 }
 
-public sealed class MongoDbDocumentIdentityAcceptanceContainer : IAsyncLifetime
-{
-    public MongoDbContainer Container { get; } = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-identity-acceptance-rs")
-        .Build();
-
-    public Task InitializeAsync() => Container.StartAsync();
-    public Task DisposeAsync() => Container.DisposeAsync().AsTask();
-}
-
-public sealed class MongoDbDocumentIdentityAcceptanceTests(MongoDbDocumentIdentityAcceptanceContainer fixture)
-    : DocumentIdentityAcceptanceConformance, IClassFixture<MongoDbDocumentIdentityAcceptanceContainer>
+public sealed class MongoDbDocumentIdentityAcceptanceTests(MongoDbReplicaSetTestContainer fixture)
+    : DocumentIdentityAcceptanceConformance, IClassFixture<MongoDbReplicaSetTestContainer>
 {
     protected override async Task<DocumentIdentityAcceptanceFixture> CreateIdentityFixtureAsync(
         PhysicalStorageForm form = PhysicalStorageForm.PhysicalEntityTable,

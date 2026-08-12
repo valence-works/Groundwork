@@ -16,21 +16,22 @@ namespace Groundwork.MongoDb.Tests;
 
 [CollectionDefinition(Name, DisableParallelization = true)]
 public sealed class MongoDbPhysicalTransactionRecoveryCollection
+    : ICollectionFixture<MongoDbFailpointReplicaSetTestContainer>
 {
     public const string Name = "MongoDB physical transaction recovery";
 }
 
 [Collection(MongoDbPhysicalTransactionRecoveryCollection.Name)]
-public sealed class MongoDbPhysicalTransactionRecoveryTests : IAsyncLifetime
+public sealed class MongoDbPhysicalTransactionRecoveryTests(MongoDbFailpointReplicaSetTestContainer fixture) : IAsyncLifetime
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-rs")
-        .WithCommand("--setParameter", "enableTestCommands=1")
-        .Build();
+    private readonly MongoDbContainer container = fixture.Container;
 
-    public Task InitializeAsync() => container.StartAsync();
+    public Task InitializeAsync() => Task.CompletedTask;
 
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    // The container is shared across this collection; a "times: N" failpoint armed by a test that
+    // fails before consuming it would otherwise stay armed and fire in the next test.
+    public Task DisposeAsync() =>
+        DisableCommandFailureAsync(new MongoClient(container.GetConnectionString()).GetDatabase("admin"));
 
     [Fact]
     public async Task Transient_transaction_error_retries_the_body_from_a_fresh_session_once()

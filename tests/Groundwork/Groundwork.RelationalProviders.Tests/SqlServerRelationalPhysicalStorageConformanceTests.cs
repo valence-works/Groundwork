@@ -33,202 +33,9 @@ public sealed class SqlServerPhysicalStorageContainer : IAsyncLifetime
 
 public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     SqlServerPhysicalStorageContainer fixture)
-    : RelationalServerPhysicalIdentityConformance, IClassFixture<SqlServerPhysicalStorageContainer>
+    : RelationalServerPhysicalIdentityConformance<SqlServerPhysicalDocumentStore>, IClassFixture<SqlServerPhysicalStorageContainer>
 {
     private readonly MsSqlContainer container = fixture.Container;
-
-    [Fact]
-    public async Task Collection_membership_and_contains_all_execute_from_typed_element_storage()
-    {
-        var model = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: Guid.NewGuid().ToString("N")[..8],
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            includeCollection: true,
-            includeCollectionMembershipQuery: true);
-        var connectionString = container.GetConnectionString();
-        await PhysicalSchemaApplication.ApplyAsync(
-            model.Target,
-            new SqlServerPhysicalSchemaExecutor(connectionString));
-        var store = new SqlServerPhysicalDocumentStore(
-            connectionString,
-            model.Manifest,
-            model.Target.Routes,
-            DocumentStoreAccess.Global);
-        await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "one", "1", """{"category":"x","permissions":["a","b","b"]}"""));
-        await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "two", "1", """{"category":"x","permissions":["a"]}"""));
-        await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "three", "1", """{"category":"x","permissions":["b","c"]}"""));
-        var queries = SqlServerPhysicalQueryRuntime.Create(
-            store,
-            model.Manifest,
-            model.Target.Routes.Single(),
-            model.Target.Provider);
-
-        var contains = await queries.QueryAsync(new DocumentQuery(
-            "configurationDocument",
-            "list-by-permissions",
-            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
-        var containsAll = await queries.QueryAsync(new DocumentQuery(
-            "configurationDocument",
-            "list-by-permissions",
-            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
-                "permissions",
-                ["b", "a", "b"]))]));
-
-        Assert.Equal(2, contains.TotalCount);
-        Assert.Equal(["one", "three"], contains.Documents.Select(document => document.Id).Order());
-        Assert.Equal("one", Assert.Single(containsAll.Documents).Id);
-
-        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "one", "1", """{"category":"x","permissions":["c"]}""", 1))).Status);
-        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
-            "configurationDocument", "three", 1))).Status);
-
-        Assert.Equal("one", Assert.Single((await queries.QueryAsync(new DocumentQuery(
-            "configurationDocument",
-            "list-by-permissions",
-            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "c"))]))).Documents).Id);
-        Assert.Empty((await queries.QueryAsync(new DocumentQuery(
-            "configurationDocument",
-            "list-by-permissions",
-            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]))).Documents);
-    }
-
-    [Fact]
-    public async Task Collection_contains_all_deduplicates_after_typed_conversion()
-    {
-        var model = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: Guid.NewGuid().ToString("N")[..8],
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            includeCollection: true,
-            includeCollectionMembershipQuery: true,
-            collectionType: PortablePhysicalType.Int32,
-            collectionLogicalValueKind: IndexValueKind.Number,
-            collectionLength: null,
-            collectionCollation: null);
-        var connectionString = container.GetConnectionString();
-        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlServerPhysicalSchemaExecutor(connectionString));
-        var store = new SqlServerPhysicalDocumentStore(
-            connectionString, model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
-        await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "one", "1", """{"category":"x","permissions":[1,2]}"""));
-        var runtime = SqlServerPhysicalQueryRuntime.Create(
-            store, model.Manifest, model.Target.Routes.Single(), model.Target.Provider);
-
-        var query = new DocumentQuery(
-            "configurationDocument",
-            "list-by-permissions",
-            [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContainsAll(
-                "permissions",
-                ["1", "01"]))]);
-        var rendered = RelationalPhysicalQueryRuntime.BuildQueryCommand(
-            store,
-            model.Manifest,
-            model.Target.Routes.Single(),
-            model.Target.Provider,
-            "sqlserver",
-            query);
-        var membershipParameter = Assert.Single(rendered.Parameters.Where(parameter =>
-            parameter.Name.StartsWith("v", StringComparison.Ordinal)));
-        Assert.Equal("v0", membershipParameter.Name);
-        Assert.Equal(1, Assert.IsType<int>(membershipParameter.Value));
-        Assert.Equal(1, rendered.CommandText.Split("@v0", StringSplitOptions.None).Length - 1);
-        Assert.Equal(1, rendered.CommandText.Split("EXISTS (SELECT 1 FROM", StringSplitOptions.None).Length - 1);
-
-        var result = await runtime.QueryAsync(query);
-
-        Assert.Equal("one", Assert.Single(result.Documents).Id);
-    }
-
-    [Fact]
-    public async Task Additive_collection_storage_backfills_preexisting_documents()
-    {
-        var instance = Guid.NewGuid().ToString("N")[..8];
-        var initial = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: instance,
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
-        var additive = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: instance,
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            includeCollection: true,
-            includeCollectionMembershipQuery: true);
-        var connectionString = container.GetConnectionString();
-        await PhysicalSchemaApplication.ApplyAsync(initial.Target, new SqlServerPhysicalSchemaExecutor(connectionString));
-        await new SqlServerPhysicalDocumentStore(
-                connectionString, initial.Manifest, initial.Target.Routes, DocumentStoreAccess.Global)
-            .SaveAsync(new SaveDocumentRequest(
-                "configurationDocument", "preexisting", "1", """{"category":"x","permissions":["a","b"]}"""));
-
-        var applied = await PhysicalSchemaApplication.ApplyAsync(
-            additive.Target, new SqlServerPhysicalSchemaExecutor(connectionString));
-        var evolved = new SqlServerPhysicalDocumentStore(
-            connectionString, additive.Manifest, additive.Target.Routes, DocumentStoreAccess.Global);
-        var result = await SqlServerPhysicalQueryRuntime.Create(
-                evolved, additive.Manifest, additive.Target.Routes.Single(), additive.Target.Provider)
-            .QueryAsync(new DocumentQuery(
-                "configurationDocument",
-                "list-by-permissions",
-                [DocumentQueryClause.Of(DocumentQueryComparison.CollectionContains("permissions", "b"))]));
-
-        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
-        Assert.Equal("preexisting", Assert.Single(result.Documents).Id);
-    }
-
-    [Fact]
-    public async Task Collection_schema_transition_fences_old_route_writers()
-    {
-        var instance = Guid.NewGuid().ToString("N")[..8];
-        var initial = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: instance,
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            mutationOptions: new(IncludeCategoryTransition: true));
-        var additive = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: instance,
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            mutationOptions: new(IncludeCategoryTransition: true),
-            includeCollection: true,
-            includeCollectionMembershipQuery: true);
-        var connectionString = container.GetConnectionString();
-
-        await RelationalCollectionSchemaTransitionAssertions.SuccessfulTransitionFencesOldWritersAsync(
-            initial,
-            additive,
-            (manifest, routes) => new SqlServerPhysicalDocumentStore(
-                connectionString,
-                manifest,
-                routes,
-                DocumentStoreAccess.Global),
-            (store, manifest, route) => SqlServerPhysicalMutationRuntime.Create(
-                Assert.IsType<SqlServerPhysicalDocumentStore>(store),
-                manifest,
-                route,
-                SqlServerGroundworkCapabilities.Provider),
-            hook => new SqlServerPhysicalSchemaExecutor(
-                connectionString,
-                new SqlServerPhysicalIdentityHash(),
-                hook,
-                null));
-    }
 
     [Fact]
     public async Task Failed_collection_schema_transition_preserves_old_writer_admission()
@@ -262,38 +69,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
                 new SqlServerPhysicalIdentityHash(),
                 hook,
                 null));
-    }
-
-    [Fact]
-    public async Task Collection_save_failure_rolls_back_primary_and_element_rows()
-    {
-        var model = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: Guid.NewGuid().ToString("N")[..8],
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            includeCollection: true);
-        var connectionString = container.GetConnectionString();
-        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlServerPhysicalSchemaExecutor(connectionString));
-        var store = new SqlServerPhysicalDocumentStore(
-            connectionString, model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
-        store.WriteInterceptor = (point, operation, _, _, _) =>
-            point == RelationalPhysicalWriteExecutionPoint.AfterPrimaryMutation &&
-            operation == RelationalPhysicalWriteOperation.Save
-                ? ValueTask.FromException(new InjectedCollectionWriteException())
-                : ValueTask.CompletedTask;
-
-        await Assert.ThrowsAsync<InjectedCollectionWriteException>(() => store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument", "failed", "1", """{"category":"x","permissions":["a"]}""")));
-        store.WriteInterceptor = null;
-
-        Assert.Null(await store.LoadAsync("configurationDocument", "failed"));
-        await using var connection = new SqlConnection(connectionString);
-        await connection.OpenAsync();
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {QuoteIdentifier(Assert.Single(model.Target.Routes.Single().CollectionElementStorages).Storage.Name.Identifier)};";
-        Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));
     }
 
     [Fact]
@@ -456,36 +231,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         }
     }
 
-    [Fact]
-    public async Task Collection_membership_index_drift_is_rejected_from_live_schema()
-    {
-        var model = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: false,
-            instance: $"collection_{Guid.NewGuid():N}"[..19],
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            includeCollection: true);
-        var storage = Assert.Single(model.Target.Routes.Single().CollectionElementStorages);
-        var connectionString = container.GetConnectionString();
-        await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlServerPhysicalSchemaExecutor(connectionString));
-        await using (var connection = new SqlConnection(connectionString))
-        {
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText =
-                $"DROP INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)}; " +
-                $"CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)} (" +
-                $"{string.Join(", ", storage.MembershipKey.OwnerColumns.Select(column => QuoteIdentifier(column.Column.Identifier))
-                    .Append(QuoteIdentifier(storage.MembershipKey.Value.Column.Identifier)))});";
-            await command.ExecuteNonQueryAsync();
-        }
-
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlServerPhysicalSchemaExecutor(connectionString)));
-        Assert.Contains(storage.MembershipKey.Name.Identifier, error.Message, StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData(128, false)]
     [InlineData(129, true)]
@@ -544,47 +289,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     }
 
     [Fact]
-    public async Task Physical_factory_auto_applies_safe_schema_when_enabled()
-    {
-        var suffix = Guid.NewGuid().ToString("N")[..8];
-        var database = $"groundwork_startup_{suffix}";
-        await ExecuteAdminAsync($"CREATE DATABASE {QuoteIdentifier(database)};");
-        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
-        {
-            InitialCatalog = database
-        }.ConnectionString;
-        try
-        {
-            var model = RelationalPhysicalStorageTestModels.Create(
-                PhysicalStorageForm.PhysicalEntityTable,
-                SqlServerGroundworkCapabilities.Provider,
-                includePriority: false,
-                instance: suffix,
-                normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
-
-            var store = await SqlServerDocumentStoreFactory.OpenPhysicalAsync(
-                connectionString,
-                model.Manifest,
-                model.Target.Provider,
-                DocumentStoreAccess.Global,
-                namePolicy: new DelegatePhysicalNamePolicy(
-                    context => $"gw_{suffix}_{context.FeatureDefaultLogicalName}"),
-                options: new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
-            var inspection = await new SqlServerPhysicalSchemaExecutor(connectionString)
-                .InspectHistoryAsync(model.Target, CancellationToken.None);
-
-            Assert.NotNull(store);
-            Assert.Equal(model.Target.Fingerprint, inspection.History.AppliedState?.TargetFingerprint);
-        }
-        finally
-        {
-            SqlConnection.ClearAllPools();
-            await ExecuteAdminAsync(
-                $"ALTER DATABASE {QuoteIdentifier(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {QuoteIdentifier(database)};");
-        }
-    }
-
-    [Fact]
     public void PrimaryInsertUsesGuardedKeyRangeLockWithoutMerge()
     {
         var sql = new SqlServerPhysicalDocumentDialect().InsertPrimaryIfAbsent(
@@ -602,10 +306,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         Assert.Contains("UPDLOCK, HOLDLOCK", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MERGE", sql, StringComparison.OrdinalIgnoreCase);
     }
-
-    [Fact]
-    public Task Bounded_transition_updates_the_exact_indexed_identity_set() =>
-        RelationalBoundedMutationServerAssertions.TransitionUpdatesExactIndexedIdentitySetAsync(MutationHarness());
 
     [Fact]
     public Task Bounded_assignment_updates_every_route_selected_document_and_replays_the_exact_count() =>
@@ -700,10 +400,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     }
 
     [Fact]
-    public Task Ordinary_save_and_delete_serialize_with_the_selected_set() =>
-        RelationalBoundedMutationServerAssertions.OrdinaryCrudSerializesWithSelectedSetAsync(MutationHarness());
-
-    [Fact]
     public Task Linked_ordinary_crud_interleavings_serialize_in_pooled_and_direct_sessions() =>
         RelationalBoundedMutationServerAssertions.LinkedOrdinaryCrudInterleavingsSerializeAsync(MutationHarness());
 
@@ -734,19 +430,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     [Fact]
     public Task Bounded_mutation_acknowledgement_loss_restarts_and_replays_across_provider_upgrade() =>
         RelationalBoundedMutationServerAssertions.AcknowledgementLossRestartAndProviderUpgradeReplayAsync(MutationHarness());
-
-    [Fact]
-    public Task Cursor_pages_resume_across_a_reopened_store() =>
-        RelationalPhysicalServerAssertions.CursorPagesResumeAcrossReopenedStoreAsync(
-            SqlServerGroundworkCapabilities.Provider,
-            SqlServerGroundworkCapabilities.PhysicalNames,
-            () => new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()),
-            (manifest, routes) => new SqlServerPhysicalDocumentStore(
-                container.GetConnectionString(),
-                manifest,
-                routes,
-                DocumentStoreAccess.Global),
-            "sqlserver");
 
     [Fact]
     public async Task Sort_only_index_field_residual_filters_before_cursor_limit_and_binds_continuation()
@@ -897,98 +580,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         Assert.Equal("cleanup-target", Assert.Single(result.Documents).Id);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Bounded_mutation_explains_the_exact_execution_stages_with_the_declared_physical_index(
-        bool assignment)
-    {
-        var model = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: assignment,
-            instance: Guid.NewGuid().ToString("N")[..8],
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames,
-            // Keep assignment evidence bound to its declared source index, not a covering compound alternative.
-            includeCategoryPriorityQuery: !assignment,
-            mutationOptions: assignment
-                ? new(IncludePriorityAssignment: true)
-                : new(IncludeCategoryTransition: true));
-        await PhysicalSchemaApplication.ApplyAsync(
-            model.Target,
-            new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
-        var route = model.Target.Routes.Single();
-        var store = new SqlServerPhysicalDocumentStore(
-            container.GetConnectionString(), model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
-        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument",
-            "plan-target",
-            "1",
-            assignment
-                ? "{\"category\":\"assignment-evidence\",\"priority\":7}"
-                : "{\"category\":\"pending\"}"))).Status);
-        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
-            "configurationDocument",
-            "plan-noise",
-            "1",
-            assignment
-                ? "{\"category\":\"tools\",\"priority\":1}"
-                : "{\"category\":\"tools\"}"))).Status);
-        await SeedPlanNoiseAsync(route);
-        var mutationContext = new RelationalPhysicalMutationRuntimeContext(
-            store,
-            model.Manifest,
-            route,
-            model.Target.Provider,
-            SqlServerGroundworkCapabilities.Provider.Name,
-            "sqlserver");
-        var request = assignment
-            ? new DocumentMutation(
-                "configurationDocument",
-                "assign-priority",
-                "assignment-explain",
-                [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "assignment-evidence"))])
-            : new DocumentMutation("configurationDocument", "revoke-pending", "explain");
-        var evidence = await SqlServerPhysicalMutationRuntime
-            .Create(store, model.Manifest, route, model.Target.Provider)
-            .ExplainAsync(request);
-        if (assignment)
-            Assert.IsType<PhysicalAssignMutationAction>(evidence.Plan.Action);
-        var executed = new List<(string Identity, string CommandText, long? PreparedRestrictionRowCount)>();
-        var execution = RelationalPhysicalMutationRuntime.CreateWithSelectionObserver(
-            mutationContext,
-            (identity, command, preparedRestrictionRowCount) =>
-            {
-                executed.Add((identity, command.CommandText, preparedRestrictionRowCount));
-                return ValueTask.CompletedTask;
-            });
-
-        var expectedIndex = route.Indexes.Single(index => index.Identity == "by-category").Name.Identifier;
-        var result = await execution.ExecuteAsync(request);
-        Assert.Equal(BoundedMutationStatus.Completed, result.Status);
-        Assert.Equal(1, result.AffectedCount);
-        if (assignment)
-        {
-            var document = await store.LoadAsync("configurationDocument", "plan-target");
-            Assert.NotNull(document);
-            using var json = System.Text.Json.JsonDocument.Parse(document.ContentJson);
-            Assert.Equal(42, json.RootElement.GetProperty("priority").GetInt32());
-        }
-        Assert.Equal(
-            evidence.Commands.Select(command => (
-                command.Identity,
-                command.RenderedCommand!,
-                command.PreparedRestrictionRowCount)),
-            executed);
-        Assert.Null(evidence.Commands[0].PreparedRestrictionRowCount);
-        Assert.True(evidence.Commands[1].PreparedRestrictionRowCount > 0);
-        Assert.All(evidence.Commands, command =>
-        {
-            Assert.Contains(expectedIndex, command.NativePlan, StringComparison.Ordinal);
-            Assert.Contains("Index Seek", command.NativePlan, StringComparison.Ordinal);
-        });
-    }
-
     [Fact]
     public async Task Bounded_mutation_ledger_lookup_seeks_the_hash_primary_key_at_scale()
     {
@@ -1035,16 +626,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         Assert.Contains("PK_groundwork_document_mutation_operations", plan, StringComparison.Ordinal);
         Assert.Contains("Index Seek", plan, StringComparison.Ordinal);
         Assert.DoesNotContain("Table Scan", plan, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public Task ConcurrentMaterializationAndAcknowledgementLossAreRestartSafe()
-    {
-        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString()) { MaxPoolSize = 1 }.ConnectionString;
-        return RelationalPhysicalServerAssertions.ConcurrentMaterializationAndAcknowledgementLossAreRestartSafeAsync(
-            SqlServerGroundworkCapabilities.Provider,
-            SqlServerGroundworkCapabilities.PhysicalNames,
-            () => new SqlServerPhysicalSchemaExecutor(connectionString));
     }
 
     [Fact]
@@ -1197,13 +778,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
                     ? table
                     : $"gw_{instance}_{context.FeatureDefaultLogicalName}");
     }
-
-    [Fact]
-    public Task Application_lock_disposal_is_heartbeat_race_safe() =>
-        RelationalPhysicalServerAssertions.ApplicationLockDisposalIsHeartbeatRaceSafeAsync(
-            SqlServerGroundworkCapabilities.Provider,
-            SqlServerGroundworkCapabilities.PhysicalNames,
-            () => new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
 
     [Fact]
     public Task Terminated_lock_session_disposal_is_immediate_and_idempotent() =>
@@ -1574,7 +1148,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         Assert.Equal(257, await CountRowsAsync(route.LinkedIndexStorage.Name.Identifier));
     }
 
-    protected override Task<RelationalPhysicalStorageFixture> CreateAsync(
+    protected override Task<PhysicalStorageFixture> CreateAsync(
         PhysicalStorageForm form,
         bool dedicatedWithoutLinked = false) =>
         CreateFixtureAsync(RelationalPhysicalStorageTestModels.Create(
@@ -1584,7 +1158,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             dedicatedWithoutLinked: dedicatedWithoutLinked,
             normalizer: SqlServerGroundworkCapabilities.PhysicalNames));
 
-    protected override async Task<RelationalUnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
+    protected override async Task<UnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
     {
         var model = CreateUnfilteredGlobalIdQueryModel(
             SqlServerGroundworkCapabilities.Provider,
@@ -1600,7 +1174,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             model.Manifest,
             model.Target.Routes,
             DocumentStoreAccess.Global);
-        return new RelationalUnfilteredGlobalQueryFixture(
+        return new UnfilteredGlobalQueryFixture(
             store,
             SqlServerPhysicalQueryRuntime.Create(store, model.Manifest, route, model.Target.Provider),
             route,
@@ -1700,7 +1274,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             () => ValueTask.CompletedTask);
     }
 
-    protected override async Task<RelationalScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form)
+    protected override async Task<ScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form)
     {
         var model = RelationalPhysicalStorageTestModels.Create(
             form,
@@ -1709,12 +1283,12 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             scoped: true,
             normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
         await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
-        return new RelationalScopedPhysicalStorageFixture(
+        return new ScopedPhysicalStorageFixture(
             access => new SqlServerPhysicalDocumentStore(container.GetConnectionString(), model.Manifest, model.Target.Routes, access),
             () => ValueTask.CompletedTask);
     }
 
-    protected override async Task<RelationalPhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form)
+    protected override async Task<PhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form)
     {
         var instance = Guid.NewGuid().ToString("N")[..8];
         var initial = RelationalPhysicalStorageTestModels.Create(
@@ -1726,7 +1300,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         await PhysicalSchemaApplication.ApplyAsync(initial.Target, new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
         var initialStore = new SqlServerPhysicalDocumentStore(
             container.GetConnectionString(), initial.Manifest, initial.Target.Routes, DocumentStoreAccess.Global);
-        return new RelationalPhysicalStorageEvolutionFixture(
+        return new PhysicalStorageEvolutionFixture(
             initialStore,
             () => ApplyAndCreateAsync(additive),
             async () => (await PhysicalSchemaApplication.ApplyAsync(
@@ -1737,14 +1311,14 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             () => ValueTask.CompletedTask);
     }
 
-    private async Task<RelationalPhysicalStorageFixture> ApplyAndCreateAsync(
+    private async Task<PhysicalStorageFixture> ApplyAndCreateAsync(
         (Groundwork.Core.Manifests.StorageManifest Manifest, PhysicalSchemaTarget Target) model)
     {
         await PhysicalSchemaApplication.ApplyAsync(model.Target, new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
         return await CreateFixtureAsync(model, apply: false);
     }
 
-    private async Task<RelationalPhysicalStorageFixture> CreateFixtureAsync(
+    private async Task<PhysicalStorageFixture> CreateFixtureAsync(
         (Groundwork.Core.Manifests.StorageManifest Manifest, PhysicalSchemaTarget Target) model,
         bool apply = true)
     {
@@ -1753,7 +1327,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         var route = model.Target.Routes.Single();
         var store = new SqlServerPhysicalDocumentStore(
             container.GetConnectionString(), model.Manifest, model.Target.Routes, DocumentStoreAccess.Global);
-        return new RelationalPhysicalStorageFixture(
+        return new PhysicalStorageFixture(
             store,
             route.ProjectedColumns.Count == 0
                 ? null
@@ -2405,7 +1979,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         ReadSessionIdAsync,
         WaitUntilBlockedAsync);
 
-    private RelationalMutationServerHarness<SqlServerPhysicalDocumentStore> MutationHarness() => new(
+    private protected override RelationalMutationServerHarness<SqlServerPhysicalDocumentStore> MutationHarness() => new(
         SqlServerGroundworkCapabilities.Provider,
         "sqlserver",
         SqlServerGroundworkCapabilities.PhysicalNames,
@@ -2417,6 +1991,77 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         () => new SqlConnection(container.GetConnectionString()),
         () => new SqlServerPhysicalDocumentDialect(),
         LockContention());
+
+    private protected override IPhysicalSchemaExecutor CreateSchemaExecutorWithOperationHook(
+        Func<PhysicalSchemaOperation, CancellationToken, Task>? beforeOperation) =>
+        new SqlServerPhysicalSchemaExecutor(
+            container.GetConnectionString(),
+            new SqlServerPhysicalIdentityHash(),
+            beforeOperation,
+            null);
+
+    private protected override Func<IPhysicalSchemaExecutor> SingleConnectionSchemaExecutorFactory()
+    {
+        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            MaxPoolSize = 1
+        }.ConnectionString;
+        return () => new SqlServerPhysicalSchemaExecutor(connectionString);
+    }
+
+    private protected override Task PrepareMutationPlanEvidenceAsync(ExecutableStorageRoute route) =>
+        SeedPlanNoiseAsync(route);
+
+    private protected override async Task<EphemeralServerDatabase> CreateEphemeralDatabaseAsync(string name)
+    {
+        await ExecuteAdminAsync($"CREATE DATABASE {QuoteIdentifier(name)};");
+        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            InitialCatalog = name
+        }.ConnectionString;
+        return new EphemeralServerDatabase(connectionString, async () =>
+        {
+            SqlConnection.ClearAllPools();
+            await ExecuteAdminAsync(
+                $"ALTER DATABASE {QuoteIdentifier(name)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {QuoteIdentifier(name)};");
+        });
+    }
+
+    private protected override async Task<object?> OpenPhysicalAutoApplyAsync(
+        string connectionString,
+        Groundwork.Core.Manifests.StorageManifest manifest,
+        Groundwork.Core.Capabilities.ProviderIdentity provider,
+        IPhysicalNamePolicy namePolicy) =>
+        await SqlServerDocumentStoreFactory.OpenPhysicalAsync(
+            connectionString,
+            manifest,
+            provider,
+            DocumentStoreAccess.Global,
+            namePolicy: namePolicy,
+            options: new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
+
+    private protected override IPhysicalSchemaHistoryInspector CreateSchemaHistoryInspectorFor(string connectionString) =>
+        new SqlServerPhysicalSchemaExecutor(connectionString);
+
+    private protected override void AssertMutationExplainCommandPlan(string? nativePlan, string expectedIndex)
+    {
+        Assert.Contains(expectedIndex, nativePlan, StringComparison.Ordinal);
+        Assert.Contains("Index Seek", nativePlan, StringComparison.Ordinal);
+    }
+
+    private protected override async Task RebuildCollectionMembershipIndexReversedAsync(
+        ExecutableCollectionElementStorageRoute storage)
+    {
+        await using var connection = new SqlConnection(container.GetConnectionString());
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            $"DROP INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)}; " +
+            $"CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON {QuoteIdentifier(storage.Storage.Name.Identifier)} (" +
+            $"{string.Join(", ", storage.MembershipKey.OwnerColumns.Select(column => QuoteIdentifier(column.Column.Identifier))
+                .Append(QuoteIdentifier(storage.MembershipKey.Value.Column.Identifier)))});";
+        await command.ExecuteNonQueryAsync();
+    }
 
     private static async ValueTask<int> ReadSessionIdAsync(
         System.Data.Common.DbConnection connection,
@@ -2490,7 +2135,4 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         WrongPrimaryKeyOrder
     }
 
-    private sealed class InjectedCollectionWriteException : Exception
-    {
-    }
 }

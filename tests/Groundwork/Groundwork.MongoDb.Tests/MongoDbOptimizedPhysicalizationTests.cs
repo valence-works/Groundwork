@@ -10,15 +10,10 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
-public sealed class MongoDbOptimizedPhysicalizationTests : IAsyncLifetime
+public sealed class MongoDbOptimizedPhysicalizationTests(MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-optimized-rs")
-        .Build();
-
-    public async Task InitializeAsync() => await container.StartAsync();
-
-    public async Task DisposeAsync() => await container.DisposeAsync();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public async Task OptimizedUnitsCreateMaintainAndQueryPhysicalizedFields()

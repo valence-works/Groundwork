@@ -22,15 +22,176 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
-public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
+public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTestContainer fixture)
+    : PhysicalStorageConformance, IClassFixture<MongoDbReplicaSetTestContainer>
 {
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-rs")
-        .Build();
+    private readonly MongoDbContainer container = fixture.Container;
 
-    public Task InitializeAsync() => container.StartAsync();
+    protected override async Task<PhysicalStorageFixture> CreateAsync(
+        PhysicalStorageForm form,
+        bool dedicatedWithoutLinked = false)
+    {
+        var database = Database();
+        var model = dedicatedWithoutLinked
+            ? ConformanceModel(form, includePriority: false, withoutLinkedProjection: true)
+            : ConformanceModel(form, includePriority: true);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Global);
+        return new PhysicalStorageFixture(
+            store,
+            dedicatedWithoutLinked ? null : store,
+            model.Routes.Single(),
+            dedicatedWithoutLinked
+                ? () => Task.FromResult(string.Empty)
+                : () => ExplainCategoryLookupAsync(store),
+            () => ValueTask.CompletedTask);
+    }
 
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    protected override async Task<ScopedPhysicalStorageFixture> CreateScopedAsync(PhysicalStorageForm form)
+    {
+        var database = Database();
+        var model = ConformanceModel(form, includePriority: true, scoped: true);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        return new ScopedPhysicalStorageFixture(
+            access => new MongoDbPhysicalDocumentStore(database, model, access),
+            () => ValueTask.CompletedTask);
+    }
+
+    protected override async Task<PhysicalStorageEvolutionFixture> CreateEvolutionAsync(PhysicalStorageForm form)
+    {
+        var database = Database();
+        var initial = ConformanceModel(form, includePriority: false);
+        var additive = ConformanceModel(form, includePriority: true);
+        var executor = new MongoDbPhysicalSchemaExecutor(database);
+        await PhysicalSchemaApplication.ApplyAsync(initial.Target, executor);
+        var initialDocuments = new MongoDbPhysicalDocumentStore(database, initial, DocumentStoreAccess.Global);
+        return new PhysicalStorageEvolutionFixture(
+            initialDocuments,
+            async () =>
+            {
+                await PhysicalSchemaApplication.ApplyAsync(additive.Target, executor);
+                var store = new MongoDbPhysicalDocumentStore(database, additive, DocumentStoreAccess.Global);
+                return new PhysicalStorageFixture(
+                    store,
+                    store,
+                    additive.Routes.Single(),
+                    () => ExplainCategoryLookupAsync(store),
+                    () => ValueTask.CompletedTask);
+            },
+            async () => (await PhysicalSchemaApplication.ApplyAsync(additive.Target, executor)).Outcome,
+            async cancellationToken =>
+                await executor.AcquireApplicationLockAsync(additive.Target.Identity, cancellationToken),
+            () => ValueTask.CompletedTask);
+    }
+
+    protected override async Task<UnfilteredGlobalQueryFixture> CreateUnfilteredGlobalIdQueryAsync()
+    {
+        var database = Database();
+        var model = UnfilteredGlobalIdConformanceModel();
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Global);
+        return new UnfilteredGlobalQueryFixture(
+            store,
+            store,
+            model.Routes.Single(),
+            () => ValueTask.CompletedTask);
+    }
+
+    protected override async Task<CursorPagingFixture> CreateCursorPagingAsync(PhysicalStorageForm form)
+    {
+        var database = Database();
+        var model = ConformanceModel(form, includePriority: false, categoryPaging: QueryPagingSupport.Cursor);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        MongoDbPhysicalDocumentStore Open() => new(database, model, DocumentStoreAccess.Global);
+        return new CursorPagingFixture(
+            Open(),
+            Open,
+            model.Routes.Single(),
+            () => ValueTask.CompletedTask);
+    }
+
+    protected override PhysicalQueryAccessKind UnfilteredGlobalIdQueryAccessKind =>
+        PhysicalQueryAccessKind.NativeDocumentFields;
+
+    protected override void AssertUnfilteredGlobalIdQueryPlan(PhysicalDocumentQueryExplanation explanation)
+    {
+        Assert.All(explanation.Commands, command =>
+        {
+            Assert.Equal("mongodb-json", command.NativePlanFormat);
+            Assert.False(string.IsNullOrWhiteSpace(command.NativePlan));
+        });
+        var page = explanation.Commands.Single(command =>
+            command.Kind == PhysicalDocumentQueryCommandKind.Page);
+        Assert.Contains(explanation.Plan.IndexName!.Identifier, page.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("COLLSCAN", page.NativePlan, StringComparison.Ordinal);
+    }
+
+    protected override async Task AssertCursorPageExplanationAsync(
+        IBoundedDocumentStore queries,
+        DocumentQuery middleQuery,
+        ExecutableStorageRoute route)
+    {
+        var explanation = await Assert.IsAssignableFrom<IPhysicalDocumentQueryExplainer>(queries)
+            .ExplainAsync(middleQuery);
+        var pagePlan = explanation.Commands.Single(command =>
+            command.Identity == PhysicalDocumentQueryCommandIdentities.Page);
+        Assert.Contains(route.Indexes.Single().Name.Identifier, pagePlan.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("COLLSCAN", pagePlan.NativePlan, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"stage\" : \"SORT\"", pagePlan.NativePlan, StringComparison.Ordinal);
+        Assert.Contains("\"stage\" : \"LIMIT\"", pagePlan.NativePlan, StringComparison.Ordinal);
+        Assert.Equal(3, pagePlan.ProviderAppliedMaximumRows);
+        Assert.Equal(
+            explanation.Plan.Order.Select(order => order.Field.Identifier),
+            pagePlan.ProviderAppliedOrder.Select(order => order.FieldIdentifier));
+        Assert.True(pagePlan.ProviderAppliedOrder[^1].IsIdentityTieBreak);
+        if (explanation.Plan.RequiresPrimaryLookup)
+        {
+            Assert.Equal(
+                2,
+                explanation.Commands.Single(command =>
+                    command.Kind == PhysicalDocumentQueryCommandKind.PrimaryHydration).ProviderAppliedMaximumRows);
+        }
+    }
+
+    private static async Task<string> ExplainCategoryLookupAsync(MongoDbPhysicalDocumentStore store)
+    {
+        var explanation = await store.ExplainAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-category",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "tools"))]));
+        return string.Join(Environment.NewLine, explanation.Commands.Select(command => command.NativePlan));
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task Forms_persist_canonical_json_and_projected_columns(PhysicalStorageForm form)
+    {
+        var database = Database();
+        var model = Model(form);
+        var materializer = new MongoDbGroundworkMaterializer(database);
+        await materializer.MaterializeAsync(model);
+        await materializer.MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "1", "1", """{"status":"open","rank":2}"""))).Status);
+
+        Assert.Equal("""{"status":"open","rank":2}""", (await store.LoadAsync("workItem", "1"))!.ContentJson);
+        var route = Assert.Single(model.Routes);
+        var primary = await database.GetCollection<BsonDocument>(route.PrimaryStorage.Name.Identifier)
+            .Find(Builders<BsonDocument>.Filter.Eq(route.Envelope.Id.Identifier, "1"))
+            .SingleAsync();
+        Assert.Equal(
+            """{"status":"open","rank":2}""",
+            MongoDbCanonicalJson.Serialize(primary[route.Envelope.CanonicalJson.Identifier]));
+        if (form == PhysicalStorageForm.PhysicalEntityTable)
+            Assert.Equal("open", primary[route.ProjectedColumns.Single().Column.Identifier].AsString);
+        else
+            Assert.Equal("open", (await database.GetCollection<BsonDocument>(route.LinkedIndexStorage!.Name.Identifier)
+                .Find(Builders<BsonDocument>.Filter.Empty).FirstAsync())[route.ProjectedColumns.Single().Column.Identifier].AsString);
+    }
 
     [Fact]
     public async Task Collection_membership_and_contains_all_execute_from_typed_element_storage()
@@ -200,112 +361,6 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
             .InspectHistoryAsync(additive.Target, CancellationToken.None);
         Assert.Equal(initial.Target.Fingerprint, inspection.History.AppliedState?.TargetFingerprint);
         Assert.NotEqual(additive.Target.Fingerprint, inspection.History.AppliedState?.TargetFingerprint);
-    }
-
-    [Theory]
-    [InlineData(PhysicalStorageForm.SharedDocuments)]
-    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
-    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
-    public async Task Forms_route_crud_occ_query_count_page_order_and_canonical_json(
-        PhysicalStorageForm form)
-    {
-        var database = Database();
-        var model = Model(form);
-        var materializer = new MongoDbGroundworkMaterializer(database);
-        await materializer.MaterializeAsync(model);
-        await materializer.MaterializeAsync(model);
-        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
-
-        var first = await store.SaveAsync(new SaveDocumentRequest("workItem", "1", "1", """{"status":"open","rank":2}"""));
-        await store.SaveAsync(new SaveDocumentRequest("workItem", "2", "1", """{"status":"open","rank":1}"""));
-        await store.SaveAsync(new SaveDocumentRequest("workItem", "3", "1", """{"status":"closed","rank":3}"""));
-        var conflict = await store.SaveAsync(new SaveDocumentRequest(
-            "workItem", "1", "1", """{"status":"closed","rank":2}""", ExpectedVersion: 0));
-
-        Assert.Equal(DocumentStoreWriteStatus.Saved, first.Status);
-        Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, conflict.Status);
-        Assert.Equal("""{"status":"open","rank":2}""", (await store.LoadAsync("workItem", "1"))!.ContentJson);
-
-        var query = new DocumentQuery(
-            "workItem",
-            "list-by-status",
-            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "open"))],
-            order: [new DocumentQueryOrder("status")],
-            skip: 1,
-            take: 1);
-        var page = await store.QueryAsync(query);
-        Assert.Equal(2, page.TotalCount);
-        Assert.Single(page.Documents);
-        Assert.Equal(2, await store.CountAsync(query.Select(BoundedQueryResultOperation.Count)));
-        Assert.True(await store.AnyAsync(query.Select(BoundedQueryResultOperation.Any)));
-        Assert.NotNull(await store.FirstOrDefaultAsync(query.Select(BoundedQueryResultOperation.First)));
-
-        var route = Assert.Single(model.Routes);
-        var primary = await database.GetCollection<BsonDocument>(route.PrimaryStorage.Name.Identifier)
-            .Find(Builders<BsonDocument>.Filter.Eq(route.Envelope.Id.Identifier, "1"))
-            .SingleAsync();
-        Assert.Equal(
-            """{"status":"open","rank":2}""",
-            MongoDbCanonicalJson.Serialize(primary[route.Envelope.CanonicalJson.Identifier]));
-        if (form == PhysicalStorageForm.PhysicalEntityTable)
-            Assert.Equal("open", primary[route.ProjectedColumns.Single().Column.Identifier].AsString);
-        else
-            Assert.Equal("open", (await database.GetCollection<BsonDocument>(route.LinkedIndexStorage!.Name.Identifier)
-                .Find(Builders<BsonDocument>.Filter.Empty).FirstAsync())[route.ProjectedColumns.Single().Column.Identifier].AsString);
-    }
-
-    [Fact]
-    public async Task Explicitly_unfiltered_global_id_route_executes_an_indexed_offset_page_and_provider_side_count()
-    {
-        var database = Database();
-        var model = UnfilteredGlobalIdModel();
-        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
-        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Global);
-        await store.SaveAsync(new SaveDocumentRequest("workItem", "c", "1", "{\"category\":\"ignored\"}"));
-        await store.SaveAsync(new SaveDocumentRequest("workItem", "a", "1", "{\"category\":\"ignored\"}"));
-        await store.SaveAsync(new SaveDocumentRequest("workItem", "b", "1", "{\"category\":\"ignored\"}"));
-
-        var pageQuery = new DocumentQuery(
-            "workItem",
-            "list-all-by-id",
-            [],
-            order: [new DocumentQueryOrder(PhysicalDocumentFieldPaths.Id)],
-            skip: 1,
-            take: 1);
-        var countQuery = new DocumentQuery(
-            pageQuery.DocumentKind,
-            pageQuery.QueryIdentity,
-            [],
-            pageQuery.Order,
-            resultOperation: BoundedQueryResultOperation.Count);
-
-        var page = await store.QueryAsync(pageQuery);
-        var count = await store.CountAsync(countQuery);
-        var explanation = await store.ExplainAsync(pageQuery);
-        var route = Assert.Single(model.Routes);
-
-        Assert.Equal(3, page.TotalCount);
-        Assert.Equal("b", Assert.Single(page.Documents).Id);
-        Assert.Equal(3, count);
-        Assert.Empty(explanation.Plan.Predicates);
-        Assert.Equal(PhysicalQueryAccessKind.NativeDocumentFields, explanation.Plan.AccessKind);
-        Assert.Equal(Assert.Single(route.Indexes).Name, explanation.Plan.IndexName);
-        Assert.Equal(
-            route.Envelope.Identity.ComparisonKey.Identifier,
-            Assert.Single(explanation.Plan.Order).Field.Identifier);
-        Assert.Equal(
-            [PhysicalDocumentQueryCommandKind.Count, PhysicalDocumentQueryCommandKind.Page],
-            explanation.Commands.Select(command => command.Kind));
-        Assert.All(explanation.Commands, command =>
-        {
-            Assert.Equal("mongodb-json", command.NativePlanFormat);
-            Assert.False(string.IsNullOrWhiteSpace(command.NativePlan));
-            Assert.NotEqual(0, command.ProviderAppliedMaximumRows);
-        });
-        var pageCommand = explanation.Commands.Single(command =>
-            command.Kind == PhysicalDocumentQueryCommandKind.Page);
-        Assert.Contains(route.Indexes.Single().Name.Identifier, pageCommand.NativePlan, StringComparison.Ordinal);
-        Assert.DoesNotContain("COLLSCAN", pageCommand.NativePlan, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -989,62 +1044,6 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => transaction.CommitAsync());
         Assert.Contains("completed", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(await store.LoadAsync("workItem", "one"));
-    }
-
-    [Theory]
-    [InlineData(PhysicalStorageForm.SharedDocuments)]
-    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
-    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
-    public async Task Unit_of_work_rejects_kinds_outside_its_commit_scope_without_becoming_terminal(
-        PhysicalStorageForm form)
-    {
-        var database = Database();
-        var model = Model(form);
-        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
-        var store = new MongoDbPhysicalDocumentStore(
-            database,
-            model,
-            DocumentStoreAccess.Scoped(new("tenant-a")));
-        await using var transaction = await store.BeginAsync(DocumentCommitScope.Of("workItem"));
-
-        await Assert.ThrowsAsync<ArgumentException>(() => transaction.SaveAsync(new SaveDocumentRequest(
-            "otherItem", "outside-save", "1", "{}", ExpectedVersion: 0)));
-        await Assert.ThrowsAsync<ArgumentException>(() => transaction.DeleteAsync(new DeleteDocumentRequest(
-            "otherItem", "outside-delete")));
-        await Assert.ThrowsAsync<ArgumentException>(() => transaction.LoadAsync("otherItem", "outside-load"));
-
-        Assert.Equal(DocumentStoreWriteStatus.Saved, (await transaction.SaveAsync(new SaveDocumentRequest(
-            "workItem", "inside", "1", """{"status":"open","rank":1}""", ExpectedVersion: 0))).Status);
-        await transaction.CommitAsync();
-        Assert.NotNull(await store.LoadAsync("workItem", "inside"));
-    }
-
-    [Theory]
-    [InlineData(PhysicalStorageForm.SharedDocuments)]
-    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
-    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
-    public async Task Unit_of_work_non_success_rolls_back_and_makes_the_transaction_terminal(
-        PhysicalStorageForm form)
-    {
-        var database = Database();
-        var model = Model(form);
-        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
-        var store = new MongoDbPhysicalDocumentStore(
-            database,
-            model,
-            DocumentStoreAccess.Scoped(new("tenant-a")));
-        await using var transaction = await store.BeginAsync(DocumentCommitScope.Of("workItem"));
-        Assert.Equal(DocumentStoreWriteStatus.Saved, (await transaction.SaveAsync(new SaveDocumentRequest(
-            "workItem", "staged-before-non-success", "1", """{"status":"open","rank":1}""", ExpectedVersion: 0))).Status);
-
-        Assert.Equal(DocumentStoreWriteStatus.NotFound, (await transaction.SaveAsync(new SaveDocumentRequest(
-            "workItem", "missing", "1", "{}", ExpectedVersion: 1))).Status);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() => transaction.CommitAsync());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => transaction.RollbackAsync());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => transaction.LoadAsync(
-            "workItem", "staged-before-non-success"));
-        Assert.Null(await store.LoadAsync("workItem", "staged-before-non-success"));
     }
 
     [Fact]
@@ -2588,82 +2587,6 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
     [InlineData(PhysicalStorageForm.SharedDocuments)]
     [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
     [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
-    public async Task Cursor_pages_resume_by_identity_across_a_reopened_store(PhysicalStorageForm form)
-    {
-        var database = Database();
-        var model = Model(form, pagingSupport: QueryPagingSupport.Cursor);
-        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
-        var store = new MongoDbPhysicalDocumentStore(
-            database,
-            model,
-            DocumentStoreAccess.Scoped(new("tenant-a")));
-        foreach (var id in new[] { "c", "a", "b", "d", "e" })
-            await store.SaveAsync(new SaveDocumentRequest("workItem", id, "1", """{"status":"open"}"""));
-        var predicate = DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "open"));
-        var query = new DocumentQuery(
-            "workItem",
-            "list-by-status",
-            [predicate],
-            [new DocumentQueryOrder("status")],
-            take: 1);
-
-        var first = await store.QueryAsync(query);
-        var reopened = new MongoDbPhysicalDocumentStore(
-            database,
-            model,
-            DocumentStoreAccess.Scoped(new("tenant-a")));
-        var middleQuery = new DocumentQuery(
-            query.DocumentKind,
-            query.QueryIdentity,
-            query.Clauses,
-            query.Order,
-            take: 2,
-            continuation: first.NextContinuation);
-        var explanation = await reopened.ExplainAsync(middleQuery);
-        var middle = await reopened.QueryAsync(middleQuery);
-        var final = await reopened.QueryAsync(new DocumentQuery(
-            query.DocumentKind,
-            query.QueryIdentity,
-            query.Clauses,
-            query.Order,
-            take: 10,
-            continuation: middle.NextContinuation));
-        var route = model.Routes.Single();
-        var expected = new[] { "a", "b", "c", "d", "e" }
-            .OrderBy(id => route.Envelope.Identity.Project(id).LookupKey, StringComparer.Ordinal)
-            .ToArray();
-
-        Assert.Equal(expected[0], Assert.Single(first.Documents).Id);
-        Assert.NotNull(first.NextContinuation);
-        Assert.Equal(expected[1..3], middle.Documents.Select(document => document.Id));
-        Assert.NotNull(middle.NextContinuation);
-        Assert.Equal(expected[3..], final.Documents.Select(document => document.Id));
-        Assert.Null(final.NextContinuation);
-        Assert.Equal(5, final.TotalCount);
-        var pagePlan = explanation.Commands.Single(command =>
-            command.Identity == PhysicalDocumentQueryCommandIdentities.Page);
-        Assert.Contains(route.Indexes.Single().Name.Identifier, pagePlan.NativePlan, StringComparison.Ordinal);
-        Assert.DoesNotContain("COLLSCAN", pagePlan.NativePlan, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"stage\" : \"SORT\"", pagePlan.NativePlan, StringComparison.Ordinal);
-        Assert.Contains("\"stage\" : \"LIMIT\"", pagePlan.NativePlan, StringComparison.Ordinal);
-        Assert.Equal(3, pagePlan.ProviderAppliedMaximumRows);
-        Assert.Equal(
-            explanation.Plan.Order.Select(order => order.Field.Identifier),
-            pagePlan.ProviderAppliedOrder.Select(order => order.FieldIdentifier));
-        Assert.True(pagePlan.ProviderAppliedOrder[^1].IsIdentityTieBreak);
-        if (explanation.Plan.RequiresPrimaryLookup)
-        {
-            Assert.Equal(
-                2,
-                explanation.Commands.Single(command =>
-                    command.Kind == PhysicalDocumentQueryCommandKind.PrimaryHydration).ProviderAppliedMaximumRows);
-        }
-    }
-
-    [Theory]
-    [InlineData(PhysicalStorageForm.SharedDocuments)]
-    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
-    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
     public async Task Latest_per_key_filters_before_grouping_and_pages_deterministic_representatives(
         PhysicalStorageForm form)
     {
@@ -3420,6 +3343,196 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
         await NotEqualNullSemanticsConformance.VerifyAsync(store, store);
     }
 
+    /// <summary>
+    /// The configuration-document model behind the provider-neutral conformance fixtures; mirrors the
+    /// Sqlite/SqlServer/PostgreSql conformance models (category projection, optional priority
+    /// evolution, offset or cursor paging on the category index).
+    /// </summary>
+    private static MongoDbPhysicalStorageModel ConformanceModel(
+        PhysicalStorageForm form,
+        bool includePriority,
+        bool scoped = false,
+        QueryPagingSupport categoryPaging = QueryPagingSupport.Offset,
+        bool withoutLinkedProjection = false)
+    {
+        var binding = new SharedStorageBinding("runtime-documents");
+        var columns = new List<ProjectedColumnDefinition>
+        {
+            new("category", "category", PortablePhysicalType.String, Length: 200)
+        };
+        var categoryIndexColumns = new List<PhysicalIndexColumnDefinition>();
+        if (scoped)
+            categoryIndexColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
+        categoryIndexColumns.Add(new PhysicalIndexColumnDefinition("category", categoryIndexColumns.Count));
+        categoryIndexColumns.Add(new PhysicalIndexColumnDefinition(
+            categoryPaging == QueryPagingSupport.Cursor ? "id_lookup_key" : "id_comparison_key",
+            categoryIndexColumns.Count));
+        var indexes = new List<PhysicalIndexDefinition>
+        {
+            new("by-category", categoryIndexColumns, missingValueBehavior: MissingValueBehavior.IncludedAsNull)
+        };
+        var logicalIndexes = new List<LogicalIndexDeclaration>
+        {
+            new("by-category", [new IndexField("category")], IndexValueKind.String, false, MissingValueBehavior.IncludedAsNull)
+        };
+        var boundedQueries = new List<BoundedQueryDeclaration>
+        {
+            new(
+                "list-by-category",
+                "by-category",
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.Ascending,
+                categoryPaging,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true,
+                resultOperations: new HashSet<BoundedQueryResultOperation>
+                {
+                    BoundedQueryResultOperation.Documents,
+                    BoundedQueryResultOperation.Count,
+                    BoundedQueryResultOperation.Any,
+                    BoundedQueryResultOperation.First
+                })
+        };
+        if (includePriority)
+        {
+            columns.Add(new ProjectedColumnDefinition("priority", "priority", PortablePhysicalType.Int32, IsNullable: true));
+            var compoundColumns = new List<PhysicalIndexColumnDefinition>();
+            if (scoped)
+                compoundColumns.Add(new PhysicalIndexColumnDefinition("storage_scope", 0));
+            compoundColumns.Add(new PhysicalIndexColumnDefinition("category", compoundColumns.Count));
+            compoundColumns.Add(new PhysicalIndexColumnDefinition("priority", compoundColumns.Count));
+            indexes.Add(new PhysicalIndexDefinition(
+                "by-category-priority", compoundColumns, missingValueBehavior: MissingValueBehavior.IncludedAsNull));
+            logicalIndexes.Add(new LogicalIndexDeclaration(
+                "by-category-priority",
+                [new IndexField("category"), new IndexField("priority", IndexValueKind.Number)],
+                IndexValueKind.String,
+                false,
+                MissingValueBehavior.IncludedAsNull));
+            boundedQueries.Add(new BoundedQueryDeclaration(
+                "find-by-category-priority",
+                "by-category-priority",
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.None,
+                QueryPagingSupport.None,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true,
+                predicateFields:
+                [
+                    new BoundedQueryPredicateField("category", new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal }),
+                    new BoundedQueryPredicateField("priority", new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal })
+                ],
+                resultOperations: new HashSet<BoundedQueryResultOperation>
+                {
+                    BoundedQueryResultOperation.Documents,
+                    BoundedQueryResultOperation.Count
+                }));
+        }
+        var definition = withoutLinkedProjection
+            ? PhysicalTableDefinition.DedicatedDocumentTable("configuration_documents")
+            : form switch
+            {
+                PhysicalStorageForm.SharedDocuments => PhysicalTableDefinition.SharedDocuments(
+                    binding, columns, indexes, linkedProjectionLogicalName: "configuration_projection"),
+                PhysicalStorageForm.DedicatedDocumentTable => PhysicalTableDefinition.DedicatedDocumentTable(
+                    "configuration_documents", indexes: indexes, linkedProjectedColumns: columns,
+                    linkedProjectionLogicalName: "configuration_projection"),
+                PhysicalStorageForm.PhysicalEntityTable => PhysicalTableDefinition.PhysicalEntityTable(
+                    "configuration_entities", columns, indexes: indexes),
+                _ => throw new ArgumentOutOfRangeException(nameof(form), form, null)
+            };
+        var unit = new StorageUnit(
+            new StorageUnitIdentity("configurationDocument"),
+            "Configuration document",
+            StorageIntent.PortableDocument(),
+            LifecyclePolicy.Mutable,
+            IdentityPolicy.StringId(),
+            scoped ? TenancyPolicy.Scoped : TenancyPolicy.Global,
+            ConcurrencyPolicy.Optimistic(),
+            SerializationPolicy.Json(),
+            [],
+            [],
+            PhysicalizationPolicy.Portable)
+        {
+            PhysicalStorage = withoutLinkedProjection
+                ? new StorageUnitPhysicalStorage(
+                    StorageUnitProvisioningMode.Declared,
+                    PhysicalStoragePolicy.Explicit(definition))
+                : new StorageUnitPhysicalStorage(
+                    StorageUnitProvisioningMode.Declared,
+                    PhysicalStoragePolicy.Explicit(definition),
+                    logicalIndexes,
+                    boundedQueries)
+        };
+        var manifest = new StorageManifest(
+            new StorageManifestIdentity($"mongo.conformance.{form}"),
+            new StorageManifestOwner("tests"),
+            new StorageManifestVersion("1"),
+            [unit],
+            new HashSet<string>(),
+            [])
+        {
+            SharedDocumentStorages = !withoutLinkedProjection && form == PhysicalStorageForm.SharedDocuments
+                ? [new SharedDocumentStorageDefinition(binding, "documents", new DocumentEnvelopeDefinition())]
+                : []
+        };
+        return MongoDbPhysicalStorageModel.Compile(manifest);
+    }
+
+    private static MongoDbPhysicalStorageModel UnfilteredGlobalIdConformanceModel()
+    {
+        var index = new LogicalIndexDeclaration(
+            "by-id",
+            [new IndexField(PhysicalDocumentFieldPaths.Id)],
+            IndexValueKind.Keyword,
+            false,
+            MissingValueBehavior.IncludedAsNull);
+        var query = new BoundedQueryDeclaration(
+            "list-all-by-id",
+            index.Identity,
+            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+            QuerySortSupport.Ascending,
+            QueryPagingSupport.Offset,
+            BoundedQueryExecutionClass.ScaleBearing,
+            supportsTotalCount: true,
+            sortFields: [new BoundedQuerySortField(PhysicalDocumentFieldPaths.Id, PhysicalSortDirection.Ascending)],
+            predicateFields: []);
+        var unit = new StorageUnit(
+            new StorageUnitIdentity("configurationDocument"),
+            "Configuration document",
+            StorageIntent.PortableDocument(),
+            LifecyclePolicy.Mutable,
+            IdentityPolicy.StringId(),
+            TenancyPolicy.Global,
+            ConcurrencyPolicy.Optimistic(),
+            SerializationPolicy.Json(),
+            [],
+            [],
+            PhysicalizationPolicy.Portable)
+        {
+            PhysicalStorage = new StorageUnitPhysicalStorage(
+                StorageUnitProvisioningMode.Declared,
+                PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
+                    "global_configuration_documents",
+                    [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
+                    indexes:
+                    [
+                        new PhysicalIndexDefinition(
+                            index.Identity,
+                            [new PhysicalIndexColumnDefinition("id_comparison_key", 0)])
+                    ])),
+                [index],
+                [query])
+        };
+        return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
+            new StorageManifestIdentity("mongo.conformance.unfiltered-global-id"),
+            new StorageManifestOwner("tests"),
+            new StorageManifestVersion("1"),
+            [unit],
+            new HashSet<string>(),
+            []));
+    }
+
     private IMongoDatabase Database() =>
         new MongoClient(container.GetConnectionString()).GetDatabase($"groundwork_{Guid.NewGuid():N}");
 
@@ -3592,60 +3705,6 @@ public sealed class MongoDbPhysicalStorageConformanceTests : IAsyncLifetime
                 : []
         };
         return MongoDbPhysicalStorageModel.Compile(manifest);
-    }
-
-    private static MongoDbPhysicalStorageModel UnfilteredGlobalIdModel()
-    {
-        var index = new LogicalIndexDeclaration(
-            "by-id",
-            [new IndexField(PhysicalDocumentFieldPaths.Id)],
-            IndexValueKind.Keyword,
-            false,
-            MissingValueBehavior.IncludedAsNull);
-        var query = new BoundedQueryDeclaration(
-            "list-all-by-id",
-            index.Identity,
-            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-            QuerySortSupport.Ascending,
-            QueryPagingSupport.Offset,
-            BoundedQueryExecutionClass.ScaleBearing,
-            supportsTotalCount: true,
-            sortFields: [new BoundedQuerySortField(PhysicalDocumentFieldPaths.Id, PhysicalSortDirection.Ascending)],
-            predicateFields: []);
-        var unit = new StorageUnit(
-            new StorageUnitIdentity("workItem"),
-            "Work item",
-            StorageIntent.PortableDocument(),
-            LifecyclePolicy.Mutable,
-            IdentityPolicy.StringId(),
-            TenancyPolicy.Global,
-            ConcurrencyPolicy.Optimistic(),
-            SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
-                StorageUnitProvisioningMode.Declared,
-                PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
-                    "global_work_items",
-                    [new ProjectedColumnDefinition("category", "category", PortablePhysicalType.String)],
-                    indexes:
-                    [
-                        new PhysicalIndexDefinition(
-                            index.Identity,
-                            [new PhysicalIndexColumnDefinition("id_comparison_key", 0)])
-                    ])),
-                [index],
-                [query])
-        };
-        return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
-            new StorageManifestIdentity("mongo.unfiltered-global-id"),
-            new StorageManifestOwner("tests"),
-            new StorageManifestVersion("1"),
-            [unit],
-            new HashSet<string>(),
-            []));
     }
 
     private static DocumentQuery CollectionQuery(string value) =>

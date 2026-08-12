@@ -3,70 +3,14 @@ using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Queries;
 using Groundwork.Core.Intents;
+using Groundwork.TestInfrastructure;
 
 namespace Groundwork.MongoDb.Tests;
 
 internal static class MongoDbTestManifests
 {
     public static StorageManifest MetadataManifest() =>
-        new(
-            new StorageManifestIdentity("configuration.documents"),
-            new StorageManifestOwner("sample.application"),
-            new StorageManifestVersion("1.0.0"),
-            [
-                new StorageUnit(
-                    new StorageUnitIdentity("configurationDocument"),
-                    "Configuration document",
-                    StorageIntent.PortableDocument(),
-                    LifecyclePolicy.Mutable,
-                    IdentityPolicy.StringId(),
-                    TenancyPolicy.Global,
-                    ConcurrencyPolicy.Optimistic(),
-                    SerializationPolicy.Json(),
-                    [
-                        new IndexDeclaration(
-                            "by-key",
-                            [new IndexField("key")],
-                            IndexValueKind.Keyword,
-                            true,
-                            true,
-                            MissingValueBehavior.Excluded,
-                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal, PortableQueryOperation.In, PortableQueryOperation.Contains, PortableQueryOperation.NotContains }),
-                        new IndexDeclaration(
-                            "by-category",
-                            [new IndexField("category")],
-                            IndexValueKind.String,
-                            false,
-                            true,
-                            MissingValueBehavior.Excluded,
-                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal, PortableQueryOperation.In }),
-                        new IndexDeclaration(
-                            "by-sort",
-                            [new IndexField("sort")],
-                            IndexValueKind.String,
-                            false,
-                            true,
-                            MissingValueBehavior.Excluded,
-                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal })
-                    ],
-                    [
-                        new PortableQueryDeclaration(
-                            "find-by-key",
-                            "by-key",
-                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-                            QuerySortSupport.None,
-                            QueryPagingSupport.None),
-                        new PortableQueryDeclaration(
-                            "list-by-category",
-                            "by-category",
-                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-                            QuerySortSupport.Both,
-                            QueryPagingSupport.Offset)
-                    ],
-                    PhysicalizationPolicy.Portable)
-            ],
-            new HashSet<string> { "schema-history", "optimistic-concurrency" },
-            []);
+        TestManifests.MetadataManifest(extendedIndexOperations: true);
 
     public static ProviderIdentity Provider { get; } = new("groundwork-mongodb", "1.0.0");
 
@@ -88,21 +32,8 @@ internal static class MongoDbTestManifests
         };
     }
 
-    public static StorageManifest UnicodeIdentityManifest()
-    {
-        var manifest = MetadataManifest();
-        return manifest with
-        {
-            StorageUnits =
-            [
-                manifest.StorageUnits.Single() with
-                {
-                    IdentityPolicy = IdentityPolicy.StringId(
-                        stringCasePolicy: StringIdentityCasePolicy.UnicodeOrdinalIgnoreCase)
-                }
-            ]
-        };
-    }
+    public static StorageManifest UnicodeIdentityManifest() =>
+        TestManifests.WithUnicodeIdentity(MetadataManifest());
 
     public static StorageManifest TenantManifest() =>
         new(

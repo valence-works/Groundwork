@@ -18,16 +18,11 @@ using Xunit;
 
 namespace Groundwork.MongoDb.Tests;
 
-public sealed class MongoDbBoundedMutationTests : IAsyncLifetime
+public sealed class MongoDbBoundedMutationTests(MongoDbReplicaSetTestContainer fixture)
+    : IClassFixture<MongoDbReplicaSetTestContainer>
 {
     private const string DocumentKind = "workItem";
-    private readonly MongoDbContainer container = new MongoDbBuilder(Groundwork.TestInfrastructure.TestContainerImages.MongoDb)
-        .WithReplicaSet("groundwork-mutations-rs")
-        .Build();
-
-    public Task InitializeAsync() => container.StartAsync();
-
-    public Task DisposeAsync() => container.DisposeAsync().AsTask();
+    private readonly MongoDbContainer container = fixture.Container;
 
     [Fact]
     public void Mutation_mirror_fields_are_partitioned_by_storage_unit()
