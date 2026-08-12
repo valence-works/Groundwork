@@ -6,6 +6,7 @@ using Groundwork.Core.Validation;
 using Groundwork.Materialization;
 using Groundwork.Provider.Relational;
 using Groundwork.Documents.Scoping;
+using Groundwork.Relational.Documents;
 using Groundwork.SqlServer.Materialization;
 using Groundwork.SqlServer.PhysicalStorage;
 using Microsoft.Data.SqlClient;
@@ -31,17 +32,16 @@ public static class SqlServerDocumentStoreFactory
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentNullException.ThrowIfNull(manifest);
-        ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(access);
-        var target = PhysicalSchemaTargetCompiler.Compile(
+        var target = await RelationalPhysicalStoreFactory.AdmitPhysicalAsync(
             manifest,
             provider,
             SqlServerGroundworkCapabilities.PhysicalNames,
-            namePolicy);
-        var admission = await new SqlServerPhysicalSchemaExecutor(connectionString)
-            .InspectRuntimeAdmissionAsync(target, options, schemaAdmissionLog, cancellationToken);
-        admission.EnsureReady();
+            namePolicy,
+            new SqlServerPhysicalSchemaExecutor(connectionString),
+            options,
+            schemaAdmissionLog,
+            cancellationToken);
         return new SqlServerPhysicalDocumentStore(
             connectionString,
             manifest,

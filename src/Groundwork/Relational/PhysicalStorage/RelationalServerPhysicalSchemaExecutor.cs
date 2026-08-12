@@ -9,6 +9,7 @@ using Groundwork.Documents.Store;
 using Groundwork.Provider.Relational;
 using Groundwork.Relational.Documents;
 using Groundwork.Relational.Physicalization;
+using static Groundwork.Relational.PhysicalStorage.RelationalServerPhysicalSchemaDialect;
 
 namespace Groundwork.Relational.PhysicalStorage;
 
@@ -1084,22 +1085,6 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         return await command.ExecuteScalarAsync(ct) as string;
     }
 
-    private static DbCommand Command(DbConnection connection, DbTransaction? transaction, string sql)
-    {
-        var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        return command;
-    }
-
-    private static void Add(DbCommand command, string name, object? value)
-    {
-        var parameter = command.CreateParameter();
-        parameter.ParameterName = $"@{name}";
-        parameter.Value = value ?? DBNull.Value;
-        command.Parameters.Add(parameter);
-    }
-
     private static async Task ExecuteAsync(DbConnection connection, DbTransaction transaction, string sql, CancellationToken ct)
     {
         await using var command = Command(connection, transaction, sql);
@@ -1449,7 +1434,14 @@ public abstract class RelationalServerPhysicalSchemaDialect
         definition.Type is PortablePhysicalType.String or PortablePhysicalType.Json
             ? Collation(definition.Collation)
             : null;
-    public abstract string? NormalizeDefault(ProjectedColumnDefinition definition);
+    public virtual string? NormalizeDefault(ProjectedColumnDefinition definition) =>
+        definition.DefaultValue is null ? null : DefaultSql(definition);
+    /// <summary>Renders a declared default value as provider DDL. Only called when one is declared.</summary>
+    protected abstract string? DefaultSql(ProjectedColumnDefinition definition);
+    /// <summary>Renders a provider collation as the token DDL emits after <c>COLLATE</c>.</summary>
+    protected abstract string CollationToken(string value);
+    protected string CollationSql(ProjectedColumnDefinition definition) =>
+        ProjectedCollation(definition) is { } value ? $" COLLATE {CollationToken(value)}" : string.Empty;
     public virtual string? NormalizeComputedDefinition(string? definition) => definition?.Trim();
     public virtual bool IsProviderOwnedColumnCompatible(
         RelationalProviderOwnedPhysicalColumn expected,
@@ -1478,7 +1470,10 @@ public abstract class RelationalServerPhysicalSchemaDialect
     }
     public virtual string? HashOnlyIdentityPredicate(IReadOnlyList<RelationalPhysicalIdentityPredicatePart> parts) => null;
     public virtual bool IsUniqueConstraintException(DbException exception) => false;
-    public abstract string EnvelopeColumn(string name, RelationalEnvelopeColumnKind kind);
+    public virtual string EnvelopeColumn(string name, RelationalEnvelopeColumnKind kind) =>
+        $"{QuoteIdentifier(name)} {EnvelopeType(kind)}" +
+        (EnvelopeCollation(kind) is { } collation ? $" COLLATE {CollationToken(collation)}" : string.Empty) +
+        " NOT NULL";
     public virtual RelationalPhysicalIdentityLayout IdentityLayout(
         IReadOnlyList<RelationalPhysicalIdentityColumn> identityColumns,
         IReadOnlyList<string> logicalPrimaryKey)
@@ -1513,14 +1508,19 @@ public abstract class RelationalServerPhysicalSchemaDialect
         return $"{table}; CREATE INDEX {QuoteIdentifier(storage.MembershipKey.Name.Identifier)} ON " +
                $"{QuoteIdentifier(storage.Storage.Name.Identifier)} ({string.Join(", ", membershipColumns.Select(QuoteIdentifier))})";
     }
-    public abstract string ProjectedColumnSql(string column, ProjectedColumnDefinition definition);
+    public virtual string ProjectedColumnSql(string column, ProjectedColumnDefinition definition) =>
+        $"{QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} {(definition.IsNullable ? "NULL" : "NOT NULL")}" +
+        (DefaultSql(definition) is { } value ? $" DEFAULT {value}" : string.Empty);
     public abstract string AddColumnSql(string table, string column, ProjectedColumnDefinition definition);
     public abstract string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition);
     /// <summary>
     /// The index filter that realises <see cref="MissingValueBehavior.Excluded"/>, or <see langword="null"/>
     /// when <paramref name="excludedColumns"/> is empty and the index therefore keeps every row.
     /// </summary>
-    public abstract string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
+    public virtual string? IndexFilter(ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
+        excludedColumns.Count > 0
+            ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{QuoteIdentifier(column)} IS NOT NULL"))})"
+            : null;
     public abstract string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
     /// <summary>
     /// Drops an index so a widened definition can replace it. Only ever issued for an index this executor
@@ -1554,10 +1554,93 @@ public abstract class RelationalServerPhysicalSchemaDialect
         string owner,
         long fence,
         CancellationToken cancellationToken);
-    public abstract Task EnsureInfrastructureAsync(DbConnection connection, CancellationToken cancellationToken);
+    /// <summary>
+    /// Ensures and validates the shared physical-schema infrastructure tables inside one transaction.
+    /// Providers declare the tables through <see cref="InfrastructureTables"/> and may create
+    /// prerequisites (such as helper functions) through
+    /// <see cref="EnsureInfrastructurePrerequisitesAsync"/>.
+    /// </summary>
+    public virtual async Task EnsureInfrastructureAsync(DbConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await EnsureInfrastructurePrerequisitesAsync(connection, transaction, cancellationToken);
+        var tables = InfrastructureTables;
+        foreach (var table in tables)
+            await EnsureInfrastructureTableAsync(connection, transaction, table.Name, table.CreateSql, cancellationToken);
+        foreach (var table in tables)
+            await ValidateInfrastructureTableAsync(connection, transaction, table.Name, table.Columns, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
     public abstract Task<bool> TableExistsAsync(DbConnection connection, DbTransaction transaction, string table, CancellationToken cancellationToken);
     public abstract Task<IReadOnlyDictionary<string, RelationalPhysicalColumnMetadata>> ReadColumnsAsync(DbConnection connection, DbTransaction transaction, string table, CancellationToken cancellationToken);
-    public abstract Task<RelationalPhysicalIndexMetadata?> ReadIndexAsync(DbConnection connection, DbTransaction transaction, string table, string index, CancellationToken cancellationToken);
+    public virtual async Task<RelationalPhysicalIndexMetadata?> ReadIndexAsync(DbConnection connection, DbTransaction transaction, string table, string index, CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction, IndexMetadataSql);
+        Add(command, "table", table);
+        Add(command, "index", index);
+        bool? unique = null;
+        string? filter = null;
+        var columns = new List<RelationalPhysicalIndexColumnMetadata>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            unique ??= reader.GetBoolean(0);
+            filter ??= reader.IsDBNull(3) ? null : reader.GetString(3);
+            columns.Add(new RelationalPhysicalIndexColumnMetadata(
+                reader.GetString(1),
+                reader.GetBoolean(2) ? PhysicalSortDirection.Descending : PhysicalSortDirection.Ascending));
+        }
+        return unique is null ? null : new RelationalPhysicalIndexMetadata(unique.Value, columns, filter);
+    }
+
+    /// <summary>
+    /// The catalog query behind <see cref="ReadIndexAsync"/>. Selects, per key column in ordinal
+    /// order for the <c>@table</c>/<c>@index</c> parameters: uniqueness, column name, whether the
+    /// column sorts descending, and the index filter predicate (or null).
+    /// </summary>
+    protected abstract string IndexMetadataSql { get; }
+
+    /// <summary>One shared infrastructure table: its name, provider DDL, and exact expected columns.</summary>
+    protected sealed record InfrastructureTable(
+        string Name,
+        string CreateSql,
+        IReadOnlyList<InfrastructureColumn> Columns);
+
+    /// <summary>
+    /// The shared infrastructure tables in creation order. <see cref="EnsureInfrastructureAsync"/>
+    /// ensures every table before validating any of them.
+    /// </summary>
+    protected abstract IReadOnlyList<InfrastructureTable> InfrastructureTables { get; }
+
+    /// <summary>Creates provider prerequisites required before any infrastructure table exists.</summary>
+    protected virtual Task EnsureInfrastructurePrerequisitesAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <summary>Creates <paramref name="table"/> when absent; rejects a non-table object of that name.</summary>
+    protected abstract Task EnsureInfrastructureTableAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        string createSql,
+        CancellationToken cancellationToken);
+
+    protected internal static DbCommand Command(DbConnection connection, DbTransaction? transaction, string sql)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        return command;
+    }
+
+    protected internal static void Add(DbCommand command, string name, object? value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = $"@{name}";
+        parameter.Value = value ?? DBNull.Value;
+        command.Parameters.Add(parameter);
+    }
 
     protected async Task ValidateInfrastructureTableAsync(
         DbConnection connection,
