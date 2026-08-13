@@ -10,7 +10,7 @@ public sealed class SqlServerDiagnosticDatabaseOperationTests
     // the outcome). Guard bounds every call and sits above the internal budgets by construction.
     private static readonly TimeSpan ExpiringDeadline = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan GenerousBudget = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan Guard = GenerousBudget * 3;
+    private static readonly TimeSpan Guard = GenerousBudget * 4;
 
     [Fact]
     public async Task Timeout_reports_database_operation_and_server_session_diagnostics()

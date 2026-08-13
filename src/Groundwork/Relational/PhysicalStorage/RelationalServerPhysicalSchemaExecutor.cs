@@ -1341,14 +1341,13 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         // A session killed mid-operation surfaces as whatever the driver's protocol state permits
         // (SqlClient can throw NullReferenceException), so lock loss is classified by verifying
         // ownership rather than by exception type. Exempt are out-of-memory, which must never be
-        // swallowed, and the caller's own cancellation — but a cancellation that arrives after
-        // ownership is already known lost (callers link their token to OwnershipLost) still maps
-        // to the stable ownership-lost error.
-        private bool ClassifiesAsPotentialLockLoss(Exception exception, CancellationToken cancellationToken) =>
+        // swallowed, and cancellation requested through the caller's token. That token may be
+        // linked to OwnershipLost (PhysicalSchemaApplication links them), and lease loss observed
+        // as cancellation surfaces as OperationCanceledException by contract — the same way the
+        // application layer reports it when it checks the token between operations.
+        private static bool ClassifiesAsPotentialLockLoss(Exception exception, CancellationToken cancellationToken) =>
             exception is not OutOfMemoryException &&
-            (exception is not OperationCanceledException ||
-             !cancellationToken.IsCancellationRequested ||
-             ownershipLost.IsCancellationRequested);
+            (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested);
 
         private void MarkOwnershipLost()
         {
