@@ -15,6 +15,7 @@ using Groundwork.SqlServer.Documents;
 using Groundwork.SqlServer.PhysicalStorage;
 using Groundwork.TestInfrastructure;
 using Microsoft.Data.SqlClient;
+using System.Data;
 using System.Data.Common;
 using System.Text;
 using System.Xml.Linq;
@@ -788,6 +789,83 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             () => new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()),
             SqlServerPhysicalSchemaExecutor.LockSessionId,
             TerminateSessionAsync);
+
+    [Fact]
+    public Task Failed_release_alone_does_not_throw_because_closing_the_session_frees_the_lock() =>
+        RelationalPhysicalServerAssertions.FailedReleaseAloneDisposesQuietlyAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Failed_release_and_failed_session_close_report_the_possible_leak() =>
+        RelationalPhysicalServerAssertions.FailedReleaseAndSessionCloseReportThePossibleLeakAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Skipped_release_and_failed_session_close_report_the_possible_leak() =>
+        RelationalPhysicalServerAssertions.SkippedReleaseAndFailedSessionCloseReportThePossibleLeakAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Failed_session_close_alone_does_not_throw_because_the_lock_was_released() =>
+        RelationalPhysicalServerAssertions.FailedSessionCloseAloneDisposesQuietlyAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Disposal_report_carries_the_heartbeat_probe_failure() =>
+        RelationalPhysicalServerAssertions.DisposalReportCarriesTheHeartbeatProbeFailureAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Throwing_ownership_subscriber_cannot_break_lock_teardown() =>
+        RelationalPhysicalServerAssertions.ThrowingOwnershipSubscriberCannotBreakTeardownAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    private RelationalLockFailureHarness LockFailureHarness()
+    {
+        var switches = new RelationalLockFailureSwitches();
+        var dialect = new FailureInjectingSqlServerDialect(switches);
+        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            Pooling = false
+        }.ConnectionString;
+        return new RelationalLockFailureHarness(
+            switches,
+            () => new RelationalServerPhysicalSchemaExecutor(
+                () => new FaultInjectingConnection(new SqlConnection(connectionString), switches),
+                dialect));
+    }
+
+    private sealed class FailureInjectingSqlServerDialect(RelationalLockFailureSwitches switches)
+        : SqlServerPhysicalSchemaDialect
+    {
+        public override Task ReleaseApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken) =>
+            switches.FailReleases
+                ? throw new InvalidOperationException(RelationalLockFailureSwitches.ReleaseFailureMessage)
+                : base.ReleaseApplicationLockAsync(connection, resource, cancellationToken);
+
+        public override Task<bool> VerifyApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken) =>
+            switches.FailVerification
+                ? throw new InvalidOperationException(RelationalLockFailureSwitches.VerificationFailureMessage)
+                : base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
+    }
 
     [Fact]
     public async Task Exhausted_fence_fails_without_poisoning_the_session_lock()
