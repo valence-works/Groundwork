@@ -1,0 +1,64 @@
+name: Publish wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/wiki/**"
+      - ".github/workflows/publish-wiki.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # Serialize wiki publishes; never cancel one mid-push.
+  group: publish-wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Sync docs/wiki to the GitHub wiki
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Clone the wiki repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          wiki_dir="$RUNNER_TEMP/wiki"
+          if ! git clone \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" \
+              "$wiki_dir"; then
+            echo "::error::Could not clone ${GITHUB_REPOSITORY}.wiki.git. A GitHub wiki repository" \
+              "does not exist until the Wiki feature is enabled and a first page has been created." \
+              "One-time setup: enable 'Wikis' under Settings -> General -> Features, open the Wiki tab," \
+              "and create any initial page (its content will be overwritten by this workflow). Then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Replace wiki contents with docs/wiki
+        run: |
+          set -euo pipefail
+          wiki_dir="$RUNNER_TEMP/wiki"
+          rsync --archive --delete --exclude='.git/' docs/wiki/ "$wiki_dir/"
+
+      - name: Commit and push when changed
+        run: |
+          set -euo pipefail
+          wiki_dir="$RUNNER_TEMP/wiki"
+          cd "$wiki_dir"
+          git add --all
+          if git diff --cached --quiet; then
+            echo "Wiki already matches docs/wiki at ${GITHUB_SHA}; nothing to publish."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Publish wiki from ${GITHUB_REPOSITORY}@${GITHUB_SHA}"
+          git push
