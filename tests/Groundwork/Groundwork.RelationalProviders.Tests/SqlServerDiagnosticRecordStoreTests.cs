@@ -223,18 +223,8 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
     public IDiagnosticRecordStore OpenStore(DiagnosticRecordStreamDefinition definition) =>
         new SqlServerDiagnosticRecordStore(sessions, definition, timeProvider, InterceptAsync);
 
-    // Independent stores use their own session factory but share the fixture's interception
-    // pipeline so conformance tests can observe their execution points.
     public IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) =>
-        new SqlServerDiagnosticRecordStore(
-            RelationalSessionFactory.Concurrent(() => new SqlConnection(ConnectionString)),
-            definition,
-            timeProvider,
-            InterceptAsync,
-            (snapshot, cancellationToken) => SqlServerDiagnosticRecordMaterializer.AdmitAsync(
-                ConnectionString,
-                snapshot,
-                cancellationToken));
+        new SqlServerDiagnosticRecordStore(ConnectionString, definition, timeProvider, InterceptAsync);
 
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {

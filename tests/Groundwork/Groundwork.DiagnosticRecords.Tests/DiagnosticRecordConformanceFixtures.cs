@@ -6,6 +6,12 @@ namespace Groundwork.DiagnosticRecords.Tests;
 public interface IDiagnosticRecordStoreConformanceFixture
 {
     IDiagnosticRecordStore OpenStore(DiagnosticRecordStreamDefinition definition);
+
+    /// <summary>
+    /// Opens a store with its own sessions and connection pool. Implementations must route the
+    /// returned store through the same interception pipeline as <see cref="OpenStore"/>: server
+    /// conformance tests observe an independent store's execution points to synchronize races.
+    /// </summary>
     IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) => OpenStore(definition);
     void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor);
     DateTimeOffset GetUtcNow();

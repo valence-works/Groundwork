@@ -14,11 +14,20 @@ public sealed class PostgreSqlDiagnosticRecordStore : IDiagnosticRecordStore
         string connectionString,
         DiagnosticRecordStreamDefinition definition,
         TimeProvider? timeProvider = null)
+        : this(connectionString, definition, timeProvider, interceptAsync: null)
+    {
+    }
+
+    internal PostgreSqlDiagnosticRecordStore(
+        string connectionString,
+        DiagnosticRecordStreamDefinition definition,
+        TimeProvider? timeProvider,
+        Func<RelationalDiagnosticRecordExecutionPoint, CancellationToken, ValueTask>? interceptAsync)
         : this(
             RelationalSessionFactory.Concurrent(() => new NpgsqlConnection(connectionString)),
             definition,
             timeProvider,
-            null,
+            interceptAsync,
             (snapshot, cancellationToken) => PostgreSqlDiagnosticRecordMaterializer.AdmitAsync(
                 connectionString,
                 snapshot,
