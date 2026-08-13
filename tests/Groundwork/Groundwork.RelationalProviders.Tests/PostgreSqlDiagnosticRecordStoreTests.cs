@@ -171,7 +171,7 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
         new PostgreSqlDiagnosticRecordStore(sessions, definition, timeProvider, InterceptAsync);
 
     public IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) =>
-        new PostgreSqlDiagnosticRecordStore(ConnectionString, definition, timeProvider);
+        new PostgreSqlDiagnosticRecordStore(ConnectionString, definition, timeProvider, InterceptAsync);
 
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {

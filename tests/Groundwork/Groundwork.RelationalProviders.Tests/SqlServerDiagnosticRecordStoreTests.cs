@@ -224,7 +224,7 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
         new SqlServerDiagnosticRecordStore(sessions, definition, timeProvider, InterceptAsync);
 
     public IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) =>
-        new SqlServerDiagnosticRecordStore(ConnectionString, definition, timeProvider);
+        new SqlServerDiagnosticRecordStore(ConnectionString, definition, timeProvider, InterceptAsync);
 
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {
