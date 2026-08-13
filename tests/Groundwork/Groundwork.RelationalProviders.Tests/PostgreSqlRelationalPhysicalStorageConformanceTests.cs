@@ -644,6 +644,13 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             LockFailureHarness);
 
     [Fact]
+    public Task Failed_backend_close_alone_does_not_throw_because_the_lock_was_released() =>
+        RelationalPhysicalServerAssertions.FailedSessionCloseAloneDisposesQuietlyAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
     public Task Disposal_report_carries_the_heartbeat_probe_failure() =>
         RelationalPhysicalServerAssertions.DisposalReportCarriesTheHeartbeatProbeFailureAsync(
             PostgreSqlGroundworkCapabilities.Provider,

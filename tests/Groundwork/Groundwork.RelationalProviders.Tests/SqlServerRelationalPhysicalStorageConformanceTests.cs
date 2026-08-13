@@ -805,6 +805,13 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             LockFailureHarness);
 
     [Fact]
+    public Task Failed_session_close_alone_does_not_throw_because_the_lock_was_released() =>
+        RelationalPhysicalServerAssertions.FailedSessionCloseAloneDisposesQuietlyAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
     public Task Disposal_report_carries_the_heartbeat_probe_failure() =>
         RelationalPhysicalServerAssertions.DisposalReportCarriesTheHeartbeatProbeFailureAsync(
             SqlServerGroundworkCapabilities.Provider,

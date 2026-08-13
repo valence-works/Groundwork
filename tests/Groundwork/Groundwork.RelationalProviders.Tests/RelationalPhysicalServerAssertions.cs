@@ -466,6 +466,25 @@ internal static class RelationalPhysicalServerAssertions
         Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
     }
 
+    public static async Task FailedSessionCloseAloneDisposesQuietlyAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<RelationalLockFailureHarness> createHarness)
+    {
+        var model = LockFailureModel(provider, normalizer);
+        var harness = createHarness();
+        var executor = harness.CreateExecutor(true);
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+
+        // The release succeeded, so the lock is already gone and a failing close cannot have leaked
+        // it. Only the pair of failures together justifies a leak report.
+        await applicationLock.DisposeAsync();
+
+        await using var successor = await executor.AcquireApplicationLockAsync(
+            model.Target.Identity,
+            CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     public static async Task DisposalReportCarriesTheHeartbeatProbeFailureAsync(
         ProviderIdentity provider,
         IProviderPhysicalNameNormalizer normalizer,
