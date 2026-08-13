@@ -8,9 +8,8 @@ namespace Groundwork.SupportTickets;
 
 /// <summary>
 /// Declares the support-ticket storage units through the current physical-storage surface:
-/// logical indexes, bounded query declarations, and explicit physical-entity-table definitions
-/// with bounded projected columns. Every repository query executes one of the bounded
-/// declarations below; nothing queries outside them.
+/// logical indexes, bounded query declarations, and default physical-form resolution. Every
+/// repository query executes one of the bounded declarations below; nothing queries outside them.
 /// </summary>
 public static class SupportTicketManifest
 {
@@ -36,8 +35,10 @@ public static class SupportTicketManifest
     public const string ListCommentsByTicket = "list-comments-by-ticket";
     public const string ListCommentsByAuthor = "list-comments-by-author";
 
-    // Maximum UTF-16 code units per keyword key column, so providers with sized index
-    // keys (SQL Server) can bound the synthesized physical indexes.
+    // Maximum UTF-16 code units per keyword key column, so providers with sized index keys
+    // (SQL Server) can bound the synthesized physical indexes: the widest key — one keyword
+    // column plus the provider-applied identity tie-break column — stays inside the provider's
+    // 1700-byte budget: 128 * 2 + 1350 (id_comparison_key) = 1606 bytes.
     public const int KeywordKeyLength = 128;
 
     // Stable serialized paths addressed by runtime DocumentQuery comparisons.
@@ -47,13 +48,6 @@ public static class SupportTicketManifest
     public const string AssigneeIdPath = "assigneeId";
     public const string PriorityPath = "priority";
     public const string CommentAuthorIdPath = "authorId";
-
-    // Keyword columns are bounded to 128 UTF-16 code units so the widest SQL Server index key —
-    // one keyword column plus the provider-applied identity tie-break column — stays inside the
-    // provider's 1700-byte key budget: 128 * 2 + 1350 (id_comparison_key) = 1606 bytes.
-    private const int KeywordColumnLength = 128;
-
-    private static readonly DocumentEnvelopeDefinition Envelope = new();
 
     public static StorageManifest Create() =>
         new(
@@ -112,53 +106,9 @@ public static class SupportTicketManifest
             SerializationPolicy.Json(),
             new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
-                PhysicalStoragePolicy.Explicit(EntityTable(documentKind, logicalIndexes)),
+                PhysicalStoragePolicy.Default(),
                 logicalIndexes,
                 boundedQueries));
-
-    /// <summary>
-    /// Builds the explicit physical-entity-table definition for one storage unit: every keyword
-    /// index path becomes a bounded String projected column, and every logical index becomes the
-    /// physical index the default policy would synthesize — with the same names, missing-value
-    /// behavior, and identity tie-break column — so query identities keep working unchanged.
-    /// </summary>
-    private static PhysicalTableDefinition EntityTable(
-        string documentKind,
-        IReadOnlyList<LogicalIndexDeclaration> logicalIndexes) =>
-        PhysicalTableDefinition.PhysicalEntityTable(
-            documentKind,
-            logicalIndexes
-                .SelectMany(index => index.Fields)
-                .Select(field => field.Path)
-                .Distinct(StringComparer.Ordinal)
-                .Select(path => new ProjectedColumnDefinition(
-                    path,
-                    path,
-                    PortablePhysicalType.String,
-                    Length: KeywordColumnLength))
-                .ToArray(),
-            Envelope,
-            logicalIndexes.Select(PhysicalIndex).ToArray());
-
-    private static PhysicalIndexDefinition PhysicalIndex(LogicalIndexDeclaration index)
-    {
-        var columns = new List<PhysicalIndexColumnDefinition>
-        {
-            new(index.Fields.Single().Path, 0)
-        };
-
-        // Non-unique indexes back offset-paged list queries, which require the provider-applied
-        // document-identity tie-break as the trailing key column. The unique index backs only an
-        // unpaged point lookup and needs no tie-break.
-        if (!index.IsUnique)
-            columns.Add(new PhysicalIndexColumnDefinition(Envelope.IdComparisonKeyColumn, 1));
-
-        return new PhysicalIndexDefinition(
-            index.Identity,
-            columns,
-            index.IsUnique,
-            missingValueBehavior: index.MissingValueBehavior);
-    }
 
     private static LogicalIndexDeclaration Keyword(string identity, string path, bool isUnique = false) =>
         new(

@@ -46,10 +46,24 @@ fingerprint serializes the length only when declared, so existing fingerprints a
 - A declared length is at least 1.
 - Field-level length on a non-`String`/`Keyword` field is rejected, as is a declaration-level
   default on an index with no `String`/`Keyword` field.
-- All scale-bearing demand for one stable path within a storage unit must agree on a single
-  declared length; indexes that leave the length undeclared inherit the declared one.
+- Every string-kind declaration of one stable path within a storage unit must agree on a single
+  declared length — or all leave it undeclared. An omitted length is an unbounded contract, not a
+  missing opinion: letting a declared length win would silently narrow the shared projected column
+  and reject writes (GW-PHYSICAL-037) the unbounded declaration permits. Consistency is enforced
+  only where default resolution synthesizes that column: an explicit policy supplies its physical
+  columns directly, and declarations for paths nothing demands synthesize nothing, so both stay
+  inert. For a synthesized path every declaration site participates, including indexes no
+  scale-bearing query references.
 
-### 4. Undeclared string demand stays unbounded
+### 4. Residual predicate fields are declaration sites too
+
+`BoundedQueryResidualPredicateField` gains the same optional `Length`. Residuals already declare
+value kinds that must agree unit-wide (GW-PHYSICAL-036), so they are typed declaration sites, not
+mere query-time filters: a residual sharing a path with a bounded index must declare the matching
+length, and a residual-only string path may declare its own bound. Residual lengths obey the same
+GW-PHYSICAL-039 validation and are fingerprint-serialized only when declared.
+
+### 5. Undeclared string demand stays unbounded
 
 Unlike decimal precision, an absent length is not an error: unbounded string projections remain
 valid portable metadata, and providers without sized index keys keep serving them. Providers that
@@ -62,12 +76,10 @@ this ADR adds a way to state the bound, not a synthesized default.
   physical table definition for every string scale-bearing path that must run on SQL Server.
 - Demand fingerprints are unchanged for every existing manifest; a manifest that adopts a declared
   length changes its fingerprint, which is correct — the physical schema now depends on it.
-- The declaration surface covers index fields only. A string path demanded solely by a residual
-  predicate field still has no way to declare its length (residual projections are not index key
-  columns, so no provider requires one); extending `BoundedQueryResidualPredicateField` the same
-  way is a follow-up if that demand materializes.
 - `ScaleBearingPathDemand` gains one positional parameter after `ValueKind` — a source-breaking
   change for external constructors of that record (none known; elsa-foundation does not construct
-  it). `IndexField` and `LogicalIndexDeclaration` gain only trailing optional parameters.
-- The support-ticket sample declares `length: 128` on its keyword indexes, which is what lets its
-  SQL Server provider test materialize physical routes.
+  it). `IndexField`, `LogicalIndexDeclaration`, and `BoundedQueryResidualPredicateField` gain only
+  trailing optional parameters.
+- The support-ticket sample declares `length: 128` on its keyword indexes and returns to plain
+  default resolution — the declared bound is what lets its SQL Server provider test materialize
+  physical routes without an explicit physical table definition.

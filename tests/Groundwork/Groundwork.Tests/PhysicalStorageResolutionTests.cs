@@ -368,6 +368,216 @@ public sealed class PhysicalStorageResolutionTests
         var projected = Assert.Single(definition.Definition.ProjectedColumns);
         Assert.Equal("category", projected.Path);
         Assert.Equal(PortablePhysicalType.String, projected.Type);
+        Assert.Null(projected.Length);
+    }
+
+    [Fact]
+    public void ResidualPredicateOnABoundedIndexPathMustDeclareTheMatchingLength()
+    {
+        var result = ResolveBoundedCustomerWithStatusResidual(residualLength: null);
+
+        // A residual predicate is a typed declaration site like an index field: leaving the path
+        // unbounded while an index bounds it is the same silent-narrowing conflict as between two
+        // indexes, so it is rejected rather than inheriting the bound.
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-039" &&
+            diagnostic.Message.Contains("customerId", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ResidualPredicateWithTheMatchingLengthSharesTheBoundedColumn()
+    {
+        var result = ResolveBoundedCustomerWithStatusResidual(residualLength: 64);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var definition = Assert.Single(result.Definitions).Definition;
+        Assert.Collection(
+            definition.ProjectedColumns,
+            column =>
+            {
+                Assert.Equal("customerId", column.Path);
+                Assert.Equal(64, column.Length);
+            },
+            column =>
+            {
+                Assert.Equal("status", column.Path);
+                Assert.Null(column.Length);
+            });
+    }
+
+    private static PhysicalStorageResolutionResult ResolveBoundedCustomerWithStatusResidual(int? residualLength)
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-status",
+                    [new IndexField("status")],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing),
+                new BoundedQueryDeclaration(
+                    "list-by-status",
+                    "by-status",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing,
+                    residualPredicateFields:
+                    [
+                        new BoundedQueryResidualPredicateField(
+                            "customerId",
+                            IndexValueKind.Keyword,
+                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                            length: residualLength)
+                    ])
+            ]);
+
+        return PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+    }
+
+    [Fact]
+    public void UnqueriedConflictingLengthsStayInertWithoutScaleBearingDemand()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-customer-unbounded",
+                    [new IndexField("customerId")],
+                    IndexValueKind.Keyword,
+                    false)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        // Nothing demands the path, so no shared projected column is synthesized and the conflicting
+        // declarations have no physical consequence to protect against.
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        Assert.Empty(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+    }
+
+    [Fact]
+    public void ExplicitPolicyUnitIgnoresInertDeclaredLengthConflicts()
+    {
+        // The explicit definition supplies the physical columns, so conflicting declared lengths on
+        // the demanded path synthesize nothing and must not block resolution.
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "configurationDocument",
+            [new ProjectedColumnDefinition("customerId", "customerId", PortablePhysicalType.String, Length: 100)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    "by-customer",
+                    [
+                        new PhysicalIndexColumnDefinition("storage_scope", 0),
+                        new PhysicalIndexColumnDefinition("customerId", 1),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 2)
+                    ])
+            ]);
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(definition),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-customer-unbounded",
+                    [new IndexField("customerId")],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Equal(100, projected.Length);
+    }
+
+    [Fact]
+    public void UnqueriedIndexDeclarationsParticipateInPathLengthConflicts()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-customer-unqueried",
+                    [new IndexField("customerId")],
+                    IndexValueKind.Keyword,
+                    false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        // The unqueried index synthesizes nothing physical, but its unbounded declaration is still a
+        // contract for the path; the queried bound may not silently narrow it.
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-039" &&
+            diagnostic.Message.Contains("customerId", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -718,7 +928,7 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
-    public void IndexLeavingKeyLengthUndeclaredInheritsTheDeclaredOne()
+    public void IndexLeavingKeyLengthUndeclaredConflictsWithTheDeclaredOne()
     {
         var physicalStorage = new StorageUnitPhysicalStorage(
             StorageUnitProvisioningMode.Declared,
@@ -748,9 +958,13 @@ public sealed class PhysicalStorageResolutionTests
             PhysicalNamePolicy.Identity,
             ProviderPhysicalNameNormalizer.Identity);
 
-        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
-        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
-        Assert.Equal(64, projected.Length);
+        // An omitted length is an unbounded contract: letting the declared length win would silently
+        // narrow the shared projected column and reject writes the unbounded declaration permits.
+        Assert.False(result.IsValid);
+        Assert.Empty(result.Definitions);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-PHYSICAL-039" &&
+            diagnostic.Message.Contains("value", StringComparison.Ordinal));
     }
 
     private static PhysicalStorageResolutionResult ResolveStringDemand(LogicalIndexDeclaration index)
