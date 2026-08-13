@@ -1157,6 +1157,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         private readonly SemaphoreSlim sessionGate = new(1, 1);
         private readonly CancellationTokenSource ownershipLost = new();
         private readonly Task heartbeat;
+        private Exception? heartbeatFailure;
         private int disposed;
 
         public ApplicationLock(
@@ -1238,13 +1239,20 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         }
 
         /// <summary>
-        /// Best-effort teardown. Disposing a lock whose server session already died stays
-        /// non-throwing: the server released the session-scoped lock with the session, and a throw
-        /// here would mask the primary failure in an <c>await using</c> block. Any teardown that
-        /// cannot prove a clean release still signals <see cref="OwnershipLost"/>, and failures
-        /// that can leave the server-side lock held (a release failure on a still-open session, or
-        /// a connection that fails to dispose) surface as an <see cref="AggregateException"/> after
-        /// every cleanup step has run.
+        /// Best-effort teardown. Any step that cannot prove a clean release signals
+        /// <see cref="OwnershipLost"/>. Only failures that can leave the server-side lock held (a
+        /// release failure on a still-open session, or a connection that fails to dispose) throw an
+        /// <see cref="AggregateException"/>, and only after every cleanup step has run; a lock whose
+        /// server session already died disposes quietly, because the server released the
+        /// session-scoped lock along with the session.
+        /// <para>
+        /// Throwing from disposal does mask an exception already propagating out of an
+        /// <c>await using</c> block. That is accepted deliberately: the alternative used by
+        /// <c>AcquireApplicationLockAsync</c>, attaching via <c>RelationalCleanupFailures</c>, needs
+        /// the in-flight exception, which disposal cannot see. A silently leaked lock blocks the
+        /// next acquirer with no diagnostic at all, which is the worse outcome. Keeping the throw
+        /// narrow to genuine-leak paths is what bounds the masking.
+        /// </para>
         /// </summary>
         public async ValueTask DisposeAsync()
         {
@@ -1261,8 +1269,11 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 }
                 catch (Exception failure)
                 {
+                    // Defensive: HeartbeatAsync retains its own failures rather than faulting.
+                    // Treat an unexpected fault the same way, as context for a leak and never a
+                    // throw on its own.
                     SignalOwnershipLost();
-                    cleanupFailures.Add(failure);
+                    heartbeatFailure ??= failure;
                 }
 
                 await sessionGate.WaitAsync();
@@ -1304,6 +1315,11 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             }
             if (cleanupFailures.Count > 0)
             {
+                // The heartbeat's own failure explains why the session died, so it rides along as
+                // context. It never makes disposal throw on its own: a session that died released
+                // its session-scoped lock with it.
+                if (heartbeatFailure is { } heartbeatContext)
+                    cleanupFailures.Add(heartbeatContext);
                 throw new AggregateException(
                     $"Physical-schema application-lock disposal for target '{Target}' could not guarantee the server-side lock was released.",
                     cleanupFailures);
@@ -1363,8 +1379,12 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             catch (OperationCanceledException) when (heartbeatStop.IsCancellationRequested)
             {
             }
-            catch
+            catch (Exception failure)
             {
+                // Retained rather than rethrown: faulting this task would surface the failure as an
+                // unobserved exception long before the disposer awaits it. Disposal reads it to
+                // explain why ownership was lost.
+                heartbeatFailure = failure;
                 SignalOwnershipLost();
             }
         }
@@ -1391,15 +1411,26 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         }
 
         /// <summary>
-        /// Cancels ownership without the disposed guard. Only safe from code that provably runs
-        /// before <see cref="ownershipLost"/> is disposed: the winning disposer's own body and the
-        /// heartbeat, which that disposer awaits first. Everything else uses
-        /// <see cref="MarkOwnershipLost"/> so a racing caller can never cancel a disposed source.
+        /// Cancels ownership without the disposed guard, for callers that provably run before
+        /// <see cref="ownershipLost"/> is disposed: the winning disposer's own body and the
+        /// heartbeat it awaits first. <see cref="MarkOwnershipLost"/> keeps the guard for everyone
+        /// else, but that check cannot be atomic with the cancel, so a caller racing disposal can
+        /// still reach a disposed source. That is absorbed here rather than thrown, because
+        /// <see cref="OnConnectionStateChanged"/> runs on a connection event thread where nothing
+        /// would catch it.
         /// </summary>
         private void SignalOwnershipLost()
         {
-            if (!ownershipLost.IsCancellationRequested)
+            if (ownershipLost.IsCancellationRequested)
+                return;
+            try
+            {
                 ownershipLost.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Disposal won the race and already tore this lock down; ownership is moot.
+            }
         }
 
         private InvalidOperationException OwnershipLostException(

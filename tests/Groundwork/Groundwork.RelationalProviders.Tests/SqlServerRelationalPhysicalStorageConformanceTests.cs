@@ -821,11 +821,57 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
+    [Fact]
+    public async Task Disposal_failure_carries_the_heartbeat_failure_that_explains_the_lost_session()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: true,
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
+        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            Pooling = false
+        }.ConnectionString;
+        var dialect = new ReleaseFailingSchemaDialect();
+        var executor = new RelationalServerPhysicalSchemaExecutor(
+            () => new SqlConnection(connectionString),
+            dialect);
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+
+        // Fail verification and wait for the heartbeat to observe it, so the lost-ownership signal
+        // is established before disposal rather than raced against it.
+        dialect.FailVerification = true;
+        await WaitForOwnershipLossAsync(applicationLock);
+        dialect.FailReleases = true;
+
+        var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
+
+        Assert.Contains(
+            exception.InnerExceptions,
+            inner => inner.Message == ReleaseFailingSchemaDialect.FailureMessage);
+        Assert.Contains(
+            exception.InnerExceptions,
+            inner => inner.Message == ReleaseFailingSchemaDialect.VerificationFailureMessage);
+    }
+
+    private static async Task WaitForOwnershipLossAsync(IPhysicalSchemaApplicationLock applicationLock)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (!applicationLock.OwnershipLost.IsCancellationRequested)
+        {
+            Assert.True(DateTimeOffset.UtcNow < deadline, "The heartbeat never reported lost ownership.");
+            await Task.Delay(25);
+        }
+    }
+
     private sealed class ReleaseFailingSchemaDialect : SqlServerPhysicalSchemaDialect
     {
         public const string FailureMessage = "Simulated application-lock release failure.";
+        public const string VerificationFailureMessage = "Simulated application-lock verification failure.";
 
         public bool FailReleases { get; set; }
+        public bool FailVerification { get; set; }
 
         public override Task ReleaseApplicationLockAsync(
             DbConnection connection,
@@ -834,6 +880,14 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             FailReleases
                 ? throw new InvalidOperationException(FailureMessage)
                 : base.ReleaseApplicationLockAsync(connection, resource, cancellationToken);
+
+        public override Task<bool> VerifyApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken) =>
+            FailVerification
+                ? throw new InvalidOperationException(VerificationFailureMessage)
+                : base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
     }
 
     [Fact]
