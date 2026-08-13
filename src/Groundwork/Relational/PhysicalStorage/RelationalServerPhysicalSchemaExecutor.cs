@@ -1149,6 +1149,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     {
         private static readonly TimeSpan OwnershipVerificationTimeout = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+        private const int MaxConsecutiveHeartbeatVerificationFailures = 3;
         private readonly DbConnection connection;
         private readonly string resource;
         private readonly CancellationTokenSource heartbeatStop = new();
@@ -1290,6 +1291,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
 
         private async Task HeartbeatAsync()
         {
+            var consecutiveVerificationFailures = 0;
             try
             {
                 while (!heartbeatStop.IsCancellationRequested)
@@ -1298,11 +1300,32 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                     await sessionGate.WaitAsync(heartbeatStop.Token);
                     try
                     {
-                        if (!await dialect.VerifyApplicationLockAsync(connection, resource, heartbeatStop.Token))
+                        bool isOwned;
+                        try
+                        {
+                            isOwned = await dialect.VerifyApplicationLockAsync(connection, resource, heartbeatStop.Token);
+                        }
+                        catch (Exception exception) when (
+                            exception is DbException or InvalidOperationException or OperationCanceledException &&
+                            !heartbeatStop.IsCancellationRequested)
+                        {
+                            // A failed probe is inconclusive: the server-side lock may still be held. Only a
+                            // bounded run of consecutive failures forfeits ownership; a definitive "not owned"
+                            // verification below loses it immediately.
+                            if (++consecutiveVerificationFailures >= MaxConsecutiveHeartbeatVerificationFailures)
+                            {
+                                MarkOwnershipLost();
+                                return;
+                            }
+                            continue;
+                        }
+
+                        if (!isOwned)
                         {
                             MarkOwnershipLost();
                             return;
                         }
+                        consecutiveVerificationFailures = 0;
                     }
                     finally
                     {
