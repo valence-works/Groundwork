@@ -488,9 +488,24 @@ public sealed class PhysicalStorageResolutionTests
     [Fact]
     public void ExplicitPolicyUnitIgnoresInertDeclaredLengthConflicts()
     {
+        // The explicit definition supplies the physical columns, so conflicting declared lengths on
+        // the demanded path synthesize nothing and must not block resolution.
+        var definition = PhysicalTableDefinition.PhysicalEntityTable(
+            "configurationDocument",
+            [new ProjectedColumnDefinition("customerId", "customerId", PortablePhysicalType.String, Length: 100)],
+            indexes:
+            [
+                new PhysicalIndexDefinition(
+                    "by-customer",
+                    [
+                        new PhysicalIndexColumnDefinition("storage_scope", 0),
+                        new PhysicalIndexColumnDefinition("customerId", 1),
+                        new PhysicalIndexColumnDefinition("id_comparison_key", 2)
+                    ])
+            ]);
         var physicalStorage = new StorageUnitPhysicalStorage(
             StorageUnitProvisioningMode.Declared,
-            PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.DedicatedDocumentTable("configurationDocument")),
+            PhysicalStoragePolicy.Explicit(definition),
             [
                 new LogicalIndexDeclaration(
                     "by-customer",
@@ -502,6 +517,15 @@ public sealed class PhysicalStorageResolutionTests
                     [new IndexField("customerId")],
                     IndexValueKind.Keyword,
                     false)
+            ],
+            [
+                new BoundedQueryDeclaration(
+                    "list-by-customer",
+                    "by-customer",
+                    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                    QuerySortSupport.None,
+                    QueryPagingSupport.Offset,
+                    BoundedQueryExecutionClass.ScaleBearing)
             ]);
 
         var result = PhysicalStorageResolver.Resolve(
@@ -510,6 +534,8 @@ public sealed class PhysicalStorageResolutionTests
             ProviderPhysicalNameNormalizer.Identity);
 
         Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        var projected = Assert.Single(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+        Assert.Equal(100, projected.Length);
     }
 
     [Fact]

@@ -229,10 +229,14 @@ public static class PhysicalStorageResolver
 
         // An omitted length is an unbounded contract, not a missing opinion: mixing it with a declared
         // length for the same path would silently narrow the shared projected column and reject writes
-        // the unbounded declaration permits. Consistency is enforced only for paths scale-bearing
-        // demand actually projects — declarations nothing demands synthesize nothing and stay inert —
-        // but for a demanded path every typed declaration site participates: string-kind fields of
-        // all logical indexes, queried or not, and scale-bearing residual predicates.
+        // the unbounded declaration permits. Consistency is enforced only where default resolution
+        // synthesizes that column — an explicit policy supplies its physical columns directly, and
+        // declarations for paths nothing demands synthesize nothing — but for a synthesized path every
+        // typed declaration site participates: string-kind fields of all logical indexes, queried or
+        // not, and scale-bearing residual predicates.
+        if (storage.Policy is not PhysicalStoragePolicy.DefaultPolicy)
+            return SortDemand(demand);
+
         var scaleBearingResiduals = storage.BoundedQueries
             .Where(query => query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing)
             .SelectMany(query => query.ResidualPredicateFields)
@@ -289,13 +293,16 @@ public static class PhysicalStorageResolver
                 $"storageUnits.{unitIdentity.Value}.physicalStorage.logicalIndexes"));
         }
 
-        return demand
+        return SortDemand(demand);
+    }
+
+    private static IReadOnlyList<ScaleBearingPathDemand> SortDemand(List<ScaleBearingPathDemand> demand) =>
+        demand
             .Distinct()
             .OrderBy(x => x.QueryIdentity, StringComparer.Ordinal)
             .ThenBy(x => x.IndexIdentity, StringComparer.Ordinal)
             .ThenBy(x => x.Path, StringComparer.Ordinal)
             .ToArray();
-    }
 
     private static PhysicalTableDefinition? ResolveDefinition(
         StorageUnit unit,

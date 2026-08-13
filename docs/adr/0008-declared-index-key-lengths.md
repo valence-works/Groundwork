@@ -50,9 +50,10 @@ fingerprint serializes the length only when declared, so existing fingerprints a
   declared length — or all leave it undeclared. An omitted length is an unbounded contract, not a
   missing opinion: letting a declared length win would silently narrow the shared projected column
   and reject writes (GW-PHYSICAL-037) the unbounded declaration permits. Consistency is enforced
-  for paths scale-bearing demand actually projects — declarations nothing demands synthesize
-  nothing and stay inert — but for a demanded path every declaration site participates, including
-  indexes no scale-bearing query references.
+  only where default resolution synthesizes that column: an explicit policy supplies its physical
+  columns directly, and declarations for paths nothing demands synthesize nothing, so both stay
+  inert. For a synthesized path every declaration site participates, including indexes no
+  scale-bearing query references.
 
 ### 4. Residual predicate fields are declaration sites too
 
