@@ -1,3 +1,6 @@
+using System.Data;
+using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
@@ -417,6 +420,123 @@ internal static class RelationalPhysicalServerAssertions
             CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
+    public static async Task FailedReleaseAloneDisposesQuietlyAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<RelationalLockFailureHarness> createHarness)
+    {
+        var model = LockFailureModel(provider, normalizer);
+        var harness = createHarness();
+        var executor = harness.CreateExecutor(false);
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+
+        // The lock is session-scoped, so closing the connection ends the session and the server drops
+        // the lock even though the explicit release failed. Nothing leaked, so nothing throws.
+        harness.Switches.FailReleases = true;
+        await applicationLock.DisposeAsync();
+
+        Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
+        await applicationLock.DisposeAsync();
+
+        harness.Switches.FailReleases = false;
+        await using var successor = await executor.AcquireApplicationLockAsync(
+            model.Target.Identity,
+            CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    public static async Task FailedReleaseAndSessionCloseReportThePossibleLeakAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<RelationalLockFailureHarness> createHarness)
+    {
+        var model = LockFailureModel(provider, normalizer);
+        var harness = createHarness();
+        var executor = harness.CreateExecutor(true);
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+
+        harness.Switches.FailReleases = true;
+        var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
+
+        Assert.Contains(
+            exception.InnerExceptions,
+            inner => inner.Message == RelationalLockFailureSwitches.ReleaseFailureMessage);
+        Assert.Contains(
+            exception.InnerExceptions,
+            inner => inner.Message == RelationalLockFailureSwitches.SessionCloseFailureMessage);
+        Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
+    }
+
+    public static async Task DisposalReportCarriesTheHeartbeatProbeFailureAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<RelationalLockFailureHarness> createHarness)
+    {
+        var model = LockFailureModel(provider, normalizer);
+        var harness = createHarness();
+        var executor = harness.CreateExecutor(true);
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+        // Nothing else may have forfeited the lease yet, or the wait below would prove nothing.
+        Assert.False(applicationLock.OwnershipLost.IsCancellationRequested);
+
+        // The heartbeat tolerates a bounded run of failed probes, so waiting for it to forfeit the
+        // lease is what proves it recorded the probe failure this assertion is about.
+        harness.Switches.FailVerification = true;
+        await WaitForOwnershipLossAsync(applicationLock);
+        harness.Switches.FailReleases = true;
+
+        var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
+
+        Assert.Contains(
+            exception.InnerExceptions,
+            inner => inner.Message == RelationalLockFailureSwitches.VerificationFailureMessage);
+    }
+
+    public static async Task ThrowingOwnershipSubscriberCannotBreakTeardownAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<RelationalLockFailureHarness> createHarness)
+    {
+        var model = LockFailureModel(provider, normalizer);
+        var harness = createHarness();
+        var executor = harness.CreateExecutor(false);
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+        applicationLock.OwnershipLost.Register(
+            () => throw new InvalidOperationException("Subscriber cancellation callback failure."));
+
+        // Failing the release makes teardown forfeit the lease, which runs the callback above inline.
+        // Cancel surfaces that as an AggregateException, which must not escape disposal.
+        harness.Switches.FailReleases = true;
+        await applicationLock.DisposeAsync();
+
+        Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
+        harness.Switches.FailReleases = false;
+        await using var successor = await executor.AcquireApplicationLockAsync(
+            model.Target.Identity,
+            CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    private static (Groundwork.Core.Manifests.StorageManifest Manifest, PhysicalSchemaTarget Target) LockFailureModel(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer) =>
+        RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            provider,
+            includePriority: true,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: normalizer);
+
+    private static async Task WaitForOwnershipLossAsync(IPhysicalSchemaApplicationLock applicationLock)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (!applicationLock.OwnershipLost.IsCancellationRequested)
+        {
+            Assert.True(
+                DateTimeOffset.UtcNow < deadline,
+                "The heartbeat never forfeited the lease after its probes started failing.");
+            await Task.Delay(25);
+        }
+    }
+
     public static async Task ConcurrentMaterializationAndAcknowledgementLossAreRestartSafeAsync(
         ProviderIdentity provider,
         IProviderPhysicalNameNormalizer normalizer,
@@ -809,4 +929,71 @@ internal static class RelationalPhysicalServerAssertions
     }
 
     private sealed class SimulatedAcknowledgementLossException : Exception;
+}
+
+/// <summary>Failure injection shared by the provider lock-disposal conformance tests.</summary>
+internal sealed class RelationalLockFailureSwitches
+{
+    public const string ReleaseFailureMessage = "Simulated application-lock release failure.";
+    public const string VerificationFailureMessage = "Simulated application-lock verification failure.";
+    public const string SessionCloseFailureMessage = "Simulated lock-session close failure.";
+
+    public bool FailReleases { get; set; }
+    public bool FailVerification { get; set; }
+}
+
+/// <summary>
+/// One provider's failure-injecting executor. <c>CreateExecutor</c> takes whether the lock session
+/// should also fail to close, which is what separates a released lock from a possibly leaked one.
+/// </summary>
+internal sealed record RelationalLockFailureHarness(
+    RelationalLockFailureSwitches Switches,
+    Func<bool, IPhysicalSchemaExecutor> CreateExecutor);
+
+/// <summary>
+/// Reports a failing session close while still really closing the inner connection, so a simulated
+/// leak cannot strand a server session holding the lock for the rest of the run.
+/// </summary>
+internal sealed class DisposeFailingConnection : DbConnection
+{
+    private readonly DbConnection inner;
+
+    public DisposeFailingConnection(DbConnection inner)
+    {
+        this.inner = inner;
+        inner.StateChange += (_, args) => OnStateChange(args);
+    }
+
+    [AllowNull]
+    public override string ConnectionString
+    {
+        get => inner.ConnectionString;
+        set => inner.ConnectionString = value;
+    }
+
+    public override string Database => inner.Database;
+    public override string DataSource => inner.DataSource;
+    public override string ServerVersion => inner.ServerVersion;
+    public override ConnectionState State => inner.State;
+
+    public override void ChangeDatabase(string databaseName) => inner.ChangeDatabase(databaseName);
+    public override void Close() => inner.Close();
+    public override void Open() => inner.Open();
+    public override Task OpenAsync(CancellationToken cancellationToken) => inner.OpenAsync(cancellationToken);
+    protected override DbCommand CreateDbCommand() => inner.CreateCommand();
+    protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) =>
+        inner.BeginTransaction(isolationLevel);
+
+    public override async ValueTask DisposeAsync()
+    {
+        await inner.DisposeAsync();
+        throw new InvalidOperationException(RelationalLockFailureSwitches.SessionCloseFailureMessage);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            inner.Dispose();
+        base.Dispose(disposing);
+    }
 }
