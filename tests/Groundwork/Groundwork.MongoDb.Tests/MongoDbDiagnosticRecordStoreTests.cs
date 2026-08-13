@@ -1577,6 +1577,15 @@ internal sealed class MongoDbDiagnosticRecordStoreFixture : IDiagnosticRecordSto
     public IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) =>
         Open(_independentClient, definition);
 
+    public int PendingInterceptorCount
+    {
+        get
+        {
+            lock (_interceptors)
+                return _interceptors.Values.Sum(queue => queue.Count);
+        }
+    }
+
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {
         lock (_interceptors)

@@ -1493,12 +1493,7 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
         var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         fixture.InterceptNext(point, async cancellationToken =>
         {
-            // A second entry means the queue stopped consuming interceptors, which is the drift
-            // that would let this one reach a later operation. Fail there rather than leaving that
-            // operation to block on the delay until the bounded store's timeout reports it as a
-            // conformance failure of the store.
-            if (!reached.TrySetResult())
-                Assert.Fail($"The interceptor for {point} was entered twice; it is no longer single-consume.");
+            reached.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         });
         using var cancellation = new CancellationTokenSource();
@@ -1514,6 +1509,15 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
 
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+
+        // Nothing may stay queued once this returns. An operation that ends before reaching the
+        // point leaves its interceptor behind, and the next operation to reach that point blocks
+        // on it until the bounded store's timeout reports the stall as a conformance failure of
+        // the store — the misattribution this test's bare-timer predecessor actually shipped. The
+        // paths above all throw before here, and a fixture is per test, so a leftover on those
+        // paths cannot outlive the failure; asserting here rather than in a finally keeps the
+        // cause of that failure from being masked by this assertion.
+        Assert.Equal(0, fixture.PendingInterceptorCount);
     }
 
     private static DiagnosticRecordBatch Batch(string operationNonce, params string[] recordIds)

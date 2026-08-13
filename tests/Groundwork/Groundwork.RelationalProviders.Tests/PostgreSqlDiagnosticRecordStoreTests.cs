@@ -173,6 +173,15 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
     public IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) =>
         new PostgreSqlDiagnosticRecordStore(ConnectionString, definition, timeProvider, InterceptAsync);
 
+    public int PendingInterceptorCount
+    {
+        get
+        {
+            lock (interceptors)
+                return interceptors.Values.Sum(queue => queue.Count);
+        }
+    }
+
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {
         lock (interceptors)
