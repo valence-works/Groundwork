@@ -1373,6 +1373,10 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
 
                         if (!isOwned)
                         {
+                            // A definitive not-owned answer is not an error, so nothing explains this
+                            // forfeiture. Clearing first keeps an earlier, already-recovered probe
+                            // failure from being reported as its cause.
+                            heartbeatFailure = null;
                             SignalOwnershipLost();
                             return;
                         }
