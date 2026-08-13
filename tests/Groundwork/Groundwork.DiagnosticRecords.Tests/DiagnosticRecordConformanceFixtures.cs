@@ -14,6 +14,14 @@ public interface IDiagnosticRecordStoreConformanceFixture
     /// </summary>
     IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) => OpenStore(definition);
     void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor);
+
+    /// <summary>
+    /// The number of interceptors queued and not yet consumed, across every execution point. An
+    /// operation that ends before reaching its interception point leaves one behind, and whichever
+    /// operation dequeues it next blocks on it instead — so tests that drive an operation to an
+    /// interception point assert this is zero afterwards.
+    /// </summary>
+    int PendingInterceptorCount { get; }
     DateTimeOffset GetUtcNow();
     void AdvanceTime(TimeSpan duration);
     void SetWallClock(DateTimeOffset utcNow);

@@ -1577,6 +1577,18 @@ internal sealed class MongoDbDiagnosticRecordStoreFixture : IDiagnosticRecordSto
     public IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) =>
         Open(_independentClient, definition);
 
+    // Counts the provider-specific queue too: a leftover there stalls a later operation exactly as
+    // a conformance-point leftover does. Summed under each queue's own lock rather than nested, so
+    // this cannot introduce a lock order.
+    public int PendingInterceptorCount => Pending(_interceptors) + Pending(_providerInterceptors);
+
+    private static int Pending<TPoint>(Dictionary<TPoint, Queue<Func<CancellationToken, ValueTask>>> queues)
+        where TPoint : notnull
+    {
+        lock (queues)
+            return queues.Values.Sum(queue => queue.Count);
+    }
+
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {
         lock (_interceptors)

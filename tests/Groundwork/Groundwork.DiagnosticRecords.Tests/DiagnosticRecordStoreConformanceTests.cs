@@ -74,6 +74,10 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
                 8)
         ]);
 
+    // Reaching an interception point is a must-fire path, so this ceiling only has to sit above the
+    // bounded store's own hard timeout; it never gates a run that reaches the point.
+    private static readonly TimeSpan InterceptionMustFireTimeout = TimeSpan.FromSeconds(30);
+
     protected abstract IDiagnosticRecordStoreConformanceFixture CreateFixture();
 
     private IDiagnosticRecordStore CreateStore() => OpenStore(CreateFixture());
@@ -718,13 +722,10 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
     public async Task Cancellation_during_append_before_commit_leaves_the_whole_batch_absent()
     {
         var fixture = CreateFixture();
-        fixture.InterceptNext(DiagnosticExecutionPoint.AppendBeforeCommit, async cancellationToken =>
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
         var store = OpenStore(fixture);
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-            await store.AppendAsync(Batch("canceled-batch", "record-1", "record-2"), cancellation.Token));
+        await AssertCanceledAtAsync(fixture, DiagnosticExecutionPoint.AppendBeforeCommit, cancellationToken =>
+            store.AppendAsync(Batch("canceled-batch", "record-1", "record-2"), cancellationToken).AsTask());
         var statistics = await store.InspectAsync(new(new("tenant-a", "shell-a"), new("logs")));
         var committed = await store.AppendAsync(Batch("after-cancellation", "record-3"));
 
@@ -860,13 +861,11 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
             append.Stream,
             new(fixture.GetUtcNow(), "trim-mid-transaction-cancellation"),
             1);
-        fixture.InterceptNext(
-            DiagnosticExecutionPoint.TrimAfterRecordDeletedBeforeCommit,
-            async cancellationToken => await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-            await store.TrimAsync(request, cancellation.Token));
+        await AssertCanceledAtAsync(
+            fixture,
+            DiagnosticExecutionPoint.TrimAfterRecordDeletedBeforeCommit,
+            cancellationToken => store.TrimAsync(request, cancellationToken).AsTask());
         var restarted = OpenStore(fixture);
         var afterCancellation = await restarted.InspectAsync(new(request.Scope, request.Stream));
         var retry = await restarted.TrimAsync(request);
@@ -1196,11 +1195,8 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
             await store.InspectAsync(new(append.Scope, append.Stream), alreadyCanceled.Token));
 
         var trim = DiagnosticTrimRequest.Create(append.Scope, append.Stream, new(TimeProvider.System.GetUtcNow(), "canceled-trim"), 0);
-        fixture.InterceptNext(DiagnosticExecutionPoint.TrimBeforeCommit, async cancellationToken =>
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-            await store.TrimAsync(trim, cancellation.Token));
+        await AssertCanceledAtAsync(fixture, DiagnosticExecutionPoint.TrimBeforeCommit, cancellationToken =>
+            store.TrimAsync(trim, cancellationToken).AsTask());
         var statistics = await store.InspectAsync(new(append.Scope, append.Stream));
 
         Assert.Equal(1, statistics.RetainedCount.Value);
@@ -1479,6 +1475,49 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
         var afterRollback = await OpenStore(fixture).QueryAsync(new(scope, stream, 10));
 
         Assert.Equal(["record-1", "record-2", "record-3"], afterRollback.Records.Select(record => record.RecordId));
+    }
+
+    /// <summary>
+    /// Runs an operation and cancels it exactly at <paramref name="point"/>. A bare timer cannot
+    /// sequence this: on a loaded runner the operation may not reach the point before the timer
+    /// fires, so cancellation lands before the staged work the test means to exercise, and the
+    /// one-shot interceptor stays queued to poison the next operation. Waiting for the interceptor
+    /// to signal that it has been entered both places the cancellation where it belongs and proves
+    /// this operation consumed the interceptor, so no leftover can reach a later one.
+    /// </summary>
+    private static async Task AssertCanceledAtAsync(
+        IDiagnosticRecordStoreConformanceFixture fixture,
+        DiagnosticExecutionPoint point,
+        Func<CancellationToken, Task> operation)
+    {
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.InterceptNext(point, async cancellationToken =>
+        {
+            reached.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        });
+        using var cancellation = new CancellationTokenSource();
+        var running = operation(cancellation.Token);
+
+        // Reaching the point races the operation itself so that a store that fails or completes
+        // without interception surfaces that outcome instead of the deadline expiring.
+        if (await Task.WhenAny(reached.Task, running).WaitAsync(InterceptionMustFireTimeout) == running)
+        {
+            await running;
+            Assert.Fail($"The operation completed without reaching {point}.");
+        }
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+
+        // Nothing may stay queued once this returns. An operation that ends before reaching the
+        // point leaves its interceptor behind, and the next operation to reach that point blocks
+        // on it until the bounded store's timeout reports the stall as a conformance failure of
+        // the store — the misattribution this test's bare-timer predecessor actually shipped. The
+        // paths above all throw before here, and a fixture is per test, so a leftover on those
+        // paths cannot outlive the failure; asserting here rather than in a finally keeps the
+        // cause of that failure from being masked by this assertion.
+        Assert.Equal(0, fixture.PendingInterceptorCount);
     }
 
     private static DiagnosticRecordBatch Batch(string operationNonce, params string[] recordIds)
