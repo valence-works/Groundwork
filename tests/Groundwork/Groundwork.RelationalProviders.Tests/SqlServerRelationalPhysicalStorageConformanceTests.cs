@@ -15,6 +15,7 @@ using Groundwork.SqlServer.Documents;
 using Groundwork.SqlServer.PhysicalStorage;
 using Groundwork.TestInfrastructure;
 using Microsoft.Data.SqlClient;
+using System.Data;
 using System.Data.Common;
 using System.Text;
 using System.Xml.Linq;
@@ -790,28 +791,20 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             TerminateSessionAsync);
 
     [Fact]
-    public async Task Failed_release_on_live_lock_session_surfaces_disposal_failure_and_frees_the_lock()
+    public async Task Failed_release_alone_does_not_throw_because_closing_the_session_frees_the_lock()
     {
-        var model = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: true,
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
-        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
-        {
-            Pooling = false
-        }.ConnectionString;
-        var dialect = new ReleaseFailingSchemaDialect();
+        var model = LockLeakModel();
+        var dialect = new FailureInjectingSchemaDialect();
         var executor = new RelationalServerPhysicalSchemaExecutor(
-            () => new SqlConnection(connectionString),
+            () => new SqlConnection(LockConnectionString()),
             dialect);
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
 
         dialect.FailReleases = true;
-        var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
+        // The lock is session-scoped, so disposing the connection ends the session and the server
+        // drops the lock even though the explicit release failed. Nothing leaked, so nothing throws.
+        await applicationLock.DisposeAsync();
 
-        var failure = Assert.IsType<InvalidOperationException>(Assert.Single(exception.InnerExceptions));
-        Assert.Equal(ReleaseFailingSchemaDialect.FailureMessage, failure.Message);
         Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
         await applicationLock.DisposeAsync();
 
@@ -822,72 +815,117 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     }
 
     [Fact]
-    public async Task Disposal_failure_carries_the_heartbeat_failure_that_explains_the_lost_session()
+    public async Task Failed_release_and_failed_session_close_report_the_leak_with_the_heartbeat_cause()
     {
-        var model = RelationalPhysicalStorageTestModels.Create(
-            PhysicalStorageForm.PhysicalEntityTable,
-            SqlServerGroundworkCapabilities.Provider,
-            includePriority: true,
-            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
-        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
-        {
-            Pooling = false
-        }.ConnectionString;
-        var dialect = new ReleaseFailingSchemaDialect();
+        var model = LockLeakModel();
+        var dialect = new FailureInjectingSchemaDialect();
         var executor = new RelationalServerPhysicalSchemaExecutor(
-            () => new SqlConnection(connectionString),
+            () => new DisposeFailingConnection(new SqlConnection(LockConnectionString())),
             dialect);
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
 
-        // Fail verification and wait for the heartbeat to observe it, so the lost-ownership signal
-        // is established before disposal rather than raced against it.
+        // Wait for the heartbeat to actually observe the injected failure rather than inferring it
+        // from the ownership signal, which other paths can also raise.
         dialect.FailVerification = true;
-        await WaitForOwnershipLossAsync(applicationLock);
+        await dialect.VerificationFailed.Task.WaitAsync(TimeSpan.FromSeconds(10));
         dialect.FailReleases = true;
 
         var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
 
         Assert.Contains(
             exception.InnerExceptions,
-            inner => inner.Message == ReleaseFailingSchemaDialect.FailureMessage);
+            inner => inner.Message == FailureInjectingSchemaDialect.ReleaseFailureMessage);
         Assert.Contains(
             exception.InnerExceptions,
-            inner => inner.Message == ReleaseFailingSchemaDialect.VerificationFailureMessage);
+            inner => inner.Message == DisposeFailingConnection.FailureMessage);
+        Assert.Contains(
+            exception.InnerExceptions,
+            inner => inner.Message == FailureInjectingSchemaDialect.VerificationFailureMessage);
+        Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
     }
 
-    private static async Task WaitForOwnershipLossAsync(IPhysicalSchemaApplicationLock applicationLock)
-    {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
-        while (!applicationLock.OwnershipLost.IsCancellationRequested)
-        {
-            Assert.True(DateTimeOffset.UtcNow < deadline, "The heartbeat never reported lost ownership.");
-            await Task.Delay(25);
-        }
-    }
+    private string LockConnectionString() =>
+        new SqlConnectionStringBuilder(container.GetConnectionString()) { Pooling = false }.ConnectionString;
 
-    private sealed class ReleaseFailingSchemaDialect : SqlServerPhysicalSchemaDialect
+    private static (StorageManifest Manifest, PhysicalSchemaTarget Target) LockLeakModel() =>
+        RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: true,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
+
+    private sealed class FailureInjectingSchemaDialect : SqlServerPhysicalSchemaDialect
     {
-        public const string FailureMessage = "Simulated application-lock release failure.";
+        public const string ReleaseFailureMessage = "Simulated application-lock release failure.";
         public const string VerificationFailureMessage = "Simulated application-lock verification failure.";
 
         public bool FailReleases { get; set; }
         public bool FailVerification { get; set; }
+
+        public TaskCompletionSource VerificationFailed { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public override Task ReleaseApplicationLockAsync(
             DbConnection connection,
             string resource,
             CancellationToken cancellationToken) =>
             FailReleases
-                ? throw new InvalidOperationException(FailureMessage)
+                ? throw new InvalidOperationException(ReleaseFailureMessage)
                 : base.ReleaseApplicationLockAsync(connection, resource, cancellationToken);
 
         public override Task<bool> VerifyApplicationLockAsync(
             DbConnection connection,
             string resource,
-            CancellationToken cancellationToken) =>
-            FailVerification
-                ? throw new InvalidOperationException(VerificationFailureMessage)
-                : base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
+            CancellationToken cancellationToken)
+        {
+            if (!FailVerification)
+                return base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
+            VerificationFailed.TrySetResult();
+            throw new InvalidOperationException(VerificationFailureMessage);
+        }
+    }
+
+    /// <summary>
+    /// Reports a failing session close while still really closing the inner connection, so the
+    /// simulated leak cannot strand a SQL Server session holding the lock for the rest of the run.
+    /// </summary>
+    private sealed class DisposeFailingConnection(SqlConnection inner) : DbConnection
+    {
+        public const string FailureMessage = "Simulated lock-session close failure.";
+
+        [System.Diagnostics.CodeAnalysis.AllowNull]
+        public override string ConnectionString
+        {
+            get => inner.ConnectionString;
+            set => inner.ConnectionString = value;
+        }
+
+        public override string Database => inner.Database;
+        public override string DataSource => inner.DataSource;
+        public override string ServerVersion => inner.ServerVersion;
+        public override ConnectionState State => inner.State;
+
+        public override void ChangeDatabase(string databaseName) => inner.ChangeDatabase(databaseName);
+        public override void Close() => inner.Close();
+        public override void Open() => inner.Open();
+        public override Task OpenAsync(CancellationToken cancellationToken) => inner.OpenAsync(cancellationToken);
+        protected override DbCommand CreateDbCommand() => inner.CreateCommand();
+        protected override DbTransaction BeginDbTransaction(System.Data.IsolationLevel isolationLevel) =>
+            inner.BeginTransaction(isolationLevel);
+
+        public override async ValueTask DisposeAsync()
+        {
+            await inner.DisposeAsync();
+            throw new InvalidOperationException(FailureMessage);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                inner.Dispose();
+            base.Dispose(disposing);
+        }
     }
 
     [Fact]

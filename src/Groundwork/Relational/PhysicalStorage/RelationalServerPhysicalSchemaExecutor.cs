@@ -1240,18 +1240,24 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
 
         /// <summary>
         /// Best-effort teardown. Any step that cannot prove a clean release signals
-        /// <see cref="OwnershipLost"/>. Only failures that can leave the server-side lock held (a
-        /// release failure on a still-open session, or a connection that fails to dispose) throw an
-        /// <see cref="AggregateException"/>, and only after every cleanup step has run; a lock whose
-        /// server session already died disposes quietly, because the server released the
-        /// session-scoped lock along with the session.
+        /// <see cref="OwnershipLost"/>, and every failure along the way is retained rather than
+        /// swallowed.
         /// <para>
-        /// Throwing from disposal does mask an exception already propagating out of an
+        /// Disposal throws an <see cref="AggregateException"/> carrying those failures only when
+        /// releasing the lock failed <em>and</em> closing its session also failed. A failed release
+        /// on its own does not leak: the lock is session-scoped, so closing the connection ends the
+        /// session and the server drops the lock with it. Only when the session also refuses to
+        /// close can the lock outlive this object and block the next acquirer, and a killed session
+        /// -- whose release fails precisely because the session is already gone -- must dispose
+        /// quietly.
+        /// </para>
+        /// <para>
+        /// Throwing from disposal masks an exception already propagating out of an
         /// <c>await using</c> block. That is accepted deliberately: the alternative used by
         /// <c>AcquireApplicationLockAsync</c>, attaching via <c>RelationalCleanupFailures</c>, needs
-        /// the in-flight exception, which disposal cannot see. A silently leaked lock blocks the
-        /// next acquirer with no diagnostic at all, which is the worse outcome. Keeping the throw
-        /// narrow to genuine-leak paths is what bounds the masking.
+        /// the in-flight exception, which disposal cannot see, and a silently leaked lock blocks the
+        /// next acquirer with no diagnostic at all. Requiring both failures is what bounds the
+        /// masking to genuine leaks.
         /// </para>
         /// </summary>
         public async ValueTask DisposeAsync()
@@ -1261,6 +1267,8 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             connection.StateChange -= OnConnectionStateChanged;
             await heartbeatStop.CancelAsync();
             var cleanupFailures = new List<Exception>();
+            var releaseFailed = false;
+            var sessionCloseFailed = false;
             try
             {
                 try
@@ -1287,11 +1295,8 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 catch (Exception failure)
                 {
                     SignalOwnershipLost();
-                    // A failure that also broke the connection means the server session died and
-                    // took the session-scoped lock with it; only a still-open session can keep
-                    // holding the resource.
-                    if (connection.State == ConnectionState.Open)
-                        cleanupFailures.Add(failure);
+                    cleanupFailures.Add(failure);
+                    releaseFailed = true;
                 }
                 finally
                 {
@@ -1308,20 +1313,21 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     SignalOwnershipLost();
                     cleanupFailures.Add(failure);
+                    sessionCloseFailed = true;
                 }
                 heartbeatStop.Dispose();
                 sessionGate.Dispose();
                 ownershipLost.Dispose();
             }
-            if (cleanupFailures.Count > 0)
+            if (releaseFailed && sessionCloseFailed)
             {
-                // The heartbeat's own failure explains why the session died, so it rides along as
-                // context. It never makes disposal throw on its own: a session that died released
-                // its session-scoped lock with it.
+                // The heartbeat's failure explains why the session went bad, so it rides along as
+                // context. It never triggers the throw on its own.
                 if (heartbeatFailure is { } heartbeatContext)
                     cleanupFailures.Add(heartbeatContext);
                 throw new AggregateException(
-                    $"Physical-schema application-lock disposal for target '{Target}' could not guarantee the server-side lock was released.",
+                    $"Physical-schema application lock for target '{Target}' could not be released and its session could not be closed. " +
+                    "The lock may still be held, blocking the next acquirer until the server ends that session.",
                     cleanupFailures);
             }
         }
