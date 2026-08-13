@@ -1244,13 +1244,14 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         /// heartbeat's last probe failure are all retained, so a report can say what went wrong
         /// rather than only that something did.
         /// <para>
-        /// Disposal throws an <see cref="AggregateException"/> carrying those failures only when
-        /// releasing the lock failed <em>and</em> closing its session also failed. A failed release
-        /// on its own does not leak: the lock is session-scoped, so closing the connection ends the
-        /// session and the server drops the lock with it. Only when the session also refuses to
-        /// close can the lock outlive this object and block the next acquirer, and a killed session
-        /// -- whose release fails precisely because the session is already gone -- must dispose
-        /// quietly.
+        /// Disposal throws an <see cref="AggregateException"/> carrying those failures only when the
+        /// lock was never released <em>and</em> closing its session also failed. Failing to release
+        /// does not leak on its own: the lock is session-scoped, so closing the connection ends the
+        /// session and the server drops the lock with it. Only when that fallback also fails can the
+        /// lock outlive this object and block the next acquirer, and a killed session -- whose
+        /// release fails precisely because the session is already gone -- must dispose quietly.
+        /// <em>Never released</em> covers the release throwing and the release being skipped because
+        /// the connection was no longer open; neither proves the lock was let go.
         /// </para>
         /// <para>
         /// Throwing from disposal masks an exception already propagating out of an
@@ -1268,7 +1269,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             connection.StateChange -= OnConnectionStateChanged;
             await heartbeatStop.CancelAsync();
             var cleanupFailures = new List<Exception>();
-            var releaseFailed = false;
+            var lockReleased = false;
             var sessionCloseFailed = false;
             try
             {
@@ -1287,15 +1288,21 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 try
                 {
                     if (connection.State == ConnectionState.Open)
+                    {
                         await dialect.ReleaseApplicationLockAsync(connection, resource, CancellationToken.None);
+                        lockReleased = true;
+                    }
                     else
+                    {
+                        // Skipping the release is not the same as having released: it leaves the
+                        // lock's fate resting entirely on the session close below.
                         SignalOwnershipLost();
+                    }
                 }
                 catch (Exception failure)
                 {
                     SignalOwnershipLost();
                     cleanupFailures.Add(failure);
-                    releaseFailed = true;
                 }
                 finally
                 {
@@ -1318,7 +1325,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 sessionGate.Dispose();
                 ownershipLost.Dispose();
             }
-            if (releaseFailed && sessionCloseFailed)
+            if (!lockReleased && sessionCloseFailed)
             {
                 // The heartbeat's last probe failure explains why the session went bad, so it rides
                 // along as context. It never triggers the throw on its own.
@@ -1360,8 +1367,8 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                             // A failed probe is inconclusive: the server-side lock may still be held. Only a
                             // bounded run of consecutive failures forfeits ownership; a definitive "not owned"
                             // verification below loses it immediately.
-                            // Retained because this catch is where probe failures end up, so it is the only
-                            // place that can explain a forfeited lease to disposal.
+                            // Retained so a forfeited lease can name the probe failure behind it. The
+                            // outer catch retains its own, and wins: it ends the heartbeat outright.
                             heartbeatFailure = exception;
                             if (++consecutiveVerificationFailures >= MaxConsecutiveHeartbeatVerificationFailures)
                             {
@@ -1394,7 +1401,9 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             }
             catch (Exception failure)
             {
-                heartbeatFailure ??= failure;
+                // Overwrites rather than defers: this exception is the one that ended the heartbeat,
+                // so it explains the forfeiture better than any probe failure already recovered from.
+                heartbeatFailure = failure;
                 SignalOwnershipLost();
             }
         }

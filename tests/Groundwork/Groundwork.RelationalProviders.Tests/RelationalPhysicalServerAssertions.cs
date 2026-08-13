@@ -427,7 +427,7 @@ internal static class RelationalPhysicalServerAssertions
     {
         var model = LockFailureModel(provider, normalizer);
         var harness = createHarness();
-        var executor = harness.CreateExecutor(false);
+        var executor = harness.CreateExecutor();
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
 
         // The lock is session-scoped, so closing the connection ends the session and the server drops
@@ -451,15 +451,38 @@ internal static class RelationalPhysicalServerAssertions
     {
         var model = LockFailureModel(provider, normalizer);
         var harness = createHarness();
-        var executor = harness.CreateExecutor(true);
+        var executor = harness.CreateExecutor();
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
 
         harness.Switches.FailReleases = true;
+        harness.Switches.FailSessionClose = true;
         var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
 
         Assert.Contains(
             exception.InnerExceptions,
             inner => inner.Message == RelationalLockFailureSwitches.ReleaseFailureMessage);
+        Assert.Contains(
+            exception.InnerExceptions,
+            inner => inner.Message == RelationalLockFailureSwitches.SessionCloseFailureMessage);
+        Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
+    }
+
+    public static async Task SkippedReleaseAndFailedSessionCloseReportThePossibleLeakAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<RelationalLockFailureHarness> createHarness)
+    {
+        var model = LockFailureModel(provider, normalizer);
+        var harness = createHarness();
+        var executor = harness.CreateExecutor();
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+
+        // A connection that is no longer open makes teardown skip the release entirely. Skipping is
+        // not releasing, so a failing close still leaves the lock's fate unproven and must report.
+        harness.Switches.ReportSessionClosed = true;
+        harness.Switches.FailSessionClose = true;
+        var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
+
         Assert.Contains(
             exception.InnerExceptions,
             inner => inner.Message == RelationalLockFailureSwitches.SessionCloseFailureMessage);
@@ -473,11 +496,12 @@ internal static class RelationalPhysicalServerAssertions
     {
         var model = LockFailureModel(provider, normalizer);
         var harness = createHarness();
-        var executor = harness.CreateExecutor(true);
+        var executor = harness.CreateExecutor();
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
 
-        // The release succeeded, so the lock is already gone and a failing close cannot have leaked
-        // it. Only the pair of failures together justifies a leak report.
+        // The release succeeds, so the lock is already gone and a failing close cannot have leaked
+        // it. Only an unreleased lock plus a failing close justifies a leak report.
+        harness.Switches.FailSessionClose = true;
         await applicationLock.DisposeAsync();
 
         await using var successor = await executor.AcquireApplicationLockAsync(
@@ -492,7 +516,7 @@ internal static class RelationalPhysicalServerAssertions
     {
         var model = LockFailureModel(provider, normalizer);
         var harness = createHarness();
-        var executor = harness.CreateExecutor(true);
+        var executor = harness.CreateExecutor();
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
         // Nothing else may have forfeited the lease yet, or the wait below would prove nothing.
         Assert.False(applicationLock.OwnershipLost.IsCancellationRequested);
@@ -502,6 +526,7 @@ internal static class RelationalPhysicalServerAssertions
         harness.Switches.FailVerification = true;
         await WaitForOwnershipLossAsync(applicationLock);
         harness.Switches.FailReleases = true;
+        harness.Switches.FailSessionClose = true;
 
         var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
 
@@ -517,7 +542,7 @@ internal static class RelationalPhysicalServerAssertions
     {
         var model = LockFailureModel(provider, normalizer);
         var harness = createHarness();
-        var executor = harness.CreateExecutor(false);
+        var executor = harness.CreateExecutor();
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
         applicationLock.OwnershipLost.Register(
             () => throw new InvalidOperationException("Subscriber cancellation callback failure."));
@@ -959,27 +984,30 @@ internal sealed class RelationalLockFailureSwitches
 
     public bool FailReleases { get; set; }
     public bool FailVerification { get; set; }
+    public bool FailSessionClose { get; set; }
+
+    /// <summary>Makes the lock connection report itself no longer open, so teardown skips the release.</summary>
+    public bool ReportSessionClosed { get; set; }
 }
 
-/// <summary>
-/// One provider's failure-injecting executor. <c>CreateExecutor</c> takes whether the lock session
-/// should also fail to close, which is what separates a released lock from a possibly leaked one.
-/// </summary>
+/// <summary>One provider's failure-injecting executor, driven entirely by <see cref="Switches"/>.</summary>
 internal sealed record RelationalLockFailureHarness(
     RelationalLockFailureSwitches Switches,
-    Func<bool, IPhysicalSchemaExecutor> CreateExecutor);
+    Func<IPhysicalSchemaExecutor> CreateExecutor);
 
 /// <summary>
-/// Reports a failing session close while still really closing the inner connection, so a simulated
-/// leak cannot strand a server session holding the lock for the rest of the run.
+/// Injects lock-session faults. A simulated failing close still really closes the inner connection,
+/// so it cannot strand a server session holding the lock for the rest of the run.
 /// </summary>
-internal sealed class DisposeFailingConnection : DbConnection
+internal sealed class FaultInjectingConnection : DbConnection
 {
     private readonly DbConnection inner;
+    private readonly RelationalLockFailureSwitches switches;
 
-    public DisposeFailingConnection(DbConnection inner)
+    public FaultInjectingConnection(DbConnection inner, RelationalLockFailureSwitches switches)
     {
         this.inner = inner;
+        this.switches = switches;
         inner.StateChange += (_, args) => OnStateChange(args);
     }
 
@@ -993,7 +1021,8 @@ internal sealed class DisposeFailingConnection : DbConnection
     public override string Database => inner.Database;
     public override string DataSource => inner.DataSource;
     public override string ServerVersion => inner.ServerVersion;
-    public override ConnectionState State => inner.State;
+    public override ConnectionState State =>
+        switches.ReportSessionClosed ? ConnectionState.Closed : inner.State;
 
     public override void ChangeDatabase(string databaseName) => inner.ChangeDatabase(databaseName);
     public override void Close() => inner.Close();
@@ -1006,7 +1035,8 @@ internal sealed class DisposeFailingConnection : DbConnection
     public override async ValueTask DisposeAsync()
     {
         await inner.DisposeAsync();
-        throw new InvalidOperationException(RelationalLockFailureSwitches.SessionCloseFailureMessage);
+        if (switches.FailSessionClose)
+            throw new InvalidOperationException(RelationalLockFailureSwitches.SessionCloseFailureMessage);
     }
 
     protected override void Dispose(bool disposing)

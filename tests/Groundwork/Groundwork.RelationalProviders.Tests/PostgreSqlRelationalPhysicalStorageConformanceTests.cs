@@ -644,6 +644,13 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             LockFailureHarness);
 
     [Fact]
+    public Task Skipped_release_and_failed_backend_close_report_the_possible_leak() =>
+        RelationalPhysicalServerAssertions.SkippedReleaseAndFailedSessionCloseReportThePossibleLeakAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
     public Task Failed_backend_close_alone_does_not_throw_because_the_lock_was_released() =>
         RelationalPhysicalServerAssertions.FailedSessionCloseAloneDisposesQuietlyAsync(
             PostgreSqlGroundworkCapabilities.Provider,
@@ -674,10 +681,8 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
         }.ConnectionString;
         return new RelationalLockFailureHarness(
             switches,
-            failSessionClose => new RelationalServerPhysicalSchemaExecutor(
-                () => failSessionClose
-                    ? new DisposeFailingConnection(new NpgsqlConnection(connectionString))
-                    : new NpgsqlConnection(connectionString),
+            () => new RelationalServerPhysicalSchemaExecutor(
+                () => new FaultInjectingConnection(new NpgsqlConnection(connectionString), switches),
                 dialect));
     }
 

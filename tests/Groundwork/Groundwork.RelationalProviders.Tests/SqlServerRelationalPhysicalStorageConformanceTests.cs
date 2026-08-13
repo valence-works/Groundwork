@@ -805,6 +805,13 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             LockFailureHarness);
 
     [Fact]
+    public Task Skipped_release_and_failed_session_close_report_the_possible_leak() =>
+        RelationalPhysicalServerAssertions.SkippedReleaseAndFailedSessionCloseReportThePossibleLeakAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
     public Task Failed_session_close_alone_does_not_throw_because_the_lock_was_released() =>
         RelationalPhysicalServerAssertions.FailedSessionCloseAloneDisposesQuietlyAsync(
             SqlServerGroundworkCapabilities.Provider,
@@ -835,10 +842,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         }.ConnectionString;
         return new RelationalLockFailureHarness(
             switches,
-            failSessionClose => new RelationalServerPhysicalSchemaExecutor(
-                () => failSessionClose
-                    ? new DisposeFailingConnection(new SqlConnection(connectionString))
-                    : new SqlConnection(connectionString),
+            () => new RelationalServerPhysicalSchemaExecutor(
+                () => new FaultInjectingConnection(new SqlConnection(connectionString), switches),
                 dialect));
     }
 
