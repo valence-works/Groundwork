@@ -118,11 +118,12 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     public async ValueTask<PhysicalSchemaHistoryState> ReadHistoryAsync(
         PhysicalSchemaTargetIdentity target,
         IPhysicalSchemaApplicationLock applicationLock,
-        CancellationToken cancellationToken) =>
-        await RequireApplicationLock(applicationLock, target).ExecuteAsync(async (connection, ct) =>
+        CancellationToken cancellationToken)
+    {
+        var lease = RequireApplicationLock(applicationLock, target);
+        return await lease.ExecuteAsync(async (connection, ct) =>
         {
             await using var transaction = await connection.BeginTransactionAsync(ct);
-            var lease = RequireApplicationLock(applicationLock, target);
             await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, ct);
             await using var command = Command(connection, transaction, """
                 SELECT applied_state_json
@@ -137,6 +138,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 ? PhysicalSchemaHistoryState.Empty
                 : PhysicalSchemaHistoryState.FromApplied(PhysicalSchemaAppliedStateSerializer.Deserialize(json));
         }, cancellationToken);
+    }
 
     public async ValueTask<PhysicalSchemaInspectionResult> InspectHistoryAsync(
         PhysicalSchemaTarget target,
@@ -193,11 +195,12 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         PhysicalSchemaTargetIdentity target,
         PhysicalSchemaOperation operation,
         IPhysicalSchemaApplicationLock applicationLock,
-        CancellationToken cancellationToken) =>
-        await RequireApplicationLock(applicationLock, target).ExecuteAsync(async (connection, ct) =>
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var lease = RequireApplicationLock(applicationLock, target);
+        return await lease.ExecuteAsync(async (connection, ct) =>
         {
-            ArgumentNullException.ThrowIfNull(operation);
-            var lease = RequireApplicationLock(applicationLock, target);
             await using var transaction = await connection.BeginTransactionAsync(ct);
             var prior = await ReadOperationAsync(connection, transaction, target, operation.Identity, ct);
             if (prior is not null)
@@ -238,6 +241,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 throw new PhysicalSchemaFingerprintConflictException(operation.Identity, operation.Fingerprint, durable.Fingerprint);
             return new PhysicalSchemaOperationAcknowledgement(operation.Identity, durable.Fingerprint, durable.AppliedAt);
         }, cancellationToken);
+    }
 
     public async ValueTask RecordAppliedStateAsync(
         PhysicalSchemaAppliedState state,
@@ -246,20 +250,17 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(state);
-        await RequireApplicationLock(
-            applicationLock,
-            new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name)).ExecuteAsync(async (connection, ct) =>
+        var target = new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name);
+        var lease = RequireApplicationLock(applicationLock, target);
+        await lease.ExecuteAsync(async (connection, ct) =>
         {
-            var lease = RequireApplicationLock(
-                applicationLock,
-                new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name));
             await using var transaction = await connection.BeginTransactionAsync(ct);
             if (beforeAppliedStateFence is not null)
                 await beforeAppliedStateFence(state, ct);
             await dialect.AssertFenceAsync(
                 connection,
                 transaction,
-                new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name),
+                target,
                 lease.Owner,
                 lease.Fence,
                 ct);
@@ -1191,8 +1192,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             await sessionGate.WaitAsync(cancellationToken);
             try
             {
-                if (Volatile.Read(ref disposed) != 0 || ownershipLost.IsCancellationRequested ||
-                    connection.State != ConnectionState.Open)
+                if (!SessionUsable)
                 {
                     MarkOwnershipLost();
                     throw OwnershipLostException();
@@ -1202,12 +1202,11 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     return await action(connection, cancellationToken);
                 }
-                catch (Exception exception) when (exception is DbException or InvalidOperationException)
+                catch (Exception exception) when (ClassifiesAsPotentialLockLoss(exception, cancellationToken))
                 {
                     var verificationFailure = default(Exception);
                     var isOwned = false;
-                    if (Volatile.Read(ref disposed) == 0 && !ownershipLost.IsCancellationRequested &&
-                        connection.State == ConnectionState.Open)
+                    if (SessionUsable)
                     {
                         using var verificationTimeout = new CancellationTokenSource(OwnershipVerificationTimeout);
                         try
@@ -1217,8 +1216,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                                 resource,
                                 verificationTimeout.Token);
                         }
-                        catch (Exception ownershipException) when (
-                            ownershipException is DbException or InvalidOperationException or OperationCanceledException)
+                        catch (Exception ownershipException) when (ownershipException is not OutOfMemoryException)
                         {
                             verificationFailure = ownershipException;
                         }
@@ -1321,6 +1319,21 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             }
         }
 
+        private bool SessionUsable =>
+            Volatile.Read(ref disposed) == 0 && !ownershipLost.IsCancellationRequested &&
+            connection.State == ConnectionState.Open;
+
+        // A session killed mid-operation surfaces as whatever the driver's protocol state permits
+        // (SqlClient can throw NullReferenceException), so lock loss is classified by verifying
+        // ownership rather than by exception type. Exempt are out-of-memory, which must never be
+        // swallowed, and cancellation requested through the caller's token. That token may be
+        // linked to OwnershipLost (PhysicalSchemaApplication links them), and lease loss observed
+        // as cancellation surfaces as OperationCanceledException by contract — the same way the
+        // application layer reports it when it checks the token between operations.
+        private static bool ClassifiesAsPotentialLockLoss(Exception exception, CancellationToken cancellationToken) =>
+            exception is not OutOfMemoryException &&
+            (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested);
+
         private void MarkOwnershipLost()
         {
             if (Volatile.Read(ref disposed) == 0 && !ownershipLost.IsCancellationRequested)
@@ -1334,8 +1347,9 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             Exception? inner = executionFailure;
             if (verificationFailure is not null)
                 inner = new AggregateException(executionFailure!, verificationFailure);
+            var state = verificationFailure is null ? "was lost" : "was lost or could not be verified";
             return new InvalidOperationException(
-                $"The relational physical-schema lock session for target '{Target}' was lost during schema execution.",
+                $"The relational physical-schema lock session for target '{Target}' {state} during schema execution.",
                 inner);
         }
     }

@@ -235,7 +235,7 @@ internal static class RelationalPhysicalServerAssertions
         Func<long, Task> terminateSession,
         Func<string, string, Task<long>> countAppliedState)
     {
-        const string injectedMessage = "simulated invalid transaction after relational lock loss";
+        const string injectedMessage = "simulated non-provider crash after relational lock loss";
         var model = RelationalPhysicalStorageTestModels.Create(
             PhysicalStorageForm.DedicatedDocumentTable,
             provider,
@@ -245,7 +245,10 @@ internal static class RelationalPhysicalServerAssertions
         var executor = createExecutor(async (_, _) =>
         {
             await terminateSession(sessionId);
-            throw new InvalidOperationException(injectedMessage);
+            // A killed session can surface as driver-internal exception types (SqlClient has thrown
+            // NullReferenceException), so the injected failure deliberately uses a type outside any
+            // provider-exception hierarchy: classification must not depend on the exception type.
+            throw new NullReferenceException(injectedMessage);
         });
         await using var applicationLock = await executor.AcquireApplicationLockAsync(
             model.Target.Identity,
