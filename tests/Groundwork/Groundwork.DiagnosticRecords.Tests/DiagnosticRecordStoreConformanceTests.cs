@@ -74,6 +74,10 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
                 8)
         ]);
 
+    // Reaching an interception point is a must-fire path, so this ceiling only has to sit above the
+    // bounded store's own hard timeout; it never gates a run that reaches the point.
+    private static readonly TimeSpan InterceptionMustFireTimeout = TimeSpan.FromSeconds(30);
+
     protected abstract IDiagnosticRecordStoreConformanceFixture CreateFixture();
 
     private IDiagnosticRecordStore CreateStore() => OpenStore(CreateFixture());
@@ -1489,17 +1493,20 @@ public abstract class DiagnosticRecordStoreConformanceTests : DiagnosticRecordCo
         var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         fixture.InterceptNext(point, async cancellationToken =>
         {
-            reached.TrySetResult();
+            // A second entry means the queue stopped consuming interceptors, which is the drift
+            // that would let this one reach a later operation. Fail there rather than leaving that
+            // operation to block on the delay until the bounded store's timeout reports it as a
+            // conformance failure of the store.
+            if (!reached.TrySetResult())
+                Assert.Fail($"The interceptor for {point} was entered twice; it is no longer single-consume.");
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         });
         using var cancellation = new CancellationTokenSource();
         var running = operation(cancellation.Token);
 
-        // The interception must fire for the test to mean anything, so this deadline only has to
-        // sit above the bounded store's own hard timeout; it never gates a run that reaches the
-        // point. Reaching the point is racing the operation itself so that a store that fails or
-        // completes without interception surfaces that outcome instead of the guard expiring.
-        if (await Task.WhenAny(reached.Task, running).WaitAsync(TimeSpan.FromSeconds(30)) == running)
+        // Reaching the point races the operation itself so that a store that fails or completes
+        // without interception surfaces that outcome instead of the deadline expiring.
+        if (await Task.WhenAny(reached.Task, running).WaitAsync(InterceptionMustFireTimeout) == running)
         {
             await running;
             Assert.Fail($"The operation completed without reaching {point}.");
