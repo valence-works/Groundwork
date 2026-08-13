@@ -790,6 +790,53 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             TerminateSessionAsync);
 
     [Fact]
+    public async Task Failed_release_on_live_lock_session_surfaces_disposal_failure_and_frees_the_lock()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: true,
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
+        var connectionString = new SqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            Pooling = false
+        }.ConnectionString;
+        var dialect = new ReleaseFailingSchemaDialect();
+        var executor = new RelationalServerPhysicalSchemaExecutor(
+            () => new SqlConnection(connectionString),
+            dialect);
+        var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
+
+        dialect.FailReleases = true;
+        var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
+
+        var failure = Assert.IsType<InvalidOperationException>(Assert.Single(exception.InnerExceptions));
+        Assert.Equal(ReleaseFailingSchemaDialect.FailureMessage, failure.Message);
+        Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
+        await applicationLock.DisposeAsync();
+
+        dialect.FailReleases = false;
+        await using var successor = await executor.AcquireApplicationLockAsync(
+            model.Target.Identity,
+            CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    private sealed class ReleaseFailingSchemaDialect : SqlServerPhysicalSchemaDialect
+    {
+        public const string FailureMessage = "Simulated application-lock release failure.";
+
+        public bool FailReleases { get; set; }
+
+        public override Task ReleaseApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken) =>
+            FailReleases
+                ? throw new InvalidOperationException(FailureMessage)
+                : base.ReleaseApplicationLockAsync(connection, resource, cancellationToken);
+    }
+
+    [Fact]
     public async Task Exhausted_fence_fails_without_poisoning_the_session_lock()
     {
         var model = RelationalPhysicalStorageTestModels.Create(

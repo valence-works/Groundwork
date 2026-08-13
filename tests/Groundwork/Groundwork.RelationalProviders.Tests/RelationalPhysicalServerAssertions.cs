@@ -410,6 +410,7 @@ internal static class RelationalPhysicalServerAssertions
         await Task.WhenAll(
             applicationLock.DisposeAsync().AsTask(),
             applicationLock.DisposeAsync().AsTask());
+        Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
 
         await using var successor = await createExecutor().AcquireApplicationLockAsync(
             model.Target.Identity,

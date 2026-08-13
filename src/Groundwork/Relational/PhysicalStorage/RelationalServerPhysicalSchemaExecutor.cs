@@ -1175,6 +1175,8 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             Owner = owner;
             Fence = fence;
             ServerSessionId = serverSessionId;
+            // Captured once so the token stays readable after disposal disposes the source.
+            OwnershipLost = ownershipLost.Token;
             connection.StateChange += OnConnectionStateChanged;
             heartbeat = HeartbeatAsync();
         }
@@ -1183,7 +1185,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         public string Owner { get; }
         public long Fence { get; }
         public long ServerSessionId { get; }
-        public CancellationToken OwnershipLost => ownershipLost.Token;
+        public CancellationToken OwnershipLost { get; }
 
         public async Task<T> ExecuteAsync<T>(
             Func<DbConnection, CancellationToken, Task<T>> action,
@@ -1235,21 +1237,32 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             }
         }
 
+        /// <summary>
+        /// Best-effort teardown. Disposing a lock whose server session already died stays
+        /// non-throwing: the server released the session-scoped lock with the session, and a throw
+        /// here would mask the primary failure in an <c>await using</c> block. Any teardown that
+        /// cannot prove a clean release still signals <see cref="OwnershipLost"/>, and failures
+        /// that can leave the server-side lock held (a release failure on a still-open session, or
+        /// a connection that fails to dispose) surface as an <see cref="AggregateException"/> after
+        /// every cleanup step has run.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0)
                 return;
             connection.StateChange -= OnConnectionStateChanged;
             await heartbeatStop.CancelAsync();
+            var cleanupFailures = new List<Exception>();
             try
             {
                 try
                 {
                     await heartbeat;
                 }
-                catch
+                catch (Exception failure)
                 {
-                    MarkOwnershipLost();
+                    SignalOwnershipLost();
+                    cleanupFailures.Add(failure);
                 }
 
                 await sessionGate.WaitAsync();
@@ -1257,10 +1270,17 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     if (connection.State == ConnectionState.Open)
                         await dialect.ReleaseApplicationLockAsync(connection, resource, CancellationToken.None);
+                    else
+                        SignalOwnershipLost();
                 }
-                catch
+                catch (Exception failure)
                 {
-                    MarkOwnershipLost();
+                    SignalOwnershipLost();
+                    // A failure that also broke the connection means the server session died and
+                    // took the session-scoped lock with it; only a still-open session can keep
+                    // holding the resource.
+                    if (connection.State == ConnectionState.Open)
+                        cleanupFailures.Add(failure);
                 }
                 finally
                 {
@@ -1273,13 +1293,20 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     await connection.DisposeAsync();
                 }
-                catch
+                catch (Exception failure)
                 {
-                    MarkOwnershipLost();
+                    SignalOwnershipLost();
+                    cleanupFailures.Add(failure);
                 }
                 heartbeatStop.Dispose();
                 sessionGate.Dispose();
                 ownershipLost.Dispose();
+            }
+            if (cleanupFailures.Count > 0)
+            {
+                throw new AggregateException(
+                    $"Physical-schema application-lock disposal for target '{Target}' could not guarantee the server-side lock was released.",
+                    cleanupFailures);
             }
         }
 
@@ -1322,7 +1349,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
 
                         if (!isOwned)
                         {
-                            MarkOwnershipLost();
+                            SignalOwnershipLost();
                             return;
                         }
                         consecutiveVerificationFailures = 0;
@@ -1338,7 +1365,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             }
             catch
             {
-                MarkOwnershipLost();
+                SignalOwnershipLost();
             }
         }
 
@@ -1359,7 +1386,19 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
 
         private void MarkOwnershipLost()
         {
-            if (Volatile.Read(ref disposed) == 0 && !ownershipLost.IsCancellationRequested)
+            if (Volatile.Read(ref disposed) == 0)
+                SignalOwnershipLost();
+        }
+
+        /// <summary>
+        /// Cancels ownership without the disposed guard. Only safe from code that provably runs
+        /// before <see cref="ownershipLost"/> is disposed: the winning disposer's own body and the
+        /// heartbeat, which that disposer awaits first. Everything else uses
+        /// <see cref="MarkOwnershipLost"/> so a racing caller can never cancel a disposed source.
+        /// </summary>
+        private void SignalOwnershipLost()
+        {
+            if (!ownershipLost.IsCancellationRequested)
                 ownershipLost.Cancel();
         }
 
