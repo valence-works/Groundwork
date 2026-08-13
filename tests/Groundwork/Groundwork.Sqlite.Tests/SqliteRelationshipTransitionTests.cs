@@ -602,7 +602,7 @@ public sealed class SqliteRelationshipTransitionTests
         await using var connection = new SqliteConnection("Data Source=:memory:");
 
         var exception = await Assert.ThrowsAsync<PhysicalRelationshipProviderNotSupportedException>(() =>
-            SqliteDocumentStoreFactory.CreateAsync(
+            SqliteDocumentStoreFactory.OpenPhysicalAsync(
                 connection,
                 manifest,
                 new ProviderIdentity("sqlite", "test"),

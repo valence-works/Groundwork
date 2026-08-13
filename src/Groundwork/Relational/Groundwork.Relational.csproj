@@ -17,7 +17,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Core\Groundwork.Core.csproj" />
     <ProjectReference Include="..\Documents\Groundwork.Documents.csproj" />
-    <ProjectReference Include="..\Materialization\Groundwork.Materialization.csproj" />
     <ProjectReference Include="..\Provider.Relational\Groundwork.Provider.Relational.csproj" />
   </ItemGroup>
 

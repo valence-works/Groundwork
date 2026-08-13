@@ -1,9 +1,0 @@
-<Project>
-  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)..'))" />
-
-  <PropertyGroup>
-    <!-- BenchmarkModelFactory still builds legacy-declaration models for comparison runs; the
-         suppression is scoped here (as in tests/) so src/ keeps its deprecation signal. -->
-    <NoWarn>$(NoWarn);GW0001;GW0002;GW0003;GW0004</NoWarn>
-  </PropertyGroup>
-</Project>

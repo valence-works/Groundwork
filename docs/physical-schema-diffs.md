@@ -51,14 +51,9 @@ earlier create operation or an in-memory route cache. A projected field declared
 `SemanticMigrationRequired` is rejected as `GW-SCHEMA-005`; this additive pipeline never substitutes
 canonical-JSON extraction for an explicitly required semantic transform.
 
-The compatibility `Groundwork.Materialization` planner now schedules the same Core
-`BackfillCanonicalJsonOperation` used by route-native diffs after `CreateIndexOperation`; there is
-no second compatibility backfill operation type. Route-native required projected columns are staged
-nullable, backfilled, and then enforced by `FinalizeProjectedColumnOperation` before their indexes
-are created. Relational providers execute the existing compatibility rebuild at its stage; MongoDB acknowledges it as a native-index no-op because
-new native indexes cover existing documents. This removes the hidden rebuild inside index creation
-and preserves one create-then-backfill semantic sequence while route-native provider execution is
-implemented by issues #46–#48.
+Route-native required projected columns are staged nullable, backfilled through Core's
+`BackfillCanonicalJsonOperation`, and then enforced by `FinalizeProjectedColumnOperation` before
+their indexes are created, preserving one create-then-backfill semantic sequence.
 
 ## Durable state
 

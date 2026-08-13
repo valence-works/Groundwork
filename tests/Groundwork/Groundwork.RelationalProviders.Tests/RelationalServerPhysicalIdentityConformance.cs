@@ -182,6 +182,84 @@ public abstract class RelationalServerPhysicalIdentityConformance<TStore> : Phys
     }
 
     [Theory]
+    [InlineData(StorageIdentityKind.Guid)]
+    [InlineData(StorageIdentityKind.Composite)]
+    public async Task NonStringIdentityKindsPreserveOrdinalProjection(StorageIdentityKind identityKind)
+    {
+        var harness = MutationHarness();
+        var instance = Guid.NewGuid().ToString("N")[..8];
+        var template = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            harness.Provider,
+            includePriority: false,
+            instance: instance,
+            normalizer: harness.Normalizer);
+        var manifest = template.Manifest with
+        {
+            StorageUnits =
+            [
+                template.Manifest.StorageUnits.Single() with
+                {
+                    IdentityPolicy = new IdentityPolicy(identityKind, "id")
+                }
+            ]
+        };
+        var target = PhysicalSchemaTargetCompiler.Compile(
+            manifest,
+            harness.Provider,
+            harness.Normalizer,
+            new DelegatePhysicalNamePolicy(context => $"gw_{instance}_{context.FeatureDefaultLogicalName}"));
+        await PhysicalSchemaApplication.ApplyAsync(target, harness.CreateExecutor());
+        var store = harness.CreateStore(manifest, target.Routes);
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "A-B", "1", """{"category":"upper"}""", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "a-b", "1", """{"category":"lower"}""", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "A-B", "1", """{"category":"updated"}""", 1))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
+            "configurationDocument", "a-b", 1))).Status);
+        Assert.Contains("updated", (await store.LoadAsync("configurationDocument", "A-B"))!.ContentJson);
+        Assert.Null(await store.LoadAsync("configurationDocument", "a-b"));
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task ConcurrentExactCreatesReturnOneSavedAndOneStructuredConflict(PhysicalStorageForm form)
+    {
+        await using var fixture = await CreateIdentityAsync(form);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var arrivals = 0;
+        fixture.Store.WriteInterceptor = async (point, operation, _, _, cancellationToken) =>
+        {
+            if (operation != RelationalPhysicalWriteOperation.Save ||
+                point != fixture.RaceSynchronizationPoint)
+                return;
+            if (Interlocked.Increment(ref arrivals) == 2)
+                release.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken);
+        };
+
+        var first = fixture.Documents.SaveAsync(Save("exact-create-race", "tools", 0));
+        var second = fixture.Documents.SaveAsync(Save("exact-create-race", "tools", 0));
+        var results = await Task.WhenAll(first, second);
+        fixture.Store.WriteInterceptor = null;
+
+        Assert.Single(results, result => result.Status == DocumentStoreWriteStatus.Saved);
+        Assert.Single(results, result => result.Status == DocumentStoreWriteStatus.ConcurrencyConflict);
+        var survivor = await fixture.Documents.LoadAsync("configurationDocument", "exact-create-race");
+        Assert.Equal(1, survivor!.Version);
+        Assert.Equal(1, await fixture.Queries.CountAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-category",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "tools"))],
+            resultOperation: BoundedQueryResultOperation.Count)));
+    }
+
+    [Theory]
     [InlineData(PhysicalStorageForm.SharedDocuments)]
     [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
     [InlineData(PhysicalStorageForm.PhysicalEntityTable)]

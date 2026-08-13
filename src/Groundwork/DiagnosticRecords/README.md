@@ -22,7 +22,7 @@ Elsa Foundation's `IStructuredLogStore` and `IOpenTelemetryStore`, which are mov
 Elsa's Zero-EF Persistence program goal. Elsa direct-references `Groundwork.DiagnosticRecords` and
 ships a Groundwork adapter under `src/Elsa/Diagnostics/Persistence/Groundwork`.
 
-The workload requires guarantees the portable `IDocumentStore` contract cannot honestly provide:
+The workload requires guarantees the `IDocumentStore` document contract cannot honestly provide:
 
 | Requirement | Why document CRUD is not sufficient |
 |---|---|
@@ -174,7 +174,7 @@ exporter, sampling policy, dashboard, or host pipeline.
 - stream and logical storage identity plus schema version;
 - append/trim idempotency windows and a bounded operation clock-skew allowance;
 - bounded batch, payload, record-id, field, query-limit, and predicate-node sizes;
-- portable scalar or multi-value fields, types, case policy, supported predicates, ordering, and
+- provider-neutral scalar or multi-value fields, types, case policy, supported predicates, ordering, and
   latest-per-key support; and
 - named grouped-reduction profiles with one scalar string key, typed output aliases, closed reducers,
   post-reduction predicate/order admission, finite take, and finite string-union bounds; and
@@ -199,7 +199,7 @@ field is absent, so a later non-null value cannot replace the earliest projected
 detects at most the declared bound plus one for each returned group and fails with
 `group_query.union.too_large` instead of truncating. An oversized group outside the returned page,
 including the take-plus-one lookahead row, does not poison that page; it fails when it is selected for
-return. `Int64` sum executes in a provider exact-numeric domain and rejects results outside the portable
+return. `Int64` sum executes in a provider exact-numeric domain and rejects results outside the
 `Int64` range. Group predicates execute against reduced aliases, and reduced pages use the declared
 alias plus group key as their total order. Group results expose only the group key and typed reduced
 fields; they do not nominate a representative raw record. Exact count is intentionally absent from the

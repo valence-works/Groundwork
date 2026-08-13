@@ -6,15 +6,15 @@ namespace Groundwork.RelationalProviders.Tests;
 
 internal static class RelationalSessionPoolPressure
 {
-    public static Task<IAsyncDisposable> BlockSqlServerDocumentsAsync(string connectionString) =>
+    public static Task<IAsyncDisposable> BlockSqlServerDocumentsAsync(string connectionString, string table) =>
         BlockDocumentsAsync(
             new Microsoft.Data.SqlClient.SqlConnection(connectionString),
-            "SELECT COUNT(*) FROM groundwork_documents WITH (TABLOCKX, HOLDLOCK);");
+            $"SELECT COUNT(*) FROM [{table}] WITH (TABLOCKX, HOLDLOCK);");
 
-    public static Task<IAsyncDisposable> BlockPostgreSqlDocumentsAsync(string connectionString) =>
+    public static Task<IAsyncDisposable> BlockPostgreSqlDocumentsAsync(string connectionString, string table) =>
         BlockDocumentsAsync(
             new Npgsql.NpgsqlConnection(connectionString),
-            "LOCK TABLE groundwork_documents IN ACCESS EXCLUSIVE MODE;");
+            $"LOCK TABLE \"{table}\" IN ACCESS EXCLUSIVE MODE;");
 
     public static async Task AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
         IDocumentStore store,

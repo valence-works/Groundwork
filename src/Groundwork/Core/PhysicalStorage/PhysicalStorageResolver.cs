@@ -41,15 +41,6 @@ public static class PhysicalStorageResolver
                 continue;
             }
 
-            if (unit.PhysicalStorage is null)
-            {
-                diagnostics.Add(GroundworkDiagnostic.Error(
-                    "GW-PHYSICAL-001",
-                    $"Storage unit '{unit.Identity.Value}' uses the legacy physicalization model; convert it explicitly through LegacyPhysicalStorageBridge.",
-                    $"storageUnits.{unit.Identity.Value}.physicalStorage"));
-                continue;
-            }
-
             if (!TryResolveScopePolicy(unit, diagnostics, out var scopePolicy))
                 continue;
 

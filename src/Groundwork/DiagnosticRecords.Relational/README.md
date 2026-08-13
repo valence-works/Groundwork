@@ -4,7 +4,7 @@
 provider-neutral `IDiagnosticRecordStore` contract. It does not depend on ordinary Groundwork
 document storage and it does not expose `IQueryable` or provider expressions.
 
-The package owns a portable relational schema model and the transactional behavior shared by SQLite,
+The package owns a provider-neutral relational schema model and the transactional behavior shared by SQLite,
 SQL Server, and PostgreSQL providers: scope-local cursor allocation, immutable records and field
 comparison keys, durable provider time, append/trim outcomes and tombstones, exact `KeepNewest`
 retention, and bounded SQL query translation. Provider packages supply native DDL, connection/session

@@ -154,7 +154,7 @@ read. Provider-owned, route-scoped typed mutation mirrors are written to primary
 documents during every save. Each compiled mutation contributes an additive binding-fence definition,
 while mutations sharing a logical index contribute one deduplicated selector definition. Both flow
 through the ordinary physical-schema plan under the same lease, operation ledger, applied snapshot,
-validation, and CLI lifecycle as portable schema work. Binding definitions install strict collection
+validation, and CLI lifecycle as every other physical-schema change. Binding definitions install strict collection
 validators; selector definitions create exact compound indexes over discriminator, scope, and declared
 logical-index paths on both collections and backfill pre-existing documents once per selector. Backfill
 writes are document-incarnation and version fenced, are

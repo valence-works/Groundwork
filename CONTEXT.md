@@ -173,5 +173,4 @@ indexes. Typed numeric projections validate their original JSON lexemes and decl
 DateTime projections use exact UTC ticks. A cached transaction-topology gate protects factory and
 direct physical materializer/store entry points before side effects or sessions, and route
 validation rejects views, time-series namespaces, and capped collections. Native Number/DateTime
-paths without a typed projection and unsupported keyset/latest query declarations fail before
-traffic.
+paths without a typed projection fail before traffic.

@@ -40,6 +40,47 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     private readonly PostgreSqlContainer container = fixture.Container;
 
     [Fact]
+    public async Task IndependentOperationsUseTheProviderPoolWithoutGlobalSerialization()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames);
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString()));
+        var table = model.Target.Routes.Single().PrimaryStorage.Name.Identifier;
+        var pooled = new NpgsqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            MaxPoolSize = 2
+        }.ConnectionString;
+        var opened = 0;
+        var twoConnectionsOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sessions = Groundwork.Provider.Relational.RelationalSessionFactory.Concurrent(() =>
+        {
+            if (Interlocked.Increment(ref opened) >= 2)
+                twoConnectionsOpened.TrySetResult();
+            return new NpgsqlConnection(pooled);
+        });
+        var store = new RelationalPhysicalDocumentStore(
+            sessions,
+            model.Manifest,
+            model.Target.Routes,
+            new PostgreSqlPhysicalDocumentDialect(),
+            DocumentStoreAccess.Global);
+
+        var blocker = await RelationalSessionPoolPressure.BlockPostgreSqlDocumentsAsync(
+            container.GetConnectionString(),
+            table);
+        await RelationalSessionPoolPressure.AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
+            store,
+            twoConnectionsOpened.Task,
+            blocker);
+    }
+
+    [Fact]
     public async Task Failed_collection_schema_transition_preserves_old_writer_admission()
     {
         var instance = Guid.NewGuid().ToString("N")[..8];

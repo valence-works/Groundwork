@@ -1,4 +1,3 @@
-using Groundwork.Core.Indexing;
 using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
@@ -30,14 +29,9 @@ public sealed class ExplicitManifestSource : IPhysicalSchemaManifestSource
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
-                PhysicalStoragePolicy.Explicit(definition))
-        };
+                PhysicalStoragePolicy.Explicit(definition)));
 
         return new StorageManifest(
             new StorageManifestIdentity("explicit-source-fixture"),

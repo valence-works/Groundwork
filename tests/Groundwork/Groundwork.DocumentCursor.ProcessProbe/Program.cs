@@ -101,16 +101,11 @@ static (StorageManifest Manifest, PhysicalSchemaTarget Target) CreateModel()
         TenancyPolicy.Global,
         ConcurrencyPolicy.Optimistic(),
         SerializationPolicy.Json(),
-        [],
-        [],
-        PhysicalizationPolicy.Portable)
-    {
-        PhysicalStorage = new StorageUnitPhysicalStorage(
+        new StorageUnitPhysicalStorage(
             StorageUnitProvisioningMode.Declared,
             PhysicalStoragePolicy.Explicit(definition),
             [logical],
-            [query])
-    };
+            [query]));
     var manifest = new StorageManifest(
         new StorageManifestIdentity("document-cursor-process-probe"),
         new StorageManifestOwner("groundwork-tests"),

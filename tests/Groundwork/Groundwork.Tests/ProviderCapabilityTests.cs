@@ -22,20 +22,6 @@ public sealed class ProviderCapabilityTests
     }
 
     [Fact]
-    public void UnsupportedRequiredIndexCapabilityBlocksCompatibility()
-    {
-        var capabilities = SampleManifests.PortableCapabilities() with
-        {
-            Indexes = IndexCapabilities.All with { SupportsUniqueIndexes = false }
-        };
-
-        var result = _validator.Validate(SampleManifests.MetadataManifest(), capabilities);
-
-        Assert.False(result.IsCompatible);
-        Assert.Contains(result.Errors, diagnostic => diagnostic.Code == "GW-CAP-007");
-    }
-
-    [Fact]
     public void UnsupportedConcurrencyModeBlocksCompatibility()
     {
         var capabilities = SampleManifests.PortableCapabilities() with

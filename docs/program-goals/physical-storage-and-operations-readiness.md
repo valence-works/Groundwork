@@ -53,7 +53,7 @@ Implementation specs and issues must link to that ADR and must not silently reop
 
 1. Complete and ratify the vocabulary/public-API review, including the names and boundaries of all physical forms.
 2. Specify the provider-neutral physical table, naming, and query-planning contracts.
-3. Implement dedicated document tables and physical entity tables while preserving the portable shared-document fallback.
+3. Implement dedicated document tables and physical entity tables alongside the shared document storage form. (The portable shared-document model that served as the transition fallback was retired and removed under [ADR 0006](../adr/0006-retire-the-portable-document-model.md).)
 4. Implement pooled operation sessions and explicit transactional units of work before performance comparisons are treated as evidence.
 5. Implement provider-neutral manifest-diff planning, schema history, locking, safe/destructive authorization, backfills, and CLI workflows.
 6. Close required query and operational-storage gaps without introducing arbitrary query translation.
@@ -130,7 +130,7 @@ storage, session, materialization, migration, and provider-health signals remain
 ## Readiness Gates
 
 - Canonical JSON remains authoritative in every document and physical entity row; projected columns are atomically maintained and rebuildable.
-- Static document types default to dedicated document tables; types with stable scale-bearing query fields can select physical entity tables; dynamic types retain shared portable storage.
+- Static document types default to dedicated document tables; types with stable scale-bearing query fields can select physical entity tables; dynamic types use the shared document storage form.
 - Required production queries execute server-side or validation fails before serving traffic.
 - Resolved physical names are deterministic, collision-checked, fingerprinted, and recorded in schema history.
 - Additive and backfill changes can be planned and safely applied across all four providers; destructive operations require explicit authorization.

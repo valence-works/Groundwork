@@ -1,9 +1,7 @@
 using Groundwork.Core.Capabilities;
-using Groundwork.Core.Materialization;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
-using Groundwork.Materialization;
 
 namespace Groundwork.SqlServer;
 
@@ -28,8 +26,6 @@ public static class SqlServerGroundworkCapabilities
     private static readonly IReadOnlySet<MissingValueBehavior> MissingValueBehaviors =
         Enum.GetValues<MissingValueBehavior>().ToHashSet();
 
-    private static readonly IReadOnlySet<MaterializationOperationKind> MaterializationOperations =
-        Enum.GetValues<MaterializationOperationKind>().ToHashSet();
 
     public static ProviderIdentity Provider { get; } = new("groundwork-sqlserver", "1.0.0");
 
@@ -61,9 +57,5 @@ public static class SqlServerGroundworkCapabilities
             ConcurrencyModes,
             []);
 
-    public static MaterializationCapabilityReport Materialization() => Materialization(Provider);
-
-    public static MaterializationCapabilityReport Materialization(ProviderIdentity provider) =>
-        new(provider, MaterializationOperations, SupportsSchemaHistory: true);
 
 }

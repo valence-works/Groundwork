@@ -10,7 +10,7 @@ through each provider's `OpenPhysicalAsync` factory and execute exactly the decl
 there is no unbounded query surface and no in-memory fallback.
 
 This repository contains the standalone Groundwork library. An earlier portable document model
-existed and is retired; see [ADR 0006](docs/adr/0006-retire-the-portable-document-model.md).
+existed and has been removed; see [ADR 0006](docs/adr/0006-retire-the-portable-document-model.md).
 
 ## Samples
 
@@ -406,7 +406,6 @@ documented pipeline exit codes for CI/CD.
 - `Groundwork.Core`: manifests, storage intent, provider capability checks, validation, physical
   storage definitions and executable routes, and provider-neutral schema evolution.
 - `Groundwork.Documents`: document-store contracts, bounded queries, and document planning.
-- `Groundwork.Materialization`: provider-neutral materialization planning.
 - `Groundwork.DiagnosticRecords`: bounded append/query/inspection/retention contracts for
   immutable diagnostic streams.
 - `Groundwork.DiagnosticRecords.Relational`: shared relational schema, transactional
@@ -416,8 +415,8 @@ documented pipeline exit codes for CI/CD.
 - `Groundwork.Provider.Relational`: reusable relational provider toolkit (also used by external
   modules).
 - `Groundwork.Sqlite`: SQLite materialization plus document-store and diagnostic-record providers.
-- `Groundwork.SqlServer`: SQL Server materialization and document-store provider.
-- `Groundwork.PostgreSql`: PostgreSQL materialization and document-store provider.
+- `Groundwork.SqlServer`: SQL Server materialization plus document-store and diagnostic-record providers.
+- `Groundwork.PostgreSql`: PostgreSQL materialization plus document-store and diagnostic-record providers.
 - `Groundwork.MongoDb`: MongoDB materialization, document-store, and transactional
   diagnostic-record provider.
 - `Groundwork.SchemaTool`: the `Groundwork.Tool` package — explicit provider-neutral schema

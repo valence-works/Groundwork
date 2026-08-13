@@ -15,7 +15,7 @@ transactional diagnostic-record provider.
   provider-owned native query copy and projected fields remain transactionally synchronized.
 - Converts projected numeric values from their original JSON lexemes before BSON can round them,
   enforces declared Decimal precision/scale, and stores projected DateTime instants as UTC tick
-  integers so equality, uniqueness, and ranges preserve the portable 100ns contract. Native
+  integers so equality, uniqueness, and ranges preserve the provider-neutral 100ns contract. Native
   Number/DateTime query paths without an exact typed projection are refused before traffic.
 - Creates scoped, compound, unique, and direction-aware native indexes from resolved physical routes.
 - Applies additive schema changes through a renewable, generation-fenced manifest/provider lease;
@@ -70,12 +70,10 @@ transactional diagnostic-record provider.
   per-document writes. Canonical BSON, native BSON, projections, linked rows, exact result ledger, and physical
   affected-count checks share one snapshot/majority transaction. The ledger identity excludes the
   provider version so acknowledgement-loss retries survive process restarts and provider upgrades.
-- Saves, loads, updates, deletes, and queries JSON document envelopes.
-- Supports equality, set-membership (`$in`), and case-insensitive `Contains` (regex) query operations over declared indexes.
-- Supports declared-index ordering and skip/limit pagination.
-- Enforces unique declared indexes with MongoDB unique indexes.
-- Uses optimistic concurrency through expected document versions.
-- Exposes `MongoDbGroundworkCapabilities.Runtime()` and `MongoDbGroundworkCapabilities.Materialization()`.
+- Exposes `MongoDbGroundworkCapabilities.Runtime()` and
+  `MongoDbGroundworkCapabilities.RuntimeForTransactionCapableDeployment()`.
+- Exposes `MongoDbGroundworkMaterializer`, which applies a compiled `MongoDbPhysicalStorageModel`
+  through the physical schema executor after proving the deployment's transaction topology.
 - Materializes native scoped record, stream-state, provider-clock, append-ledger, and trim-ledger collections.
 - Executes diagnostic append, trim, cursor allocation, and operation outcomes atomically.
 - Executes bounded predicates, ordering, snapshot continuation, exact count, latest-per-key, and retention server-side.
@@ -100,12 +98,8 @@ defaults.
 
 ## Deliberate Limits
 
-- The compatibility materializer/store retain their pre-route one-field API. New three-form work
-  uses `MongoDbPhysicalStorageModel`, the physical materializer overload, and
-  `MongoDbDocumentStoreFactory.CreatePhysicalAsync`; direct physical-store construction is not a
-  public admission path.
-- Physical bounded handlers currently certify offset paging, not keyset continuation or
-  latest-per-key selection; declarations requiring either fail during store construction.
+- `MongoDbGroundworkMaterializer` accepts compiled `MongoDbPhysicalStorageModel` instances only;
+  direct physical-store construction is not a public admission path.
 - Canonical JSON formatting is normalized when BSON is serialized back to standard JSON; semantic
   JSON values and arbitrary number lexemes are preserved, but original whitespace is not.
 - No Entity Framework dependency.

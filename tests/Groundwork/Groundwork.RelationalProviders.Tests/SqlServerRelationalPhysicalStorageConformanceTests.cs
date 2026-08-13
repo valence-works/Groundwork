@@ -38,6 +38,47 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     private readonly MsSqlContainer container = fixture.Container;
 
     [Fact]
+    public async Task IndependentOperationsUseTheProviderPoolWithoutGlobalSerialization()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
+        var table = model.Target.Routes.Single().PrimaryStorage.Name.Identifier;
+        var pooled = new SqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            MaxPoolSize = 2
+        }.ConnectionString;
+        var opened = 0;
+        var twoConnectionsOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sessions = RelationalSessionFactory.Concurrent(() =>
+        {
+            if (Interlocked.Increment(ref opened) >= 2)
+                twoConnectionsOpened.TrySetResult();
+            return new SqlConnection(pooled);
+        });
+        var store = new RelationalPhysicalDocumentStore(
+            sessions,
+            model.Manifest,
+            model.Target.Routes,
+            new SqlServerPhysicalDocumentDialect(),
+            DocumentStoreAccess.Global);
+
+        var blocker = await RelationalSessionPoolPressure.BlockSqlServerDocumentsAsync(
+            container.GetConnectionString(),
+            table);
+        await RelationalSessionPoolPressure.AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
+            store,
+            twoConnectionsOpened.Task,
+            blocker);
+    }
+
+    [Fact]
     public async Task Failed_collection_schema_transition_preserves_old_writer_admission()
     {
         var instance = Guid.NewGuid().ToString("N")[..8];

@@ -1,7 +1,5 @@
-using Groundwork.Core.Indexing;
 using Groundwork.Core.Intents;
 using Groundwork.Core.Manifests;
-using Groundwork.Core.Queries;
 
 namespace Groundwork.Core.Validation;
 
@@ -83,19 +81,6 @@ public sealed class StorageManifestValidator
 
         if (unit.Serialization is null)
             diagnostics.Add(GroundworkDiagnostic.Error("GW-UNIT-009", "Storage unit serialization policy is required.", $"{target}.serialization"));
-
-        if (unit.Physicalization is null)
-            diagnostics.Add(GroundworkDiagnostic.Error("GW-UNIT-010", "Storage unit physicalization policy is required.", $"{target}.physicalization"));
-
-        AddDuplicateDiagnostics(
-            unit.Indexes.Select(index => index.Identity),
-            "GW-INDEX-001",
-            "Index identities must be unique within a storage unit.",
-            $"{target}.indexes",
-            diagnostics);
-
-        ValidateIndexes(unit, target, diagnostics);
-        ValidateQueries(unit, target, diagnostics);
     }
 
     private static void ValidateStorageIntent(StorageIntent intent, string unitTarget, List<GroundworkDiagnostic> diagnostics)
@@ -106,74 +91,6 @@ public sealed class StorageManifestValidator
                 "GW-UNIT-005",
                 "Storage intents that declare requirements must provide a rationale.",
                 $"{unitTarget}.intent.rationale"));
-        }
-    }
-
-    private static void ValidateIndexes(StorageUnit unit, string unitTarget, List<GroundworkDiagnostic> diagnostics)
-    {
-        for (var indexIndex = 0; indexIndex < unit.Indexes.Count; indexIndex++)
-        {
-            var index = unit.Indexes[indexIndex];
-            var target = $"{unitTarget}.indexes[{indexIndex}]";
-
-            ValidateRequired(index.Identity, "GW-INDEX-002", "Index identity is required.", $"{target}.identity", diagnostics);
-
-            if (index.Fields.Count == 0)
-                diagnostics.Add(GroundworkDiagnostic.Error("GW-INDEX-003", "Index must declare at least one field.", $"{target}.fields"));
-
-            if (index.Fields.Count > 1)
-                diagnostics.Add(GroundworkDiagnostic.Error("GW-INDEX-006", "Compound indexes are not supported by the portable persistence contract yet.", $"{target}.fields"));
-
-            if (index.Fields.Any(field => string.IsNullOrWhiteSpace(field.Path)))
-                diagnostics.Add(GroundworkDiagnostic.Error("GW-INDEX-004", "Index field paths are required.", $"{target}.fields"));
-
-            if (index.IsUnique && index.MissingValueBehavior == MissingValueBehavior.IncludedAsNull)
-            {
-                diagnostics.Add(GroundworkDiagnostic.Warning(
-                    "GW-INDEX-005",
-                    "Unique index includes missing values as null; providers may enforce this differently.",
-                    $"{target}.missingValueBehavior"));
-            }
-        }
-    }
-
-    private static void ValidateQueries(StorageUnit unit, string unitTarget, List<GroundworkDiagnostic> diagnostics)
-    {
-        var indexIdentities = unit.Indexes.Select(index => index.Identity).ToHashSet(StringComparer.Ordinal);
-
-        for (var queryIndex = 0; queryIndex < unit.Queries.Count; queryIndex++)
-        {
-            var query = unit.Queries[queryIndex];
-            var target = $"{unitTarget}.queries[{queryIndex}]";
-
-            ValidateRequired(query.Identity, "GW-QUERY-001", "Query identity is required.", $"{target}.identity", diagnostics);
-
-            if (!indexIdentities.Contains(query.IndexIdentity))
-            {
-                diagnostics.Add(GroundworkDiagnostic.Error(
-                    "GW-QUERY-002",
-                    $"Portable query '{query.Identity}' references undeclared index '{query.IndexIdentity}'.",
-                    $"{target}.indexIdentity"));
-                continue;
-            }
-
-            var index = unit.Indexes.Single(declaredIndex => declaredIndex.Identity == query.IndexIdentity);
-            var unsupportedOperations = query.Operations.Except(index.SupportedOperations).ToList();
-            if (unsupportedOperations.Count != 0)
-            {
-                diagnostics.Add(GroundworkDiagnostic.Error(
-                    "GW-QUERY-003",
-                    $"Portable query '{query.Identity}' requires operations not supported by index '{query.IndexIdentity}': {string.Join(", ", unsupportedOperations)}.",
-                    $"{target}.operations"));
-            }
-
-            if (query.SortSupport != QuerySortSupport.None && !index.IsSortable)
-            {
-                diagnostics.Add(GroundworkDiagnostic.Error(
-                    "GW-QUERY-004",
-                    $"Portable query '{query.Identity}' declares ordering support but index '{query.IndexIdentity}' is not sortable.",
-                    $"{target}.sortSupport"));
-            }
         }
     }
 

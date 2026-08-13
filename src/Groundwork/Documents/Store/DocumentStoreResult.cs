@@ -70,10 +70,3 @@ public enum DocumentStoreWriteStatus
     /// </summary>
     RelationshipConflict
 }
-
-public sealed class UndeclaredDocumentIndexException(string documentKind, string indexName)
-    : InvalidOperationException($"Index '{indexName}' is not declared or is not queryable for document kind '{documentKind}'.")
-{
-    public string DocumentKind { get; } = documentKind;
-    public string IndexName { get; } = indexName;
-}

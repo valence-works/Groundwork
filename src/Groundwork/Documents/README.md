@@ -1,15 +1,13 @@
 # Groundwork Documents
 
-Groundwork Documents owns the `DocumentQuery` runtime request and compatibility bridge alongside
-provider-neutral document/envelope/index plan descriptions. Runtime requests name a declared
-bounded query and never select physical storage or carry scope.
+Groundwork Documents owns the `DocumentQuery` runtime request alongside provider-neutral
+document/envelope plan descriptions. Runtime requests name a declared bounded query and never
+select physical storage or carry scope.
 
-`PortableDocumentQuery` and `DocumentStoreQuery` are obsolete bridge types. Concrete providers
-register `IPhysicalDocumentQueryHandler` implementations with `PhysicalQueryDocumentStore`, which
-compiles before traffic and binds each `DocumentQuery` identity to one plan. Every handler supplies
-exact provider/route/object/index/field certifications; a source-wide capability claim alone cannot
-authorize traffic. The explicit legacy handler certifies only single-field ordinary shapes the old
-provider contract can represent. See
+Concrete providers register `IPhysicalDocumentQueryHandler` implementations with
+`PhysicalQueryDocumentStore`, which compiles before traffic and binds each `DocumentQuery` identity
+to one plan. Every handler supplies exact provider/route/object/index/field certifications; a
+source-wide capability claim alone cannot authorize traffic. See
 [`docs/bounded-physical-query-plans.md`](../../../docs/bounded-physical-query-plans.md).
 
 Provider runtimes also expose `IPhysicalDocumentQueryExplainer` for diagnostic explanation of the
@@ -60,7 +58,7 @@ authorization capabilities nor confidentiality boundaries; applications must not
 rewrite them.
 
 Document cursors use **live-view keyset semantics**. A provider may keep count, page, and hydration
-under one request-local snapshot, but that is not part of the portable cursor guarantee; otherwise
+under one request-local snapshot, but that is not part of the provider-neutral cursor guarantee; otherwise
 concurrent writes between those statements can make `TotalCount` and returned documents describe
 adjacent live views. Across page requests, inserts or updates that land after the boundary may
 appear, while those at or before it do not. Deletes disappear. Moving a returned document's sort key

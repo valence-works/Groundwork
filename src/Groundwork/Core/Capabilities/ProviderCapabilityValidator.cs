@@ -1,4 +1,3 @@
-using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.Validation;
 
@@ -173,53 +172,6 @@ public sealed class ProviderCapabilityValidator
                 "GW-CAP-005",
                 $"Provider does not support concurrency mode '{unit.Concurrency.Kind}'.",
                 $"storageUnits.{unit.Identity}.concurrency"));
-        }
-
-        foreach (var index in unit.Indexes)
-            ValidateIndex(unit, index, capabilities, diagnostics);
-    }
-
-    private static void ValidateIndex(StorageUnit unit, IndexDeclaration index, ProviderCapabilityReport capabilities, List<GroundworkDiagnostic> diagnostics)
-    {
-        if (!capabilities.Indexes.SupportedValueKinds.Contains(index.ValueKind))
-        {
-            diagnostics.Add(GroundworkDiagnostic.Error(
-                "GW-CAP-006",
-                $"Provider does not support index value kind '{index.ValueKind}'.",
-                $"storageUnits.{unit.Identity}.indexes.{index.Identity}.valueKind"));
-        }
-
-        if (index.IsUnique && !capabilities.Indexes.SupportsUniqueIndexes)
-        {
-            diagnostics.Add(GroundworkDiagnostic.Error(
-                "GW-CAP-007",
-                $"Provider does not support unique index '{index.Identity}'.",
-                $"storageUnits.{unit.Identity}.indexes.{index.Identity}.unique"));
-        }
-
-        if (index.IsSortable && !capabilities.Indexes.SupportsSortableIndexes)
-        {
-            diagnostics.Add(GroundworkDiagnostic.Error(
-                "GW-CAP-008",
-                $"Provider does not support sortable index '{index.Identity}'.",
-                $"storageUnits.{unit.Identity}.indexes.{index.Identity}.sortable"));
-        }
-
-        if (!capabilities.Indexes.SupportedMissingValueBehaviors.Contains(index.MissingValueBehavior))
-        {
-            diagnostics.Add(GroundworkDiagnostic.Error(
-                "GW-CAP-009",
-                $"Provider does not support missing value behavior '{index.MissingValueBehavior}'.",
-                $"storageUnits.{unit.Identity}.indexes.{index.Identity}.missingValueBehavior"));
-        }
-
-        var unsupportedOperations = index.SupportedOperations.Except(capabilities.SupportedQueryOperations).ToList();
-        if (unsupportedOperations.Count != 0)
-        {
-            diagnostics.Add(GroundworkDiagnostic.Error(
-                "GW-CAP-010",
-                $"Provider does not support query operations required by index '{index.Identity}': {string.Join(", ", unsupportedOperations)}.",
-                $"storageUnits.{unit.Identity}.indexes.{index.Identity}.operations"));
         }
     }
 }

@@ -103,16 +103,11 @@ public static class SortOnlyResidualPredicateConformance
             TenancyPolicy.Global,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [index],
-                [query])
-        };
+                [query]));
         return new StorageManifest(
             new StorageManifestIdentity($"sort-only-residual.{instance}"),
             new StorageManifestOwner("tests"),

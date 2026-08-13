@@ -205,17 +205,13 @@ public sealed class ManifestExecutableRouteSet
     private static StorageUnit Snapshot(StorageUnit unit) =>
         unit with
         {
-            Indexes = unit.Indexes.ToArray(),
-            Queries = unit.Queries.ToArray(),
-            PhysicalStorage = unit.PhysicalStorage is null
-                ? null
-                : new StorageUnitPhysicalStorage(
-                    unit.PhysicalStorage.ProvisioningMode,
-                    unit.PhysicalStorage.Policy,
-                    unit.PhysicalStorage.LogicalIndexes,
-                    unit.PhysicalStorage.BoundedQueries,
-                    unit.PhysicalStorage.NameOverrides,
-                    unit.PhysicalStorage.BoundedMutations)
+            PhysicalStorage = new StorageUnitPhysicalStorage(
+                unit.PhysicalStorage.ProvisioningMode,
+                unit.PhysicalStorage.Policy,
+                unit.PhysicalStorage.LogicalIndexes,
+                unit.PhysicalStorage.BoundedQueries,
+                unit.PhysicalStorage.NameOverrides,
+                unit.PhysicalStorage.BoundedMutations)
         };
 }
 
@@ -364,7 +360,6 @@ public static class PhysicalRelationshipPlanCompiler
         {
             var location = $"physicalRelationships.{relationship.Identity}";
             if (!units.TryGetValue(relationship.SourceStorageUnit, out var sourceUnit) ||
-                sourceUnit.PhysicalStorage is null ||
                 !routeGroups.TryGetValue(relationship.SourceStorageUnit, out var sourceRouteGroup))
             {
                 diagnostics.Add(Error(
@@ -374,7 +369,6 @@ public static class PhysicalRelationshipPlanCompiler
                 continue;
             }
             if (!units.TryGetValue(relationship.TargetStorageUnit, out var targetUnit) ||
-                targetUnit.PhysicalStorage is null ||
                 !routeGroups.TryGetValue(relationship.TargetStorageUnit, out var targetRouteGroup))
             {
                 diagnostics.Add(Error(

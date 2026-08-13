@@ -2,9 +2,7 @@ using Groundwork.Core.Capabilities;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
-using Groundwork.Core.Validation;
 using Groundwork.Documents.Scoping;
-using Groundwork.Materialization;
 using Groundwork.MongoDb.Materialization;
 using Microsoft.Extensions.Logging;
 using MongoDB.Driver;
@@ -162,76 +160,6 @@ public static class MongoDbDocumentStoreFactory
             validatedOptions,
             cancellationToken);
     }
-
-    [Obsolete(
-        "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
-        + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
-        DiagnosticId = "GW0005")]
-    public static async Task<MongoDbDocumentStoreHandle> CreateAsync(
-        string connectionString,
-        string databaseName,
-        StorageManifest manifest,
-        ProviderIdentity provider,
-        DocumentStoreAccess access,
-        IStorageScopeObserver? scopeObserver = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
-        ArgumentNullException.ThrowIfNull(manifest);
-        ArgumentNullException.ThrowIfNull(provider);
-        ArgumentNullException.ThrowIfNull(access);
-        PhysicalRelationshipProviderAdmission.RequireMaterializationSupport(
-            manifest,
-            provider);
-
-        var client = new MongoClient(connectionString);
-        var disposableClient = (object)client as IDisposable;
-        try
-        {
-            var database = client.GetDatabase(databaseName);
-            var transactionCapability = MongoDbTransactionCapability.ForDatabase(database);
-            await transactionCapability.EnsureSupportedAsync(
-                DocumentKinds(manifest),
-                "document storage",
-                cancellationToken);
-            var runtimeCapabilities = MongoDbGroundworkCapabilities.RuntimeForTransactionCapableDeployment(provider);
-
-            await new MongoDbGroundworkMaterializer(database).MaterializeAsync(
-                CreateMaterializationPlan(manifest, runtimeCapabilities),
-                cancellationToken);
-            return new MongoDbDocumentStoreHandle(
-                disposableClient,
-                new MongoDbDocumentStore(
-                    database,
-                    manifest,
-                    access,
-                    scopeObserver,
-                    transactionCapability.SupportsTransactionsAsync,
-                    startSessionAsync: null,
-                    isTransactionSupportKnown: () => transactionCapability.IsKnownSupported));
-        }
-        catch
-        {
-            disposableClient?.Dispose();
-            throw;
-        }
-    }
-
-    private static MaterializationPlan CreateMaterializationPlan(
-        StorageManifest manifest,
-        ProviderCapabilityReport runtimeCapabilities) =>
-        new MaterializationPlanner(new StorageManifestValidator(), new ProviderCapabilityValidator())
-            .Plan(
-                manifest,
-                runtimeCapabilities,
-                MongoDbGroundworkCapabilities.Materialization(runtimeCapabilities.Provider));
-
-    private static string[] DocumentKinds(StorageManifest manifest) =>
-        manifest.StorageUnits
-            .Select(unit => unit.Identity.Value)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
 
     private static async Task<MongoDbPhysicalDocumentStoreOpenHandle> OpenAdmittedPhysicalAsync(
         IMongoDatabase database,
@@ -503,19 +431,6 @@ public sealed class MongoDbPhysicalDocumentStoreHandle(
     public PhysicalSchemaApplicationResult SchemaApplication { get; } = schemaApplication;
 
     public MongoDbPhysicalDocumentStore Store { get; } = store;
-
-    public ValueTask DisposeAsync() => clientLease.DisposeAsync();
-}
-
-[Obsolete(
-    "The portable document model is retired (ADR 0006). Use OpenPhysicalAsync and execute declared "
-    + "bounded DocumentQuery plans; removal follows with the announced breaking cleanup.",
-    DiagnosticId = "GW0005")]
-public sealed class MongoDbDocumentStoreHandle(IDisposable? client, MongoDbDocumentStore store) : IAsyncDisposable
-{
-    private readonly MongoDbClientLease clientLease = new(client);
-
-    public MongoDbDocumentStore Store { get; } = store;
 
     public ValueTask DisposeAsync() => clientLease.DisposeAsync();
 }

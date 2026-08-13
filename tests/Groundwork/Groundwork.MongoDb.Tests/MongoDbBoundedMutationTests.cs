@@ -1730,11 +1730,7 @@ public sealed class MongoDbBoundedMutationTests(MongoDbReplicaSetTestContainer f
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [logical],
@@ -1745,8 +1741,7 @@ public sealed class MongoDbBoundedMutationTests(MongoDbReplicaSetTestContainer f
                         "activate-eligible",
                         query.Identity,
                         BoundedMutationAction.Assign(actionPath, actionValue))
-                ])
-        };
+                ]));
         var manifest = new StorageManifest(
             new StorageManifestIdentity($"mongo.assignment.{form}"),
             new StorageManifestOwner("tests"),
@@ -2014,11 +2009,7 @@ public sealed class MongoDbBoundedMutationTests(MongoDbReplicaSetTestContainer f
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [logicalIndex],
@@ -2029,8 +2020,7 @@ public sealed class MongoDbBoundedMutationTests(MongoDbReplicaSetTestContainer f
                         "prune-by-id",
                         query.Identity,
                         BoundedMutationAction.Delete())
-                ])
-        };
+                ]));
         var manifest = new StorageManifest(
             new StorageManifestIdentity("mongo.identity-mutation"),
             new StorageManifestOwner("tests"),

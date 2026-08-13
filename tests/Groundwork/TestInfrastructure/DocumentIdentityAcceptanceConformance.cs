@@ -667,17 +667,12 @@ public static class DocumentIdentityAcceptanceModel
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 logicalIndexes,
                 queries,
-                boundedMutations: mutations)
-        };
+                boundedMutations: mutations));
         return new StorageManifest(
             new StorageManifestIdentity($"identity.acceptance.{form}.{stringCasePolicy}.{surface}{suffix}"),
             new StorageManifestOwner("tests"),

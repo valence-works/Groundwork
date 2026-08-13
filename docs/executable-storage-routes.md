@@ -69,10 +69,6 @@ paths, unexpected names, provider identifier collisions, duplicate storage-unit 
 contradictions, invalid linked relationship fields, and scale-bearing demand without a matching
 physical index route.
 
-Legacy portable and optimized declarations first pass through `LegacyPhysicalStorageBridge`.
-Portable behavior remains shared-document storage, while optimized behavior remains shared storage
-plus linked projection/index maintenance.
-
 ## Deliberate exclusions
 
 This Core contract contains no provider SDK types and performs no DDL, schema-history I/O, document

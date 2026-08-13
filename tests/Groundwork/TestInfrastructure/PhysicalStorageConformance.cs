@@ -86,6 +86,78 @@ public abstract class PhysicalStorageConformance
         Assert.Null(await fixture.Documents.LoadAsync("configurationDocument", "a"));
     }
 
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task StaleExpectedVersionSavesAndDeletesAreConflictsAndMutateNothing(PhysicalStorageForm form)
+    {
+        await using var fixture = await CreateAsync(form);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("occ", "tools", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("occ", "other", 1))).Status);
+
+        Assert.Equal(
+            DocumentStoreWriteStatus.ConcurrencyConflict,
+            (await fixture.Documents.SaveAsync(Save("occ", "stale", 1))).Status);
+        var loaded = await fixture.Documents.LoadAsync("configurationDocument", "occ");
+        Assert.Equal(2, loaded!.Version);
+        Assert.Contains("other", loaded.ContentJson);
+        Assert.Equal(0, await fixture.Queries!.CountAsync(CategoryCount("stale")));
+        Assert.Equal(1, await fixture.Queries.CountAsync(CategoryCount("other")));
+
+        Assert.Equal(
+            DocumentStoreWriteStatus.ConcurrencyConflict,
+            (await fixture.Documents.DeleteAsync(new DeleteDocumentRequest("configurationDocument", "occ", 1))).Status);
+        Assert.NotNull(await fixture.Documents.LoadAsync("configurationDocument", "occ"));
+        Assert.Equal(1, await fixture.Queries.CountAsync(CategoryCount("other")));
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task PositiveExpectedVersionAgainstAnAbsentDocumentIsNotFoundAndWritesNothing(PhysicalStorageForm form)
+    {
+        await using var fixture = await CreateAsync(form);
+
+        Assert.Equal(
+            DocumentStoreWriteStatus.NotFound,
+            (await fixture.Documents.SaveAsync(Save("absent", "phantom", 2))).Status);
+        Assert.Null(await fixture.Documents.LoadAsync("configurationDocument", "absent"));
+        Assert.Equal(0, await fixture.Queries!.CountAsync(CategoryCount("phantom")));
+
+        Assert.Equal(
+            DocumentStoreWriteStatus.NotFound,
+            (await fixture.Documents.DeleteAsync(new DeleteDocumentRequest("configurationDocument", "absent", 1))).Status);
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task TakeZeroReturnsAnEmptyWindowWithTheFullTotalCount(PhysicalStorageForm form)
+    {
+        await using var fixture = await CreateAsync(form);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("one", "tools", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await fixture.Documents.SaveAsync(Save("two", "tools", 0))).Status);
+
+        var window = await fixture.Queries!.QueryAsync(new DocumentQuery(
+            "configurationDocument",
+            "list-by-category",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", "tools"))],
+            [new DocumentQueryOrder("category")],
+            take: 0));
+
+        Assert.Empty(window.Documents);
+        Assert.Equal(2, window.TotalCount);
+    }
+
+    private static DocumentQuery CategoryCount(string category) => new(
+        "configurationDocument",
+        "list-by-category",
+        [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", category))],
+        resultOperation: BoundedQueryResultOperation.Count);
+
     [Fact]
     public async Task DedicatedDocumentStorageWorksWithoutALinkedObject()
     {
@@ -339,16 +411,11 @@ public abstract class PhysicalStorageConformance
             TenancyPolicy.Global,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [index],
-                [query])
-        };
+                [query]));
         var manifest = new StorageManifest(
             new StorageManifestIdentity($"unfiltered-global-id.{instance}"),
             new StorageManifestOwner("tests"),

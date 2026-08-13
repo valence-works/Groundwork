@@ -3,8 +3,6 @@ using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using Groundwork.Provider.Relational;
 using Groundwork.Documents.Store;
-using Groundwork.Sqlite.Documents;
-using Groundwork.Sqlite.Materialization;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -74,41 +72,6 @@ public sealed class RelationalSessionFactoryTests
         Assert.Single(database.Connections);
         Assert.Equal(ConnectionState.Closed, database.Connections[0].State);
         Assert.Equal(0, await database.CountValuesAsync());
-    }
-
-    [Fact]
-    public async Task StatelessDocumentFacadeUsesIndependentOwnedConnections()
-    {
-        var databasePath = Path.GetTempFileName();
-        var manifest = ClosedQueryManifests.WidgetManifest();
-        var connections = new List<SqliteConnection>();
-
-        try
-        {
-            await using (var materializationConnection = new SqliteConnection($"Data Source={databasePath}"))
-                await new SqliteGroundworkMaterializer(materializationConnection).MaterializeAsync(manifest, ClosedQueryManifests.Provider);
-
-            var sessions = RelationalSessionFactory.Serialized(() =>
-            {
-                var connection = new SqliteConnection($"Data Source={databasePath}");
-                connections.Add(connection);
-                return connection;
-            });
-            IDocumentStore store = new SqliteDocumentStore(sessions, manifest, Groundwork.Documents.Scoping.DocumentStoreAccess.Global);
-
-            var saved = await store.SaveAsync(new SaveDocumentRequest(
-                "widget", "w1", "1.0.0", """{"name":"w1","category":"tools","sortKey":"001"}"""));
-            var loaded = await store.LoadAsync("widget", "w1");
-
-            Assert.Equal(DocumentStoreWriteStatus.Saved, saved.Status);
-            Assert.NotNull(loaded);
-            Assert.Equal(2, connections.Count);
-            Assert.All(connections, connection => Assert.Equal(ConnectionState.Closed, connection.State));
-        }
-        finally
-        {
-            File.Delete(databasePath);
-        }
     }
 
     [Fact]
@@ -426,23 +389,6 @@ public sealed class RelationalSessionFactoryTests
 
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         Assert.True(await sessions.ExecuteAsync((_, _) => Task.FromResult(true), cancellation.Token));
-    }
-
-    [Fact]
-    public void StatelessSqliteStoreRejectsPrivateInMemoryDatabase()
-    {
-        var exception = Assert.Throws<ArgumentException>(() =>
-            new SqliteDocumentStore("Data Source=:memory:", ClosedQueryManifests.WidgetManifest(), Groundwork.Documents.Scoping.DocumentStoreAccess.Global));
-
-        Assert.Contains("direct-connection constructor", exception.Message);
-    }
-
-    [Fact]
-    public void SqlitePublicConstructorsOwnTheSessionPolicy()
-    {
-        Assert.DoesNotContain(
-            typeof(SqliteDocumentStore).GetConstructors(),
-            constructor => constructor.GetParameters().Any(parameter => parameter.ParameterType == typeof(RelationalSessionFactory)));
     }
 
     private static Task<bool> InsertValueAsync(RelationalUnitOfWork unitOfWork) =>

@@ -51,6 +51,45 @@ public sealed class SqlitePhysicalDocumentStoreTests
         Assert.False(dialect.IsUniqueConstraintException(notNull));
     }
 
+    [Theory]
+    [InlineData(StorageIdentityKind.Guid)]
+    [InlineData(StorageIdentityKind.Composite)]
+    public async Task NonStringIdentityKindsPreserveOrdinalProjection(StorageIdentityKind identityKind)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var (template, _) = SqlitePhysicalSchemaExecutorTests.CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false);
+        var manifest = template with
+        {
+            StorageUnits =
+            [
+                template.StorageUnits.Single() with
+                {
+                    IdentityPolicy = new IdentityPolicy(identityKind, "id")
+                }
+            ]
+        };
+        var target = PhysicalSchemaTargetCompiler.Compile(
+            manifest,
+            SqliteTestManifests.Provider,
+            SqliteGroundworkCapabilities.PhysicalNames);
+        await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
+        var store = new SqlitePhysicalDocumentStore(connection, manifest, target.Routes, DocumentStoreAccess.Global);
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "A-B", "1", """{"category":"upper"}""", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "a-b", "1", """{"category":"lower"}""", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "A-B", "1", """{"category":"updated"}""", 1))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
+            "configurationDocument", "a-b", 1))).Status);
+        Assert.Contains("updated", (await store.LoadAsync("configurationDocument", "A-B"))!.ContentJson);
+        Assert.Null(await store.LoadAsync("configurationDocument", "a-b"));
+    }
+
     [Fact]
     public async Task RequiredProjectionIsValidatedBeforeSqlDispatch()
     {
