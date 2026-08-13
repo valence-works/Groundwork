@@ -285,10 +285,12 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
         var builder = new NpgsqlConnectionStringBuilder(ConnectionString) { MaxPoolSize = 2 };
         NpgsqlConnection.ClearPool(new NpgsqlConnection(builder.ConnectionString));
         var openedTwice = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var active = 0;
         var maximumActive = 0;
         var intercepted = 0;
+        var created = 0;
         var store = await PostgreSqlDiagnosticRecordStoreFactory.CreateAsync(
             builder.ConnectionString,
             definition,
@@ -301,6 +303,8 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
             },
             () =>
             {
+                if (Interlocked.Increment(ref created) == 3)
+                    thirdSessionRequested.TrySetResult();
                 var connection = new NpgsqlConnection(builder.ConnectionString);
                 connection.StateChange += (_, args) =>
                 {
@@ -336,12 +340,14 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
         var second = Append(2);
         await openedTwice.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var third = Append(3);
-        await Task.Delay(200);
 
         try
         {
-            Assert.Equal(2, Volatile.Read(ref maximumActive));
-            Assert.False(third.IsCompleted);
+            await RelationalSessionPoolPressure.AssertWaitsForProviderPoolSessionAsync(
+                third,
+                thirdSessionRequested.Task,
+                () => Volatile.Read(ref maximumActive),
+                sessionLimit: 2);
         }
         finally
         {

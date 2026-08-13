@@ -57,7 +57,9 @@ public sealed class PostgreSqlProviderTests : RelationalProviderContractTests, I
         var builder = new NpgsqlConnectionStringBuilder(container.GetConnectionString()) { MaxPoolSize = 2 };
         var blockerBuilder = new NpgsqlConnectionStringBuilder(builder.ConnectionString) { Pooling = false };
         var twoConnectionsOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var opened = 0;
+        var created = 0;
         var manifest = RelationalTestManifests.MetadataManifest();
         var store = await PostgreSqlDocumentStoreFactory.CreateAsync(
             builder.ConnectionString,
@@ -66,6 +68,8 @@ public sealed class PostgreSqlProviderTests : RelationalProviderContractTests, I
             () => new NpgsqlConnection(builder.ConnectionString),
             () =>
             {
+                if (Interlocked.Increment(ref created) == 3)
+                    thirdSessionRequested.TrySetResult();
                 var connection = new NpgsqlConnection(builder.ConnectionString);
                 connection.StateChange += (_, args) =>
                 {
@@ -80,6 +84,8 @@ public sealed class PostgreSqlProviderTests : RelationalProviderContractTests, I
         await RelationalSessionPoolPressure.AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
             store,
             twoConnectionsOpened.Task,
+            thirdSessionRequested.Task,
+            () => Volatile.Read(ref opened),
             blocker);
     }
 

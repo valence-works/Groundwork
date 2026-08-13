@@ -144,7 +144,9 @@ public sealed class SqlServerProviderTests : RelationalProviderContractTests, IA
         var builder = new SqlConnectionStringBuilder(container.GetConnectionString()) { MaxPoolSize = 2 };
         var blockerBuilder = new SqlConnectionStringBuilder(builder.ConnectionString) { Pooling = false };
         var twoConnectionsOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var opened = 0;
+        var created = 0;
         var manifest = RelationalTestManifests.MetadataManifest();
         var store = await SqlServerDocumentStoreFactory.CreateAsync(
             builder.ConnectionString,
@@ -153,6 +155,8 @@ public sealed class SqlServerProviderTests : RelationalProviderContractTests, IA
             () => new SqlConnection(builder.ConnectionString),
             () =>
             {
+                if (Interlocked.Increment(ref created) == 3)
+                    thirdSessionRequested.TrySetResult();
                 var connection = new SqlConnection(builder.ConnectionString);
                 connection.StateChange += (_, args) =>
                 {
@@ -167,6 +171,8 @@ public sealed class SqlServerProviderTests : RelationalProviderContractTests, IA
         await RelationalSessionPoolPressure.AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
             store,
             twoConnectionsOpened.Task,
+            thirdSessionRequested.Task,
+            () => Volatile.Read(ref opened),
             blocker);
     }
 

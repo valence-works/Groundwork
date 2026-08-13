@@ -434,10 +434,12 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
         var builder = new SqlConnectionStringBuilder(ConnectionString) { MaxPoolSize = 2 };
         SqlConnection.ClearPool(new SqlConnection(builder.ConnectionString));
         var openedTwice = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var active = 0;
         var maximumActive = 0;
         var intercepted = 0;
+        var created = 0;
         var store = await SqlServerDiagnosticRecordStoreFactory.CreateAsync(
             builder.ConnectionString,
             definition,
@@ -450,6 +452,8 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
             },
             () =>
             {
+                if (Interlocked.Increment(ref created) == 3)
+                    thirdSessionRequested.TrySetResult();
                 var connection = new SqlConnection(builder.ConnectionString);
                 connection.StateChange += (_, args) =>
                 {
@@ -485,12 +489,14 @@ internal sealed class SqlServerDiagnosticRecordStoreFixture : IServerDiagnosticR
         var second = Append(2);
         await openedTwice.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var third = Append(3);
-        await Task.Delay(200);
 
         try
         {
-            Assert.Equal(2, Volatile.Read(ref maximumActive));
-            Assert.False(third.IsCompleted);
+            await RelationalSessionPoolPressure.AssertWaitsForProviderPoolSessionAsync(
+                third,
+                thirdSessionRequested.Task,
+                () => Volatile.Read(ref maximumActive),
+                sessionLimit: 2);
         }
         finally
         {
