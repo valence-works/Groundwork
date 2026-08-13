@@ -10,6 +10,7 @@ using Groundwork.PostgreSql;
 using Groundwork.PostgreSql.Documents;
 using Groundwork.PostgreSql.PhysicalStorage;
 using Groundwork.Relational.Documents;
+using Groundwork.Relational.PhysicalStorage;
 using Groundwork.TestInfrastructure;
 using Npgsql;
 using System.Data.Common;
@@ -698,6 +699,40 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                 container.GetConnectionString(),
                 null,
                 beforeState));
+
+    [Fact]
+    public Task Transient_heartbeat_verification_failures_preserve_owned_lock() =>
+        RelationalPhysicalServerAssertions.TransientHeartbeatVerificationFailuresPreserveOwnershipAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            CreateHeartbeatInterceptingExecutor);
+
+    [Fact]
+    public Task Persistent_heartbeat_verification_failure_marks_lock_ownership_lost() =>
+        RelationalPhysicalServerAssertions.PersistentHeartbeatVerificationFailureMarksOwnershipLostAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            CreateHeartbeatInterceptingExecutor);
+
+    private IPhysicalSchemaExecutor CreateHeartbeatInterceptingExecutor(
+        Func<CancellationToken, Task> beforeVerification) =>
+        new RelationalServerPhysicalSchemaExecutor(
+            () => new NpgsqlConnection(
+                new NpgsqlConnectionStringBuilder(container.GetConnectionString()) { Pooling = false }.ConnectionString),
+            new VerificationInterceptingPostgreSqlDialect(beforeVerification));
+
+    private sealed class VerificationInterceptingPostgreSqlDialect(
+        Func<CancellationToken, Task> beforeVerification) : PostgreSqlPhysicalSchemaDialect
+    {
+        public override async Task<bool> VerifyApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken)
+        {
+            await beforeVerification(cancellationToken);
+            return await base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
+        }
+    }
 
     [Fact]
     public Task Terminated_lock_backend_cannot_commit_backfill_or_operation_evidence() =>

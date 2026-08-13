@@ -552,6 +552,67 @@ internal static class RelationalPhysicalServerAssertions
         }
     }
 
+    public static async Task TransientHeartbeatVerificationFailuresPreserveOwnershipAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<Func<CancellationToken, Task>, IPhysicalSchemaExecutor> createExecutor)
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.DedicatedDocumentTable,
+            provider,
+            includePriority: true,
+            normalizer: normalizer);
+        var verifications = 0;
+        var executor = createExecutor(_ =>
+            Interlocked.Increment(ref verifications) is 2 or 3
+                ? Task.FromException(new InvalidOperationException("simulated transient heartbeat verification failure"))
+                : Task.CompletedTask);
+        await using var applicationLock = await executor.AcquireApplicationLockAsync(
+            model.Target.Identity,
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => Volatile.Read(ref verifications) >= 5);
+
+        Assert.False(applicationLock.OwnershipLost.IsCancellationRequested);
+        await executor.ReadHistoryAsync(model.Target.Identity, applicationLock, CancellationToken.None);
+        Assert.False(applicationLock.OwnershipLost.IsCancellationRequested);
+    }
+
+    public static async Task PersistentHeartbeatVerificationFailureMarksOwnershipLostAsync(
+        ProviderIdentity provider,
+        IProviderPhysicalNameNormalizer normalizer,
+        Func<Func<CancellationToken, Task>, IPhysicalSchemaExecutor> createExecutor)
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.DedicatedDocumentTable,
+            provider,
+            includePriority: true,
+            normalizer: normalizer);
+        var verifications = 0;
+        var executor = createExecutor(_ =>
+        {
+            Interlocked.Increment(ref verifications);
+            return Task.FromException(new InvalidOperationException("simulated persistent heartbeat verification failure"));
+        });
+        await using var applicationLock = await executor.AcquireApplicationLockAsync(
+            model.Target.Identity,
+            CancellationToken.None);
+
+        var lost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var registration = applicationLock.OwnershipLost.Register(() => lost.TrySetResult());
+        await lost.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        // Ownership is only forfeited after the bounded run of retries, never on the first blip.
+        Assert.True(Volatile.Read(ref verifications) >= 3);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var attempt = 0; attempt < 400 && !condition(); attempt++)
+            await Task.Delay(TimeSpan.FromMilliseconds(25));
+        Assert.True(condition(), "Timed out waiting for the heartbeat to reach the expected verification count.");
+    }
+
     public static async Task TypedProjectionLiveAndBackfillValuesRemainEquivalentAsync(
         ProviderIdentity provider,
         IProviderPhysicalNameNormalizer normalizer,
