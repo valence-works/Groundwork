@@ -254,8 +254,13 @@ public static class PhysicalStorageResolver
                 $"storageUnits.{unitIdentity.Value}.physicalStorage"));
         }
 
-        var conflictingNumericShapes = demand
-            .Where(x => x.Precision is not null)
+        // The same declaration-consistency rule applies to the numeric twin: every Number field of
+        // every logical index, queried or not, must agree on one declared precision and scale per
+        // path.
+        var conflictingNumericShapes = storage.LogicalIndexes
+            .SelectMany(index => index.Fields
+                .Where(field => index.GetValueKind(field) == IndexValueKind.Number)
+                .Select(field => (field.Path, Precision: index.GetPrecision(field), Scale: index.GetScale(field))))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Where(group => group.Select(x => (x.Precision, x.Scale)).Distinct().Count() > 1)
             .Select(group => group.Key)
