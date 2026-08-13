@@ -1157,7 +1157,6 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         private readonly SemaphoreSlim sessionGate = new(1, 1);
         private readonly CancellationTokenSource ownershipLost = new();
         private readonly Task heartbeat;
-        private Exception? heartbeatFailure;
         private int disposed;
 
         public ApplicationLock(
@@ -1275,13 +1274,11 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     await heartbeat;
                 }
-                catch (Exception failure)
+                catch
                 {
-                    // Defensive: HeartbeatAsync retains its own failures rather than faulting.
-                    // Treat an unexpected fault the same way, as context for a leak and never a
-                    // throw on its own.
+                    // HeartbeatAsync handles its own failures; a fault here would be unexpected,
+                    // and it means the same thing either way: ownership can no longer be trusted.
                     SignalOwnershipLost();
-                    heartbeatFailure ??= failure;
                 }
 
                 await sessionGate.WaitAsync();
@@ -1321,10 +1318,6 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             }
             if (releaseFailed && sessionCloseFailed)
             {
-                // The heartbeat's failure explains why the session went bad, so it rides along as
-                // context. It never triggers the throw on its own.
-                if (heartbeatFailure is { } heartbeatContext)
-                    cleanupFailures.Add(heartbeatContext);
                 throw new AggregateException(
                     $"Physical-schema application lock for target '{Target}' could not be released and its session could not be closed. " +
                     "The lock may still be held, blocking the next acquirer until the server ends that session.",
@@ -1385,12 +1378,8 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             catch (OperationCanceledException) when (heartbeatStop.IsCancellationRequested)
             {
             }
-            catch (Exception failure)
+            catch
             {
-                // Retained rather than rethrown: faulting this task would surface the failure as an
-                // unobserved exception long before the disposer awaits it. Disposal reads it to
-                // explain why ownership was lost.
-                heartbeatFailure = failure;
                 SignalOwnershipLost();
             }
         }

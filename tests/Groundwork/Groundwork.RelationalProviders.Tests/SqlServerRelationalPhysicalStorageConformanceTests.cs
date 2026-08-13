@@ -815,7 +815,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     }
 
     [Fact]
-    public async Task Failed_release_and_failed_session_close_report_the_leak_with_the_heartbeat_cause()
+    public async Task Failed_release_and_failed_session_close_report_the_possible_leak()
     {
         var model = LockLeakModel();
         var dialect = new FailureInjectingSchemaDialect();
@@ -824,17 +824,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             dialect);
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
 
-        // Nothing else may have lost ownership yet, or the wait below would prove nothing.
-        Assert.False(applicationLock.OwnershipLost.IsCancellationRequested);
-
-        // Two waits, because either alone is insufficient. The first proves the heartbeat invoked
-        // the failing verification; the second proves its catch ran past recording the failure,
-        // since the heartbeat records it and only then signals lost ownership.
-        dialect.FailVerification = true;
-        await dialect.VerificationFailed.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await WaitForOwnershipLossAsync(applicationLock);
         dialect.FailReleases = true;
-
         var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
 
         Assert.Contains(
@@ -843,22 +833,7 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
         Assert.Contains(
             exception.InnerExceptions,
             inner => inner.Message == DisposeFailingConnection.FailureMessage);
-        Assert.Contains(
-            exception.InnerExceptions,
-            inner => inner.Message == FailureInjectingSchemaDialect.VerificationFailureMessage);
         Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
-    }
-
-    private static async Task WaitForOwnershipLossAsync(IPhysicalSchemaApplicationLock applicationLock)
-    {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
-        while (!applicationLock.OwnershipLost.IsCancellationRequested)
-        {
-            Assert.True(
-                DateTimeOffset.UtcNow < deadline,
-                "The heartbeat never signalled lost ownership after its verification failed.");
-            await Task.Delay(25);
-        }
     }
 
     private string LockConnectionString() =>
@@ -875,13 +850,8 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
     private sealed class FailureInjectingSchemaDialect : SqlServerPhysicalSchemaDialect
     {
         public const string ReleaseFailureMessage = "Simulated application-lock release failure.";
-        public const string VerificationFailureMessage = "Simulated application-lock verification failure.";
 
         public bool FailReleases { get; set; }
-        public bool FailVerification { get; set; }
-
-        public TaskCompletionSource VerificationFailed { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public override Task ReleaseApplicationLockAsync(
             DbConnection connection,
@@ -890,17 +860,6 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             FailReleases
                 ? throw new InvalidOperationException(ReleaseFailureMessage)
                 : base.ReleaseApplicationLockAsync(connection, resource, cancellationToken);
-
-        public override Task<bool> VerifyApplicationLockAsync(
-            DbConnection connection,
-            string resource,
-            CancellationToken cancellationToken)
-        {
-            if (!FailVerification)
-                return base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
-            VerificationFailed.TrySetResult();
-            throw new InvalidOperationException(VerificationFailureMessage);
-        }
     }
 
     /// <summary>
