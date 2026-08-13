@@ -2,65 +2,40 @@
 
 ![Groundwork banner](docs/assets/groundwork-banner.png)
 
-Groundwork is a provider-neutral persistence foundation for .NET applications. Modules describe storage intent through manifests, and providers translate those manifests into concrete relational or document database structures.
+Groundwork is a provider-neutral persistence foundation for .NET applications. Modules describe
+storage intent through manifests — storage units, logical indexes, and one bounded query
+declaration per read the application performs — and providers (SQLite, PostgreSQL, SQL Server,
+MongoDB) translate those manifests into concrete database structures. Applications open stores
+through each provider's `OpenPhysicalAsync` factory and execute exactly the declared queries;
+there is no unbounded query surface and no in-memory fallback.
 
-This repository contains the standalone Groundwork library.
+This repository contains the standalone Groundwork library. An earlier portable document model
+existed and is retired; see [ADR 0006](docs/adr/0006-retire-the-portable-document-model.md).
 
-Document stores require explicit `DocumentStoreAccess`: `Scoped(StorageScope)` for scoped units or
-`Global` for deliberately global units. Privileged scoped/global/cross-scope sessions require a
-separate `PrivilegedStorageAccess` capability and emit acquisition evidence. Scope is enforced by
-the storage boundary and is never read from document JSON.
+## Samples
 
-## Projects
+### Support tickets
 
-- `Groundwork.Core`: manifests, storage intent, provider capability checks, validation, physical storage definitions and executable routes, and provider-neutral schema evolution.
-- `Groundwork.Documents`: portable document-store contracts and document planning.
-- `Groundwork.DiagnosticRecords`: bounded append/query/inspection/retention contracts for immutable diagnostic streams.
-- `Groundwork.DiagnosticRecords.Relational`: shared relational schema, transactional ledger/retention kernel, and bounded SQL query translation for diagnostic streams.
-- `Groundwork.Relational`: relational planning and shared relational document-store infrastructure.
-- `Groundwork.Sqlite`: SQLite materialization plus document-store and diagnostic-record providers.
-- `Groundwork.SqlServer`: SQL Server materialization and document-store provider.
-- `Groundwork.PostgreSql`: PostgreSQL materialization and document-store provider.
-- `Groundwork.MongoDb`: MongoDB materialization, document-store, and transactional diagnostic-record provider.
-- `Groundwork.Tool`: explicit provider-neutral schema validation, planning, status, and application for CI/CD.
+[`samples/Groundwork.SupportTickets`](samples/Groundwork.SupportTickets) demonstrates a small
+support-ticket domain as an ASP.NET Core API with a React/Vite client. The same manifest runs
+against SQLite, PostgreSQL, SQL Server, or MongoDB.
 
-## Requirements
+The sample:
 
-- .NET SDK 10.0 or newer.
-- Node.js and npm when rebuilding the support-ticket React client.
-- Docker for provider tests that use container-backed databases.
+- declares `supportTicket` and `supportTicketComment` storage units in
+  [`SupportTicketManifest.cs`](samples/Groundwork.SupportTickets/SupportTicketManifest.cs) —
+  logical indexes with declared 128-unit key lengths, bounded query declarations, and explicit
+  physical-entity-table definitions with bounded projected columns;
+- opens the selected provider through its `OpenPhysicalAsync` factory with safe startup
+  auto-apply, resolving each unit's executable route from the store's `Routes`;
+- creates and loads tickets and comments through `IDocumentStore`, and executes every read as a
+  declared `DocumentQuery` through `IBoundedDocumentStore`;
+- updates tickets with optimistic concurrency, including version-gated comment writes;
+- wires the external Inbox module (below) alongside the ticket store and reports its
+  capability fit;
+- serves the built React workspace from `wwwroot`.
 
-## Build And Test
-
-```bash
-dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj
-dotnet test tests/Groundwork/Groundwork.DiagnosticRecords.Tests/Groundwork.DiagnosticRecords.Tests.csproj
-dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
-dotnet test tests/Groundwork/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj
-dotnet test tests/Groundwork/Groundwork.SchemaTool.ProviderTests/Groundwork.SchemaTool.ProviderTests.csproj
-dotnet test samples/Groundwork.SupportTickets.Tests/Groundwork.SupportTickets.Tests.csproj
-npm --prefix samples/Groundwork.SupportTickets/Client run build
-```
-
-Provider integration suites can be run separately when Docker-backed databases are available:
-
-```bash
-dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj
-dotnet test tests/Groundwork/Groundwork.RelationalProviders.Tests/Groundwork.RelationalProviders.Tests.csproj
-```
-
-For explicit deployment-time schema planning and application, see the
-[Groundwork schema tool](docs/schema-tool.md). It supports stable human/JSON output and documented
-pipeline exit codes. Runtime admission remains inspect-only by default; applications may explicitly
-opt into safe-only startup application through `GroundworkRuntimeSchemaAdmissionOptions.AutoApplyOnStartup`.
-Protected destructive or semantic-migration work still requires explicit operator authorization.
-The SQLite, PostgreSQL, and SQL Server `OpenPhysicalAsync` factories accept that common options type;
-MongoDB exposes the same boolean on `MongoDbPhysicalDocumentStoreOptions`.
-
-The physical-storage macrobenchmark scaffolding and its current evidence limits are documented
-in [`benchmarks/Groundwork.PhysicalStorage.Benchmarks`](benchmarks/Groundwork.PhysicalStorage.Benchmarks/README.md).
-
-The support-ticket sample is an ASP.NET Core application backed by the same provider-neutral manifest used in its tests. It declares physical storage directly — logical indexes plus scale-bearing bounded queries resolved through an explicit physical-entity-table definition with bounded projected columns — and opens every provider through its `OpenPhysicalAsync` factory with safe startup auto-apply:
+Run it with:
 
 ```bash
 Groundwork__Provider=Sqlite \
@@ -68,11 +43,53 @@ Groundwork__ConnectionString="Data Source=support-tickets.db" \
 dotnet run --project samples/Groundwork.SupportTickets/Groundwork.SupportTickets.csproj
 ```
 
-The sample also accepts `PostgreSql`, `SqlServer`, and `MongoDb` as `Groundwork__Provider` values when the matching connection string is supplied. For MongoDB, set `Groundwork__DatabaseName` when you want a database name other than `groundwork_support_tickets`.
+then browse to the reported address (http://localhost:5000 by default). The sample also accepts
+`PostgreSql`, `SqlServer`, and `MongoDb` as `Groundwork__Provider` values when the matching
+connection string is supplied; for MongoDB, set `Groundwork__DatabaseName` to override the default
+`groundwork_support_tickets` database name.
+
+For client development, run the API and the Vite dev server separately:
+
+```bash
+GROUNDWORK_SUPPORT_TICKETS_API_URL=http://localhost:5000 \
+npm --prefix samples/Groundwork.SupportTickets/Client run dev
+```
+
+### Inbox: an external capability module
+
+[`samples/Groundwork.Modules.Inbox`](samples/Groundwork.Modules.Inbox) shows Groundwork's
+open/closed capability system from the consumer side: it contributes a brand-new persistence
+semantic — an idempotent inbox / exactly-once consumer — entirely from outside `Groundwork.Core`.
+The module declares a custom `CapabilityId`, a provider implements and advertises it, and the
+standard `ProviderCapabilityValidator` derives provider fit for it exactly as for built-in
+capabilities. See the [module README](samples/Groundwork.Modules.Inbox/README.md).
+
+## Requirements
+
+- .NET SDK 10.0 or newer.
+- Node.js and npm when rebuilding the support-ticket React client.
+- Docker for provider tests that use container-backed databases.
+
+## Packages
+
+Reference the provider package for your database; it brings the core contracts transitively:
+
+- `Groundwork.Sqlite`, `Groundwork.PostgreSql`, `Groundwork.SqlServer` — relational providers.
+- `Groundwork.MongoDb` — MongoDB provider.
+- `Groundwork.Tool` — a `dotnet` tool (`dotnet groundwork`) for explicit deployment-time schema
+  validation, planning, status, and application in CI/CD. Pin it to the same Groundwork release as
+  the application's packages. See [the schema-tool guide](docs/schema-tool.md).
 
 ## Use Groundwork
 
-Groundwork starts with a provider-neutral `StorageManifest`. The manifest below declares a support-ticket document/table shape with string IDs, JSON content, optimistic concurrency, a unique ticket-number logical index, queryable customer/status/assignee/priority logical indexes, and one `BoundedQueryDeclaration` per read the application performs. Applications that also use immutable diagnostic records compose those stream definitions through `DiagnosticRecordDeploymentManifest`; streams are not document storage units. The `Groundwork.Tool` deployment commands then plan, inspect, validate, and apply both declarations from one application source. See [the schema-tool guide](docs/schema-tool.md).
+### Declare a manifest
+
+Groundwork starts with a provider-neutral `StorageManifest`. The manifest below declares a
+support-ticket unit with string IDs, JSON content, optimistic concurrency, keyword logical
+indexes, and one `BoundedQueryDeclaration` per read the application performs. The default
+physical-storage policy synthesizes the projected columns and physical indexes those declarations
+demand; the declared `length` bounds each string key so providers with sized index keys
+(SQL Server) can materialize them:
 
 ```csharp
 using Groundwork.Core.Indexing;
@@ -83,6 +100,8 @@ using Groundwork.Core.Queries;
 
 const string DocumentKind = "supportTicket";
 const string SchemaVersion = "1.0.0";
+
+var equalOnly = new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
 
 var manifest = new StorageManifest(
     new StorageManifestIdentity("support-tickets"),
@@ -100,213 +119,71 @@ var manifest = new StorageManifest(
             SerializationPolicy.Json(),
             new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
-                PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
-                    DocumentKind,
-                    [
-                        // 128 UTF-16 code units keeps the widest key (column + identity
-                        // tie-break) inside SQL Server's 1700-byte index-key budget.
-                        Column("assigneeId"),
-                        Column("customerId"),
-                        Column("priority"),
-                        Column("status"),
-                        Column("ticketNumber")
-                    ],
-                    indexes:
-                    [
-                        // The unique point-lookup index needs no tie-break column; the
-                        // offset-paged list indexes carry the identity tie-break.
-                        new PhysicalIndexDefinition(
-                            "by-ticket-number",
-                            [new PhysicalIndexColumnDefinition("ticketNumber", 0)],
-                            isUnique: true,
-                            missingValueBehavior: MissingValueBehavior.Excluded),
-                        ListIndex("by-customer", "customerId"),
-                        ListIndex("by-status", "status"),
-                        ListIndex("by-assignee", "assigneeId"),
-                        ListIndex("by-priority", "priority")
-                    ])),
+                PhysicalStoragePolicy.Default(),
                 logicalIndexes:
                 [
-                    Keyword("by-ticket-number", "ticketNumber", isUnique: true),
-                    Keyword("by-customer", "customerId"),
-                    Keyword("by-status", "status"),
-                    Keyword("by-assignee", "assigneeId"),
-                    Keyword("by-priority", "priority")
+                    new LogicalIndexDeclaration(
+                        "by-ticket-number",
+                        [new IndexField("ticketNumber")],
+                        IndexValueKind.Keyword,
+                        isUnique: true,
+                        MissingValueBehavior.Excluded,
+                        length: 128),
+                    new LogicalIndexDeclaration(
+                        "by-status",
+                        [new IndexField("status")],
+                        IndexValueKind.Keyword,
+                        isUnique: false,
+                        MissingValueBehavior.Excluded,
+                        length: 128)
                 ],
                 boundedQueries:
                 [
-                    Find("find-by-ticket-number", "by-ticket-number"),
-                    List("list-by-customer", "by-customer"),
-                    List("list-by-status", "by-status"),
-                    List("list-by-assignee", "by-assignee"),
-                    List("list-by-priority", "by-priority")
+                    new BoundedQueryDeclaration(
+                        "find-by-ticket-number",
+                        "by-ticket-number",
+                        equalOnly,
+                        QuerySortSupport.None,
+                        QueryPagingSupport.None,
+                        BoundedQueryExecutionClass.ScaleBearing),
+                    new BoundedQueryDeclaration(
+                        "list-by-status",
+                        "by-status",
+                        equalOnly,
+                        QuerySortSupport.Ascending,
+                        QueryPagingSupport.Offset,
+                        BoundedQueryExecutionClass.ScaleBearing,
+                        supportsTotalCount: true)
                 ]))
     ],
     new HashSet<string> { "schema-history", "optimistic-concurrency" },
     []);
-
-static ProjectedColumnDefinition Column(string path) =>
-    new(path, path, PortablePhysicalType.String, Length: 128);
-
-static PhysicalIndexDefinition ListIndex(string identity, string column) =>
-    new(
-        identity,
-        [
-            new PhysicalIndexColumnDefinition(column, 0),
-            new PhysicalIndexColumnDefinition(new DocumentEnvelopeDefinition().IdComparisonKeyColumn, 1)
-        ],
-        missingValueBehavior: MissingValueBehavior.Excluded);
-
-static LogicalIndexDeclaration Keyword(string identity, string path, bool isUnique = false) =>
-    new(
-        identity,
-        [new IndexField(path)],
-        IndexValueKind.Keyword,
-        isUnique,
-        MissingValueBehavior.Excluded);
-
-static BoundedQueryDeclaration Find(string identity, string indexIdentity) =>
-    new(
-        identity,
-        indexIdentity,
-        Equal(),
-        QuerySortSupport.None,
-        QueryPagingSupport.None,
-        BoundedQueryExecutionClass.ScaleBearing);
-
-static BoundedQueryDeclaration List(string identity, string indexIdentity) =>
-    new(
-        identity,
-        indexIdentity,
-        Equal(),
-        QuerySortSupport.Ascending,
-        QueryPagingSupport.Offset,
-        BoundedQueryExecutionClass.ScaleBearing,
-        supportsTotalCount: true);
-
-static IReadOnlySet<PortableQueryOperation> Equal() =>
-    new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
 ```
 
-Marking every bounded query `ScaleBearing` requires the addressed content paths to be projected
-into typed columns with one physical index per referenced logical index. The explicit
-`PhysicalEntityTable` definition above states exactly what the default policy would synthesize —
-same column and index names, missing-value behavior, and identity tie-break — while adding the
-bounded `Length` that key-width-limited providers such as SQL Server require for String index
-key columns.
+Marking a bounded query `ScaleBearing` requires the addressed content paths to be served by typed
+projected columns with one physical index per referenced logical index. `PhysicalStoragePolicy.Default()`
+synthesizes those from the declarations above. When you need to state the physical shape yourself —
+exact columns, index key order, identity tie-breaks — use `PhysicalStoragePolicy.Explicit` with a
+`PhysicalTableDefinition`; the
+[sample manifest](samples/Groundwork.SupportTickets/SupportTicketManifest.cs) declares explicit
+physical-entity tables that match what the default policy would synthesize.
 
-### Physical storage declarations
+Applications that also use immutable diagnostic records compose those stream definitions through
+`DiagnosticRecordDeploymentManifest`; streams are not document storage units. The `Groundwork.Tool`
+deployment commands plan, inspect, validate, and apply both declarations from one application
+source. See [the schema-tool guide](docs/schema-tool.md).
 
-The legacy positional `StorageUnit` constructor remains source-compatible for the additive bridge
-release, but its `PhysicalizationPolicy`/`IndexDeclaration`/`PortableQueryDeclaration` family is
-obsolete; the manifest above already declares the current surface. Physical intent uses exactly
-three forms:
+### Open a physical document store
 
-- `SharedDocuments` for dynamic/runtime-defined units, with the primary store owned once by the
-  manifest or composition;
-- `DedicatedDocumentTable` for declared units without scale-bearing projected-field demand;
-- `PhysicalEntityTable` for declared units whose bounded queries mark stable non-envelope paths as
-  scale-bearing.
-
-All three forms retain the standard envelope and authoritative canonical JSON. Projected columns
-are rebuildable derivatives, not a second source of truth. An explicit dedicated-document
-definition may also name a linked projected/index table; this preserves document partitioning
-without placing those projections in the primary table. Physical-entity projections remain
-in-primary.
-
-The mechanical first step for an existing manifest is explicit conversion; `Optimized` remains a
-shared document plus linked projection and never becomes an entity table silently:
-
-```csharp
-using Groundwork.Core.PhysicalStorage;
-
-var sharedBinding = new SharedStorageBinding("application-documents");
-var legacyUnit = manifest.StorageUnits.Single();
-var bridgedUnit = LegacyPhysicalStorageBridge.Apply(legacyUnit, sharedBinding);
-
-manifest = manifest with
-{
-    StorageUnits = [bridgedUnit],
-    SharedDocumentStorages =
-    [
-        new SharedDocumentStorageDefinition(
-            sharedBinding,
-            "groundwork_documents",
-            new DocumentEnvelopeDefinition())
-    ]
-};
-
-var resolved = PhysicalStorageResolver.Resolve(
-    manifest,
-    new DelegatePhysicalNamePolicy(context => $"app_{context.FeatureDefaultLogicalName}"),
-    new DelegateProviderPhysicalNameNormalizer(context => context.LogicalName.ToLowerInvariant()));
-
-if (!resolved.IsValid)
-    throw new InvalidOperationException(string.Join(Environment.NewLine, resolved.Diagnostics));
-```
-
-For a new statically declared unit, attach native intent without changing the legacy constructor
-during the bridge release:
-
-```csharp
-var declaredUnit = legacyUnit with
-{
-    PhysicalStorage = new StorageUnitPhysicalStorage(
-        StorageUnitProvisioningMode.Declared,
-        PhysicalStoragePolicy.Default(),
-        logicalIndexes:
-        [
-            new LogicalIndexDeclaration(
-                "by-status",
-                [new IndexField("status")],
-                IndexValueKind.Keyword,
-                isUnique: false,
-                MissingValueBehavior.Excluded)
-        ],
-        boundedQueries:
-        [
-            new BoundedQueryDeclaration(
-                "list-by-status",
-                "by-status",
-                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-                QuerySortSupport.Ascending,
-                QueryPagingSupport.Offset,
-                BoundedQueryExecutionClass.ScaleBearing,
-                sortFields:
-                [new BoundedQuerySortField("status", PhysicalSortDirection.Ascending)])
-        ])
-};
-```
-
-Provider DDL, writes, and runtime query routing now execute from these resolved definitions on all
-four providers; the bridge above exists only so an existing manifest can be converted deliberately
-rather than reinterpreted. The obsolete declarations emit `GW0001`–`GW0004`, and those warnings are
-migration debt: do not suppress them and do not add aliases around them.
-
-The canonical vocabulary for all of this — which terms are ratified, which are legacy, and how the
-bridge retires — is the
-[post-runtime vocabulary and public API reconciliation](docs/reports/groundwork-vocabulary-and-public-api-post-runtime.md).
-[`CONTEXT.md`](CONTEXT.md) is the short reference.
-
-### Storage intent
-
-Storage intent declares the provider capabilities a unit requires. Provider fit is computed from those declared requirements, never from author self-declaration:
-
-- `StorageIntent.PortableDocument(descriptor)`: Groundwork's default portable document/table contract. It requires no capabilities beyond the base contract.
-- `StorageIntent.Operational(rationale, descriptor, requirements)`: declares one or more `CapabilityId` requirements plus the rationale for them. Use it when correctness depends on behavior beyond ordinary document storage — atomic commit across units, concurrency evidence, or operational diagnostics.
-
-`ProviderCapabilityValidator` compares a manifest's requirements against a provider's `ProviderCapabilityReport` and returns a `ProviderFit`; capabilities marked `EvidenceGatedByDefault` in the registry additionally need evidence through `WorkloadEvidencePolicy`. The `WorkloadIntent` descriptor on both factories is a non-binding diagnostic label — it never selects a physical form and never participates in fit.
-
-Configure SQLite by opening a physical document store. Admission is inspect-only by default;
-opting into safe startup auto-apply creates the pending additive schema. The bounded-query store
-is compiled per executable route (one per storage unit):
+Open SQLite with `OpenPhysicalAsync`. Runtime schema admission is inspect-only by default; opting
+into safe startup auto-apply creates the pending additive schema. The bounded-query store is
+created per executable route (one route per storage unit), resolved from the store's `Routes`:
 
 ```csharp
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.SchemaEvolution;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
-using Groundwork.Sqlite;
 using Groundwork.Sqlite.Documents;
 
 var provider = new ProviderIdentity("groundwork-sqlite", "1.0.0");
@@ -317,16 +194,18 @@ SqlitePhysicalDocumentStore store = await SqliteDocumentStoreFactory.OpenPhysica
     DocumentStoreAccess.Global,
     options: new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
 
-var target = PhysicalSchemaTargetCompiler.Compile(manifest, provider, SqliteGroundworkCapabilities.PhysicalNames);
 IBoundedDocumentStore boundedStore = SqlitePhysicalQueryRuntime.Create(
     store,
     manifest,
-    target.Routes.Single(route => route.StorageUnit.Value == DocumentKind),
+    store.Routes.Single(route => route.StorageUnit.Value == DocumentKind),
     provider);
 ```
 
-Configure MongoDB with the same manifest. Its physical store handle owns the client, and the store
-itself is also the bounded-query store for every unit:
+The PostgreSQL and SQL Server factories follow the same shape: `OpenPhysicalAsync` plus a
+`PostgreSqlPhysicalQueryRuntime`/`SqlServerPhysicalQueryRuntime` bound to a route from `Routes`.
+
+MongoDB takes the same manifest. Its `OpenPhysicalAsync` returns an open handle that owns the
+client, and the store itself is also the bounded-query store for every unit:
 
 ```csharp
 using Groundwork.Core.Capabilities;
@@ -346,10 +225,11 @@ IDocumentStore store = handle.Store;                // CRUD and unit-of-work
 IBoundedDocumentStore boundedStore = handle.Store;  // declared bounded queries
 ```
 
-The PostgreSQL and SQL Server factories follow the SQLite shape: `OpenPhysicalAsync` plus a
-`PostgreSqlPhysicalQueryRuntime`/`SqlServerPhysicalQueryRuntime` bound to the compiled route.
+### Save, load, and delete documents
 
-Create, load, query, update, and delete support-ticket documents through the document-store contract. For quick scripts or tests, an anonymous object is enough because `IDocumentStore` stores JSON envelopes:
+`IDocumentStore` stores JSON envelopes, so any CLR type works as long as it serializes to the
+field names the manifest indexes declare. Optimistic concurrency is expressed with
+`ExpectedVersion`:
 
 ```csharp
 using System.Text.Json;
@@ -360,10 +240,7 @@ var ticket = new
     ticketNumber = "TCK-1001",
     customerId = "acme",
     subject = "Invoice export fails",
-    description = "The monthly invoice export returns an empty file.",
     status = "open",
-    priority = "high",
-    assigneeId = "triage",
     openedAt = DateTimeOffset.UtcNow
 };
 
@@ -378,37 +255,15 @@ if (created.Status != DocumentStoreWriteStatus.Saved)
 
 var loaded = await store.LoadAsync(DocumentKind, ticket.ticketNumber);
 
-// Reads execute the declared bounded queries — see "Bounded document queries" below.
-var openTickets = await boundedStore.QueryAsync(new DocumentQuery(
-    DocumentKind,
-    "list-by-status",
-    [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "open"))],
-    take: 25));
-
-var assignedTicketJson = """
-    {
-      "ticketNumber": "TCK-1001",
-      "customerId": "acme",
-      "subject": "Invoice export fails",
-      "description": "The monthly invoice export returns an empty file.",
-      "status": "assigned",
-      "priority": "high",
-      "assigneeId": "agent-alex",
-      "openedAt": "2026-06-12T08:00:00Z"
-    }
-    """;
-
 var updated = await store.SaveAsync(new SaveDocumentRequest(
     DocumentKind,
     "TCK-1001",
     SchemaVersion,
-    assignedTicketJson,
+    """{ "ticketNumber": "TCK-1001", "customerId": "acme", "subject": "Invoice export fails", "status": "assigned", "openedAt": "2026-06-12T08:00:00Z" }""",
     ExpectedVersion: created.Document!.Version));
 
 if (updated.Status == DocumentStoreWriteStatus.ConcurrencyConflict)
     throw new InvalidOperationException("Ticket changed before the assignment was saved.");
-if (updated.Status != DocumentStoreWriteStatus.Saved)
-    throw new InvalidOperationException($"Ticket was not updated: {updated.Status}");
 
 var deleted = await store.DeleteAsync(new DeleteDocumentRequest(
     DocumentKind,
@@ -419,26 +274,18 @@ var deleted = await store.DeleteAsync(new DeleteDocumentRequest(
 ### Bounded document queries
 
 `IBoundedDocumentStore` accepts one closed `DocumentQuery` runtime model bound to a
-`BoundedQueryDeclaration` identity. The compatibility execution surface supports an `AND` of
-`OR`-groups of declared comparisons with ordering, offset paging, and total count. Physical query
-planning additionally validates membership, declared substring/prefix, ranges, compound
-predicates/order, keyset paging, count/any/first, and latest selection against provider handlers.
-Scope comes only from the store session and is mandatory in every physical plan.
+`BoundedQueryDeclaration` identity: an `AND` of `OR`-groups of declared comparisons with ordering,
+offset or keyset paging, total count, and count/any/first result operations. Query planning
+validates every shape against the declaration and the provider's handlers at startup; unsupported
+server-side shapes fail compilation rather than falling back to an unbounded in-memory scan.
 
 ```csharp
 using Groundwork.Documents.Store;
 
-// status IN ('open','assigned') AND subject contains 'invoice' (case-insensitive),
-// newest first, second page of 25, with the full predicate count.
 var query = new DocumentQuery(
-    "supportTicket",
-    "search-open-invoices",
-    [
-        DocumentQueryClause.Of(DocumentQueryComparison.In("status", ["open", "assigned"])),
-        DocumentQueryClause.Of(DocumentQueryComparison.Contains("subject", "invoice"))
-    ],
-    order: [new DocumentQueryOrder("openedAt", PhysicalSortDirection.Descending)],
-    skip: 25,
+    DocumentKind,
+    "list-by-status",
+    [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "open"))],
     take: 25);
 
 DocumentQueryResult page = await boundedStore.QueryAsync(query);
@@ -449,31 +296,22 @@ DocumentEnvelope? first = await boundedStore.FirstOrDefaultAsync(
 bool any = await boundedStore.AnyAsync(query.Select(BoundedQueryResultOperation.Any));
 ```
 
-Operator semantics match EF Core exactly: `Equal` with a `null` value matches documents whose field is null/absent; `In` over an empty set matches nothing; `Contains` is case-insensitive and a null field yields no match (never throws); an empty `DocumentQueryClause` (`DocumentQueryClause.MatchNone`) is a constant-false sentinel; and zero clauses match all documents of the kind. Scoped stores always apply their bound scope. Cross-scope reads require a separately acquired privileged session; there is no query flag that disables isolation.
+Richer declarations unlock richer runtime queries — membership (`In`), declared
+substring/prefix (`Contains`/`StartsWith`), ranges, compound predicates and compound order,
+keyset paging, and latest-per-key selection — always validated against what the declaration and
+provider support. Operator semantics match EF Core exactly: `Equal` with a `null` value matches
+documents whose field is null/absent; `In` over an empty set matches nothing; `Contains` is
+case-insensitive and a null field yields no match (never throws); `DocumentQueryClause.MatchNone`
+is a constant-false sentinel; and zero clauses match all documents of the kind. See
+[bounded physical query plans](docs/bounded-physical-query-plans.md) for source selection,
+compound-prefix rules, and plan diagnostics.
 
-#### Declaring and planning bounded-query support
+### Multi-document transactions
 
-A storage unit declares `BoundedQueryDeclaration` values over logical indexes. Providers compile
-them against the same executable storage route used for CRUD and materialization. Unsupported
-server-side shapes fail startup compilation; Groundwork does not produce an unbounded in-memory
-fallback:
-
-```csharp
-using Groundwork.Core.PhysicalStorage;
-
-IBoundedDocumentStore boundedStore = new PhysicalQueryDocumentStore(
-    executableRoute,
-    unit.PhysicalStorage!,
-    providerQueryCapabilities,
-    providerQueryHandlers);
-```
-
-See [bounded physical query plans](docs/bounded-physical-query-plans.md) for source selection,
-compound-prefix rules, plan diagnostics, and the `GW0004` compatibility bridge.
-
-#### Multi-document transactions
-
-For write commands that persist several related documents all-or-nothing, an `IDocumentStore` is also an `IDocumentSessionFactory`: it begins a document unit of work over a declared `DocumentCommitScope`. Staged `Save`/`Delete` operations are applied to the underlying database transaction and become visible only on `CommitAsync`; `RollbackAsync` (or disposing without committing) discards them.
+For write commands that persist several related documents all-or-nothing, an `IDocumentStore` is
+also an `IDocumentSessionFactory`: it begins a document unit of work over a declared
+`DocumentCommitScope`. Staged `Save`/`Delete` operations become visible only on `CommitAsync`;
+`RollbackAsync` (or disposing without committing) discards them.
 
 ```csharp
 using Groundwork.Core.Transactions;
@@ -509,126 +347,103 @@ catch
 
 Contract:
 
-- **Boundary detection.** `IDocumentSessionFactory.TransactionBoundary` reports `CrossUnitAtomic` when the store can commit multiple documents atomically, or `PerOperation` when it cannot — letting callers choose a compensation path without catching an exception.
-- **Staging.** `SaveAsync`/`DeleteAsync` run against the open unit of work and return their normal `DocumentStoreWriteResult` immediately (including `ConcurrencyConflict`/`NotFound`). They are **not** auto-committed. The all-or-nothing guarantee is the caller's: roll back on any non-success result or exception.
-- **Read-your-writes.** `LoadAsync` inside the unit of work sees staged writes.
-- **Commit/rollback.** `CommitAsync` makes every staged change durable atomically; `RollbackAsync` (and `DisposeAsync` without a prior commit) discards them all. After completion, further operations throw.
-- **Relational** (SQLite/PostgreSQL/SQL Server) is `CrossUnitAtomic`, backed by a real `DbTransaction` and serializing store access for the unit of work's lifetime. Note that some engines (e.g. PostgreSQL) abort the whole transaction on the first failed statement, so rollback is the only valid next step after a non-success result.
-- **MongoDB** uses a multi-document transaction over a client session, which requires a **replica set or sharded** deployment (reported as `CrossUnitAtomic`). On a standalone deployment the boundary is `PerOperation` and `BeginAsync` throws `UnsupportedAtomicCommitException` (a loud failure rather than silent non-atomic writes) — that is the documented fallback contract for that topology.
+- **Boundary detection.** `TransactionBoundary` reports `CrossUnitAtomic` when the store can
+  commit multiple documents atomically, or `PerOperation` when it cannot — letting callers choose
+  a compensation path without catching an exception.
+- **Staging.** `SaveAsync`/`DeleteAsync` run against the open unit of work and return their normal
+  `DocumentStoreWriteResult` immediately (including `ConcurrencyConflict`/`NotFound`). They are
+  **not** auto-committed; the all-or-nothing guarantee is the caller's: roll back on any
+  non-success result or exception. `LoadAsync` inside the unit of work sees staged writes.
+- **Relational** (SQLite/PostgreSQL/SQL Server) is `CrossUnitAtomic`, backed by a real
+  `DbTransaction`. Some engines (e.g. PostgreSQL) abort the whole transaction on the first failed
+  statement, so rollback is the only valid next step after a non-success result.
+- **MongoDB** uses a multi-document transaction over a client session, which requires a replica
+  set or sharded deployment (reported as `CrossUnitAtomic`). On a standalone deployment the
+  boundary is `PerOperation` and `BeginAsync` throws `UnsupportedAtomicCommitException` — a loud
+  failure rather than silent non-atomic writes.
 
-For application code, use a regular CLR type and serialize it with the same JSON field names declared by the manifest indexes:
+### Schema admission and deployment
 
-```csharp
-public sealed class SupportTicket
-{
-    public required string TicketNumber { get; set; }
-    public required string CustomerId { get; set; }
-    public required string Subject { get; set; }
-    public required string Description { get; set; }
-    public required string Status { get; set; }
-    public required string Priority { get; set; }
-    public required string AssigneeId { get; set; }
-    public DateTimeOffset OpenedAt { get; set; }
-    public DateTimeOffset? ResolvedAt { get; set; }
-}
-```
+Runtime schema admission is inspect-only by default. Applications may explicitly opt into
+safe-only startup application through `GroundworkRuntimeSchemaAdmissionOptions.AutoApplyOnStartup`
+(the SQLite, PostgreSQL, and SQL Server factories accept that common options type; MongoDB exposes
+the same boolean on `MongoDbPhysicalDocumentStoreOptions`). Protected destructive or
+semantic-migration work always requires explicit operator authorization through the
+[Groundwork schema tool](docs/schema-tool.md), which supports stable human/JSON output and
+documented pipeline exit codes for CI/CD.
 
-```csharp
-using System.Text.Json;
-using Groundwork.Documents.Store;
+## Concepts
 
-var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+- **Storage intent and capabilities.** Storage intent declares the provider capabilities a unit
+  requires; provider fit is computed from those declared requirements, never from author
+  self-declaration. `StorageIntent.PortableDocument()` is the default document/table contract;
+  `StorageIntent.Operational(rationale, descriptor, requirements)` declares `CapabilityId`
+  requirements plus the rationale when correctness depends on more — atomic commit across units,
+  concurrency evidence, or custom semantics contributed by external modules such as the
+  [Inbox sample](samples/Groundwork.Modules.Inbox/README.md). `ProviderCapabilityValidator`
+  compares a manifest against a provider's capability report and returns a `ProviderFit`.
+- **Physical storage forms.** Physical intent uses exactly three forms: `SharedDocuments` for
+  dynamic/runtime-defined units, `DedicatedDocumentTable` for declared units without scale-bearing
+  projected-field demand, and `PhysicalEntityTable` for declared units whose bounded queries mark
+  stable non-envelope paths as scale-bearing. All three retain the standard envelope and
+  authoritative canonical JSON; projected columns are rebuildable derivatives, never a second
+  source of truth. See [ADR 0003](docs/adr/0003-adopt-three-physical-storage-forms.md) and
+  [executable storage routes](docs/executable-storage-routes.md).
+- **Scoped access.** Document stores require explicit `DocumentStoreAccess`:
+  `Scoped(StorageScope)` for scoped units or `Global` for deliberately global units. Scope is
+  enforced by the storage boundary and never read from document JSON; cross-scope reads require a
+  separately acquired privileged session (`PrivilegedStorageAccess`), and there is no query flag
+  that disables isolation. See [storage scope sessions](docs/storage-scope-sessions.md).
+- **Diagnostic records.** `Groundwork.DiagnosticRecords` provides bounded
+  append/query/inspection/retention contracts for immutable diagnostic streams, deployed alongside
+  document units through the same schema tooling.
 
-var ticket = new SupportTicket
-{
-    TicketNumber = "TCK-1002",
-    CustomerId = "acme",
-    Subject = "Workflow run is stuck",
-    Description = "The workflow run remains in Running after all activities complete.",
-    Status = "open",
-    Priority = "normal",
-    AssigneeId = "triage",
-    OpenedAt = DateTimeOffset.UtcNow
-};
+[`CONTEXT.md`](CONTEXT.md) is the short vocabulary reference; deeper design notes live under
+[`docs/`](docs) and the ADRs under [`docs/adr/`](docs/adr).
 
-var saved = await store.SaveAsync(new SaveDocumentRequest(
-    DocumentKind,
-    ticket.TicketNumber,
-    SchemaVersion,
-    JsonSerializer.Serialize(ticket, json)));
+## Projects
 
-var envelope = await store.LoadAsync(DocumentKind, ticket.TicketNumber);
-var loadedTicket = JsonSerializer.Deserialize<SupportTicket>(envelope!.ContentJson, json)!;
+- `Groundwork.Core`: manifests, storage intent, provider capability checks, validation, physical
+  storage definitions and executable routes, and provider-neutral schema evolution.
+- `Groundwork.Documents`: document-store contracts, bounded queries, and document planning.
+- `Groundwork.Materialization`: provider-neutral materialization planning.
+- `Groundwork.DiagnosticRecords`: bounded append/query/inspection/retention contracts for
+  immutable diagnostic streams.
+- `Groundwork.DiagnosticRecords.Relational`: shared relational schema, transactional
+  ledger/retention kernel, and bounded SQL query translation for diagnostic streams.
+- `Groundwork.Relational`: relational planning and shared relational document-store
+  infrastructure.
+- `Groundwork.Provider.Relational`: reusable relational provider toolkit (also used by external
+  modules).
+- `Groundwork.Sqlite`: SQLite materialization plus document-store and diagnostic-record providers.
+- `Groundwork.SqlServer`: SQL Server materialization and document-store provider.
+- `Groundwork.PostgreSql`: PostgreSQL materialization and document-store provider.
+- `Groundwork.MongoDb`: MongoDB materialization, document-store, and transactional
+  diagnostic-record provider.
+- `Groundwork.SchemaTool`: the `Groundwork.Tool` package — explicit provider-neutral schema
+  validation, planning, status, and application for CI/CD.
 
-loadedTicket.Status = "assigned";
-loadedTicket.AssigneeId = "agent-sam";
-
-await store.SaveAsync(new SaveDocumentRequest(
-    DocumentKind,
-    loadedTicket.TicketNumber,
-    SchemaVersion,
-    JsonSerializer.Serialize(loadedTicket, json),
-    ExpectedVersion: envelope.Version));
-```
-
-The same manifest also supports planning, validation, and provider capability checks before materialization:
-
-```csharp
-using Groundwork.Core.Capabilities;
-using Groundwork.Core.Validation;
-using Groundwork.Documents.Planning;
-using Groundwork.Materialization;
-using Groundwork.Sqlite;
-
-var manifestValidation = new StorageManifestValidator().Validate(manifest);
-if (!manifestValidation.IsValid)
-    throw new InvalidOperationException(string.Join(Environment.NewLine, manifestValidation.Errors));
-
-var runtimeCapabilities = SqliteGroundworkCapabilities.Runtime();
-var materializationCapabilities = SqliteGroundworkCapabilities.Materialization();
-
-var compatibility = new ProviderCapabilityValidator().Validate(manifest, runtimeCapabilities);
-if (!compatibility.IsCompatible)
-    throw new InvalidOperationException(string.Join(Environment.NewLine, compatibility.Errors));
-
-var materializationPlan = new MaterializationPlanner(new StorageManifestValidator(), new ProviderCapabilityValidator())
-    .Plan(manifest, runtimeCapabilities, materializationCapabilities);
-
-var documentPlan = new DocumentManifestPlanner(
-    new MaterializationPlanner(new StorageManifestValidator(), new ProviderCapabilityValidator()))
-    .Plan(manifest, runtimeCapabilities, materializationCapabilities);
-```
-
-Legacy `PhysicalizationPolicy.Optimized` asks current providers to maintain linked native query
-projections for eligible declared indexes. It is not a physical entity table. Convert it with
-`LegacyPhysicalStorageBridge` while providers move to resolved physical definitions.
-
-## Sample
-
-`samples/Groundwork.SupportTickets` demonstrates a small support ticket domain as an ASP.NET Core API with a React/Vite client. The same manifest runs against SQLite, PostgreSQL, SQL Server, or MongoDB.
-
-The sample:
-
-- defines `supportTicket` and `supportTicketComment` storage units with logical indexes and bounded query declarations resolved through the default physical-storage policy;
-- opens the selected provider through its `OpenPhysicalAsync` factory with safe startup auto-apply;
-- creates and loads tickets and comments through `IDocumentStore`;
-- executes every read as a declared `DocumentQuery` through `IBoundedDocumentStore`;
-- updates tickets with optimistic concurrency, including version-gated comment writes;
-- serves a static React workspace from `wwwroot` and proxies client development requests through Vite.
-
-Run it with:
+## Build And Test
 
 ```bash
-Groundwork__Provider=Sqlite \
-Groundwork__ConnectionString="Data Source=support-tickets.db" \
-dotnet run --project samples/Groundwork.SupportTickets/Groundwork.SupportTickets.csproj
+dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj
+dotnet test tests/Groundwork/Groundwork.DiagnosticRecords.Tests/Groundwork.DiagnosticRecords.Tests.csproj
+dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
+dotnet test tests/Groundwork/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj
+dotnet test tests/Groundwork/Groundwork.SchemaTool.ProviderTests/Groundwork.SchemaTool.ProviderTests.csproj
+dotnet test samples/Groundwork.SupportTickets.Tests/Groundwork.SupportTickets.Tests.csproj
+dotnet test samples/Groundwork.Modules.Inbox.Tests/Groundwork.Modules.Inbox.Tests.csproj
+npm --prefix samples/Groundwork.SupportTickets/Client run build
 ```
 
-For client development, run the API and the Vite dev server separately:
+Provider integration suites can be run separately when Docker-backed databases are available:
 
 ```bash
-GROUNDWORK_SUPPORT_TICKETS_API_URL=http://localhost:5000 \
-npm --prefix samples/Groundwork.SupportTickets/Client run dev
+dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj
+dotnet test tests/Groundwork/Groundwork.RelationalProviders.Tests/Groundwork.RelationalProviders.Tests.csproj
 ```
+
+The physical-storage macrobenchmark scaffolding and its current evidence limits are documented in
+[`benchmarks/Groundwork.PhysicalStorage.Benchmarks`](benchmarks/Groundwork.PhysicalStorage.Benchmarks/README.md).
 
 The historical specs and Groundwork-focused planning notes are kept under `specs/` and `docs/`.

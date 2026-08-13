@@ -499,7 +499,9 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         IndexValueKind valueKind,
         bool isUnique,
         MissingValueBehavior missingValueBehavior = MissingValueBehavior.IncludedAsNull,
-        int? length = null)
+        int? length = null,
+        int? precision = null,
+        int? scale = null)
     {
         Identity = identity;
         Fields = fields?.ToArray() ?? throw new ArgumentNullException(nameof(fields));
@@ -507,6 +509,8 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         IsUnique = isUnique;
         MissingValueBehavior = missingValueBehavior;
         Length = length;
+        Precision = precision;
+        Scale = scale;
     }
 
     public string Identity { get; }
@@ -525,6 +529,12 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
     /// </summary>
     public int? Length { get; }
 
+    /// <summary>Default portable decimal precision for <see cref="IndexValueKind.Number"/> fields.</summary>
+    public int? Precision { get; }
+
+    /// <summary>Default portable decimal scale for <see cref="IndexValueKind.Number"/> fields.</summary>
+    public int? Scale { get; }
+
     public IndexValueKind GetValueKind(IndexField field)
     {
         ArgumentNullException.ThrowIfNull(field);
@@ -540,6 +550,26 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         return field.Length ?? Length;
     }
 
+    public int? GetPrecision(IndexField field)
+    {
+        ArgumentNullException.ThrowIfNull(field);
+        return HasFieldDecimalShape(field) ? field.Precision : Precision;
+    }
+
+    public int? GetScale(IndexField field)
+    {
+        ArgumentNullException.ThrowIfNull(field);
+        return HasFieldDecimalShape(field) ? field.Scale : Scale;
+    }
+
+    /// <summary>
+    /// A decimal shape is one pair: a field declaring either component overrides the declaration
+    /// defaults as a whole, so a partial field pair is rejected instead of silently completed.
+    /// </summary>
+    private static bool HasFieldDecimalShape(IndexField field) =>
+        field.Precision is not null || field.Scale is not null;
+
+
     public bool Equals(LogicalIndexDeclaration? other) =>
         other is not null &&
         Identity == other.Identity &&
@@ -547,7 +577,9 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         ValueKind == other.ValueKind &&
         IsUnique == other.IsUnique &&
         MissingValueBehavior == other.MissingValueBehavior &&
-        Length == other.Length;
+        Length == other.Length &&
+        Precision == other.Precision &&
+        Scale == other.Scale;
 
     public override bool Equals(object? obj) => Equals(obj as LogicalIndexDeclaration);
 
@@ -561,6 +593,8 @@ public sealed class LogicalIndexDeclaration : IEquatable<LogicalIndexDeclaration
         hash.Add(IsUnique);
         hash.Add(MissingValueBehavior);
         hash.Add(Length);
+        hash.Add(Precision);
+        hash.Add(Scale);
         return hash.ToHashCode();
     }
 }
@@ -835,6 +869,8 @@ public sealed record ScaleBearingPathDemand(
     PhysicalSortDirection SortDirection,
     IndexValueKind ValueKind,
     int? Length,
+    int? Precision,
+    int? Scale,
     MissingValueBehavior MissingValueBehavior,
     IReadOnlyList<PortableQueryOperation> Operations,
     QuerySortSupport SortSupport,
@@ -855,6 +891,8 @@ public sealed record ScaleBearingPathDemand(
         SortDirection == other.SortDirection &&
         ValueKind == other.ValueKind &&
         Length == other.Length &&
+        Precision == other.Precision &&
+        Scale == other.Scale &&
         MissingValueBehavior == other.MissingValueBehavior &&
         Operations.Count == other.Operations.Count &&
         Operations.ToHashSet().SetEquals(other.Operations) &&
@@ -878,6 +916,8 @@ public sealed record ScaleBearingPathDemand(
         hash.Add(SortDirection);
         hash.Add(ValueKind);
         hash.Add(Length);
+        hash.Add(Precision);
+        hash.Add(Scale);
         hash.Add(MissingValueBehavior);
         foreach (var operation in Operations.Order())
             hash.Add(operation);

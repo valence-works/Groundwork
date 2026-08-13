@@ -230,48 +230,28 @@ public static class PhysicalQueryPlanCompiler
                 : ExecutableStorageObjectRole.CollectionElementStorage;
         var envelopeTarget = collectionStorage is null ? lookupTarget : ExecutableStorageObjectRole.PrimaryStorage;
         var envelopeObject = collectionStorage is null ? lookupObject : route.PrimaryStorage.Name;
-        var scopeColumn = access == PhysicalQueryAccessKind.LinkedIndexThenPrimary
-            ? route.LinkedRelationship!.StorageScope
-            : route.ScopeKey.Column;
-        var scopeIdentifier = access == PhysicalQueryAccessKind.NativeDocumentFields
-            ? capabilities.NativeFieldIdentifiers[PhysicalDocumentFieldPaths.StorageScope]
-            : scopeColumn.Identifier;
         var scope = new PhysicalQueryScope(
-            new PhysicalQueryField(
+            BuildAccessField(
+                access,
                 PhysicalDocumentFieldPaths.StorageScope,
-                scopeIdentifier,
-                access switch
-                {
-                    PhysicalQueryAccessKind.LinkedIndexThenPrimary => PhysicalQueryFieldSource.LinkedRelationship,
-                    PhysicalQueryAccessKind.CollectionElementsThenPrimary => PhysicalQueryFieldSource.Envelope,
-                    PhysicalQueryAccessKind.NativeDocumentFields => PhysicalQueryFieldSource.NativeDocumentField,
-                    _ => PhysicalQueryFieldSource.Envelope
-                },
+                access == PhysicalQueryAccessKind.LinkedIndexThenPrimary
+                    ? route.LinkedRelationship!.StorageScope
+                    : route.ScopeKey.Column,
+                capabilities,
                 envelopeTarget,
-                envelopeObject,
-                IndexValueKind.Keyword),
+                envelopeObject),
             route.ScopePolicy,
             IsMandatory: true,
             route.ScopeKey.UsesGlobalSentinel);
-        var discriminatorColumn = access == PhysicalQueryAccessKind.LinkedIndexThenPrimary
-            ? route.LinkedRelationship!.DocumentKind
-            : route.Discriminator.Column;
-        var discriminatorIdentifier = access == PhysicalQueryAccessKind.NativeDocumentFields
-            ? capabilities.NativeFieldIdentifiers[PhysicalDocumentFieldPaths.DocumentKind]
-            : discriminatorColumn.Identifier;
-        var discriminator = new PhysicalQueryField(
+        var discriminator = BuildAccessField(
+            access,
             PhysicalDocumentFieldPaths.DocumentKind,
-            discriminatorIdentifier,
-            access switch
-            {
-                PhysicalQueryAccessKind.LinkedIndexThenPrimary => PhysicalQueryFieldSource.LinkedRelationship,
-                PhysicalQueryAccessKind.CollectionElementsThenPrimary => PhysicalQueryFieldSource.Envelope,
-                PhysicalQueryAccessKind.NativeDocumentFields => PhysicalQueryFieldSource.NativeDocumentField,
-                _ => PhysicalQueryFieldSource.Envelope
-            },
+            access == PhysicalQueryAccessKind.LinkedIndexThenPrimary
+                ? route.LinkedRelationship!.DocumentKind
+                : route.Discriminator.Column,
+            capabilities,
             envelopeTarget,
-            envelopeObject,
-            IndexValueKind.Keyword);
+            envelopeObject);
         var order = ResolveOrder(
             route,
             selectedSource.Value,
@@ -837,7 +817,7 @@ public static class PhysicalQueryPlanCompiler
         if (appendedIdentityTieBreak)
             requested.Add(PhysicalSortDirection.Ascending);
         if (!indexDirections.SequenceEqual(requested) &&
-            !indexDirections.Select(Opposite).SequenceEqual(requested))
+            !indexDirections.Select(PhysicalSortDirections.Opposite).SequenceEqual(requested))
         {
             diagnostics.Add(Error(
                 "GW-QUERY-006",
@@ -1178,12 +1158,36 @@ public static class PhysicalQueryPlanCompiler
         _ => throw new ArgumentOutOfRangeException(nameof(source), source, null)
     };
 
-    private static PhysicalSortDirection Opposite(PhysicalSortDirection direction) => direction switch
+    /// <summary>
+    /// Builds the scope or discriminator query field for the selected access kind: the column comes
+    /// from the linked relationship under linked access, the identifier from the provider's native
+    /// field map under native access, and the envelope otherwise.
+    /// </summary>
+    private static PhysicalQueryField BuildAccessField(
+        PhysicalQueryAccessKind access,
+        string path,
+        ExecutableColumnRoute column,
+        PhysicalQueryPlannerCapabilities capabilities,
+        ExecutableStorageObjectRole envelopeTarget,
+        ProviderPhysicalObjectName envelopeObject)
     {
-        PhysicalSortDirection.Ascending => PhysicalSortDirection.Descending,
-        PhysicalSortDirection.Descending => PhysicalSortDirection.Ascending,
-        _ => throw new ArgumentOutOfRangeException(nameof(direction), direction, null)
-    };
+        var identifier = access == PhysicalQueryAccessKind.NativeDocumentFields
+            ? capabilities.NativeFieldIdentifiers[path]
+            : column.Identifier;
+        return new PhysicalQueryField(
+            path,
+            identifier,
+            access switch
+            {
+                PhysicalQueryAccessKind.LinkedIndexThenPrimary => PhysicalQueryFieldSource.LinkedRelationship,
+                PhysicalQueryAccessKind.CollectionElementsThenPrimary => PhysicalQueryFieldSource.Envelope,
+                PhysicalQueryAccessKind.NativeDocumentFields => PhysicalQueryFieldSource.NativeDocumentField,
+                _ => PhysicalQueryFieldSource.Envelope
+            },
+            envelopeTarget,
+            envelopeObject,
+            IndexValueKind.Keyword);
+    }
 
     private static GroundworkDiagnostic Error(string code, string message, string target) =>
         GroundworkDiagnostic.Error(code, message, target);
