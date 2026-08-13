@@ -34,8 +34,7 @@ public abstract class ServerDiagnosticRecordStoreConformanceTests : RelationalDi
 
         var firstAppend = first.AppendAsync(batch).AsTask();
         await firstStaged.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        var secondAppend = second.AppendAsync(batch).AsTask();
-        await AssertBlockedAsync(secondAppend);
+        var secondAppend = await StartAppendBlockedAtStreamLockAsync(fixture, () => second.AppendAsync(batch).AsTask());
         releaseFirst.TrySetResult();
         var results = await Task.WhenAll(firstAppend, secondAppend);
         var page = await second.QueryAsync(new(batch.Scope, batch.Stream, 10));
@@ -67,8 +66,7 @@ public abstract class ServerDiagnosticRecordStoreConformanceTests : RelationalDi
 
         var firstAppend = first.AppendAsync(firstBatch).AsTask();
         await firstStaged.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        var secondAppend = second.AppendAsync(secondBatch).AsTask();
-        await AssertBlockedAsync(secondAppend);
+        var secondAppend = await StartAppendBlockedAtStreamLockAsync(fixture, () => second.AppendAsync(secondBatch).AsTask());
         releaseFirst.TrySetResult();
         var committed = await firstAppend;
         await Assert.ThrowsAsync<DiagnosticOperationConflictException>(async () => await secondAppend);
@@ -167,10 +165,26 @@ public abstract class ServerDiagnosticRecordStoreConformanceTests : RelationalDi
         await fixture.AssertPoolPressureAsync(TestDefinition);
     }
 
-    private static async Task AssertBlockedAsync(Task operation)
+    // A bare "still pending after N ms" check false-passes on a loaded runner: the append may not
+    // have reached the stream lock inside the window, so the assertion holds for the wrong reason.
+    // Instead, first require the append to observably request the stream lock (must-fire, short
+    // deadline), then require it to stay pending over a generous must-not-fire budget. Task.WhenAny
+    // exits the budget early only on violation.
+    private static async Task<Task<DiagnosticAppendResult>> StartAppendBlockedAtStreamLockAsync(
+        IServerDiagnosticRecordStoreConformanceFixture fixture,
+        Func<Task<DiagnosticAppendResult>> startAppend)
     {
-        var timeout = Task.Delay(TimeSpan.FromMilliseconds(200));
-        Assert.Same(timeout, await Task.WhenAny(operation, timeout));
+        var streamLockRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.InterceptNext(DiagnosticExecutionPoint.AppendBeforeStreamLock, _ =>
+        {
+            streamLockRequested.TrySetResult();
+            return ValueTask.CompletedTask;
+        });
+        var append = startAppend();
+        await streamLockRequested.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var budget = Task.Delay(TimeSpan.FromSeconds(1));
+        Assert.Same(budget, await Task.WhenAny(append, budget));
+        return append;
     }
 }
 

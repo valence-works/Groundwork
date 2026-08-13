@@ -170,8 +170,18 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
     public IDiagnosticRecordStore OpenStore(DiagnosticRecordStreamDefinition definition) =>
         new PostgreSqlDiagnosticRecordStore(sessions, definition, timeProvider, InterceptAsync);
 
+    // Independent stores use their own session factory but share the fixture's interception
+    // pipeline so conformance tests can observe their execution points.
     public IDiagnosticRecordStore OpenIndependentStore(DiagnosticRecordStreamDefinition definition) =>
-        new PostgreSqlDiagnosticRecordStore(ConnectionString, definition, timeProvider);
+        new PostgreSqlDiagnosticRecordStore(
+            RelationalSessionFactory.Concurrent(() => new NpgsqlConnection(ConnectionString)),
+            definition,
+            timeProvider,
+            InterceptAsync,
+            (snapshot, cancellationToken) => PostgreSqlDiagnosticRecordMaterializer.AdmitAsync(
+                ConnectionString,
+                snapshot,
+                cancellationToken));
 
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {
