@@ -20,31 +20,36 @@ internal static class RelationalSessionPoolPressure
             new Npgsql.NpgsqlConnection(connectionString),
             "LOCK TABLE groundwork_documents IN ACCESS EXCLUSIVE MODE;");
 
-    public static async Task AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
+    public static async Task AssertOperationsRunWhileTheNextWaitsForTheProviderPoolAsync(
         IDocumentStore store,
-        Task twoConnectionsOpened,
-        Task thirdSessionRequested,
+        Task poolSaturated,
+        Task queuedSessionRequested,
         Func<int> openedSessions,
+        int sessionLimit,
         IAsyncDisposable blocker)
     {
-        var first = store.LoadAsync("configurationDocument", "pool-pressure-1");
-        var second = store.LoadAsync("configurationDocument", "pool-pressure-2");
+        var saturating = Enumerable.Range(1, sessionLimit)
+            .Select(index => store.LoadAsync("configurationDocument", $"pool-pressure-{index}"))
+            .ToArray();
         try
         {
-            await twoConnectionsOpened.WaitAsync(MustFireTimeout);
+            await poolSaturated.WaitAsync(MustFireTimeout);
 
             using var cancellation = new CancellationTokenSource();
-            var third = store.LoadAsync("configurationDocument", "pool-pressure-3", cancellation.Token);
-            await AssertWaitsForProviderPoolSessionAsync(third, thirdSessionRequested, openedSessions, sessionLimit: 2);
+            var queued = store.LoadAsync(
+                "configurationDocument",
+                $"pool-pressure-{sessionLimit + 1}",
+                cancellation.Token);
+            await AssertWaitsForProviderPoolSessionAsync(queued, queuedSessionRequested, openedSessions, sessionLimit);
             cancellation.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => third);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
         }
         finally
         {
             await blocker.DisposeAsync();
         }
 
-        await Task.WhenAll(first, second);
+        await Task.WhenAll(saturating);
     }
 
     /// <summary>

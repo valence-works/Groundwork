@@ -282,10 +282,12 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
 
     public async Task AssertPoolPressureAsync(DiagnosticRecordStreamDefinition definition)
     {
-        var builder = new NpgsqlConnectionStringBuilder(ConnectionString) { MaxPoolSize = 2 };
+        const int maxPoolSize = 2;
+        var builder = new NpgsqlConnectionStringBuilder(ConnectionString) { MaxPoolSize = maxPoolSize };
         NpgsqlConnection.ClearPool(new NpgsqlConnection(builder.ConnectionString));
-        var openedTwice = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thirdSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var poolSaturated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstStaged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var active = 0;
         var maximumActive = 0;
@@ -299,12 +301,15 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
             {
                 if (point == RelationalDiagnosticRecordExecutionPoint.AppendAfterRecordStagedBeforeCommit &&
                     Interlocked.CompareExchange(ref intercepted, 1, 0) == 0)
+                {
+                    firstStaged.TrySetResult();
                     await releaseFirst.Task.WaitAsync(cancellationToken);
+                }
             },
             () =>
             {
-                if (Interlocked.Increment(ref created) == 3)
-                    thirdSessionRequested.TrySetResult();
+                if (Interlocked.Increment(ref created) == maxPoolSize + 1)
+                    queuedSessionRequested.TrySetResult();
                 var connection = new NpgsqlConnection(builder.ConnectionString);
                 connection.StateChange += (_, args) =>
                 {
@@ -319,8 +324,8 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
                                 break;
                             observed = prior;
                         }
-                        if (current == 2)
-                            openedTwice.TrySetResult();
+                        if (current == maxPoolSize)
+                            poolSaturated.TrySetResult();
                     }
                     else if (args.OriginalState == System.Data.ConnectionState.Open)
                         Interlocked.Decrement(ref active);
@@ -335,19 +340,18 @@ internal sealed class PostgreSqlDiagnosticRecordStoreFixture : IServerDiagnostic
             [new($"pool-record-{index}", now, "{}")])).AsTask();
 
         var first = Append(1);
-        while (Volatile.Read(ref intercepted) == 0)
-            await Task.Delay(10).WaitAsync(TimeSpan.FromSeconds(10));
+        await firstStaged.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var second = Append(2);
-        await openedTwice.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await poolSaturated.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var third = Append(3);
 
         try
         {
             await RelationalSessionPoolPressure.AssertWaitsForProviderPoolSessionAsync(
                 third,
-                thirdSessionRequested.Task,
+                queuedSessionRequested.Task,
                 () => Volatile.Read(ref maximumActive),
-                sessionLimit: 2);
+                maxPoolSize);
         }
         finally
         {
