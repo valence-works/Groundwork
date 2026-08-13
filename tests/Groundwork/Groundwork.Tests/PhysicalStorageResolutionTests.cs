@@ -456,6 +456,63 @@ public sealed class PhysicalStorageResolutionTests
     }
 
     [Fact]
+    public void UnqueriedConflictingLengthsStayInertWithoutScaleBearingDemand()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Default(),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-customer-unbounded",
+                    [new IndexField("customerId")],
+                    IndexValueKind.Keyword,
+                    false)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        // Nothing demands the path, so no shared projected column is synthesized and the conflicting
+        // declarations have no physical consequence to protect against.
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+        Assert.Empty(Assert.Single(result.Definitions).Definition.ProjectedColumns);
+    }
+
+    [Fact]
+    public void ExplicitPolicyUnitIgnoresInertDeclaredLengthConflicts()
+    {
+        var physicalStorage = new StorageUnitPhysicalStorage(
+            StorageUnitProvisioningMode.Declared,
+            PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.DedicatedDocumentTable("configurationDocument")),
+            [
+                new LogicalIndexDeclaration(
+                    "by-customer",
+                    [new IndexField("customerId", Length: 64)],
+                    IndexValueKind.Keyword,
+                    false),
+                new LogicalIndexDeclaration(
+                    "by-customer-unbounded",
+                    [new IndexField("customerId")],
+                    IndexValueKind.Keyword,
+                    false)
+            ]);
+
+        var result = PhysicalStorageResolver.Resolve(
+            WithPhysicalStorage(SampleManifests.MetadataManifest(), physicalStorage),
+            PhysicalNamePolicy.Identity,
+            ProviderPhysicalNameNormalizer.Identity);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(x => x.Message)));
+    }
+
+    [Fact]
     public void UnqueriedIndexDeclarationsParticipateInPathLengthConflicts()
     {
         var physicalStorage = new StorageUnitPhysicalStorage(

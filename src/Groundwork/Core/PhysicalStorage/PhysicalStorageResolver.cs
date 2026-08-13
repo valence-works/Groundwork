@@ -229,18 +229,29 @@ public static class PhysicalStorageResolver
 
         // An omitted length is an unbounded contract, not a missing opinion: mixing it with a declared
         // length for the same path would silently narrow the shared projected column and reject writes
-        // the unbounded declaration permits. Every typed declaration site for a path participates —
-        // string-kind fields of all logical indexes, queried or not, and scale-bearing residual
-        // predicates.
+        // the unbounded declaration permits. Consistency is enforced only for paths scale-bearing
+        // demand actually projects — declarations nothing demands synthesize nothing and stay inert —
+        // but for a demanded path every typed declaration site participates: string-kind fields of
+        // all logical indexes, queried or not, and scale-bearing residual predicates.
+        var scaleBearingResiduals = storage.BoundedQueries
+            .Where(query => query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing)
+            .SelectMany(query => query.ResidualPredicateFields)
+            .ToArray();
+        var demandedStringPaths = demand
+            .Where(x => PhysicalStorageDeclarationValidator.IsStringKind(x.ValueKind))
+            .Select(x => x.Path)
+            .Concat(scaleBearingResiduals
+                .Where(field => PhysicalStorageDeclarationValidator.IsStringKind(field.ValueKind))
+                .Select(field => field.Path))
+            .ToHashSet(StringComparer.Ordinal);
         var conflictingKeyLengths = storage.LogicalIndexes
             .SelectMany(index => index.Fields
                 .Where(field => PhysicalStorageDeclarationValidator.IsStringKind(index.GetValueKind(field)))
                 .Select(field => (field.Path, Length: index.GetLength(field))))
-            .Concat(storage.BoundedQueries
-                .Where(query => query.ExecutionClass == BoundedQueryExecutionClass.ScaleBearing)
-                .SelectMany(query => query.ResidualPredicateFields)
+            .Concat(scaleBearingResiduals
                 .Where(field => PhysicalStorageDeclarationValidator.IsStringKind(field.ValueKind))
                 .Select(field => (field.Path, field.Length)))
+            .Where(x => demandedStringPaths.Contains(x.Path))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Where(group => group.Select(x => x.Length).Distinct().Count() > 1)
             .Select(group => group.Key)
@@ -254,13 +265,17 @@ public static class PhysicalStorageResolver
                 $"storageUnits.{unitIdentity.Value}.physicalStorage"));
         }
 
-        // The same declaration-consistency rule applies to the numeric twin: every Number field of
-        // every logical index, queried or not, must agree on one declared precision and scale per
-        // path.
+        // The same demand-scoped declaration-consistency rule applies to the numeric twin: every
+        // Number declaration of a demanded path must agree on one precision and scale.
+        var demandedNumericPaths = demand
+            .Where(x => x.ValueKind == IndexValueKind.Number)
+            .Select(x => x.Path)
+            .ToHashSet(StringComparer.Ordinal);
         var conflictingNumericShapes = storage.LogicalIndexes
             .SelectMany(index => index.Fields
                 .Where(field => index.GetValueKind(field) == IndexValueKind.Number)
                 .Select(field => (field.Path, Precision: index.GetPrecision(field), Scale: index.GetScale(field))))
+            .Where(x => demandedNumericPaths.Contains(x.Path))
             .GroupBy(x => x.Path, StringComparer.Ordinal)
             .Where(group => group.Select(x => (x.Precision, x.Scale)).Distinct().Count() > 1)
             .Select(group => group.Key)
