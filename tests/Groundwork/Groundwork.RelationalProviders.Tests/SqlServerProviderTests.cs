@@ -141,10 +141,13 @@ public sealed class SqlServerProviderTests : RelationalProviderContractTests, IA
     [Fact]
     public async Task IndependentOperationsUseTheProviderPoolWithoutGlobalSerialization()
     {
-        var builder = new SqlConnectionStringBuilder(container.GetConnectionString()) { MaxPoolSize = 2 };
+        const int maxPoolSize = 2;
+        var builder = new SqlConnectionStringBuilder(container.GetConnectionString()) { MaxPoolSize = maxPoolSize };
         var blockerBuilder = new SqlConnectionStringBuilder(builder.ConnectionString) { Pooling = false };
-        var twoConnectionsOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var poolSaturated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var opened = 0;
+        var created = 0;
         var manifest = RelationalTestManifests.MetadataManifest();
         var store = await SqlServerDocumentStoreFactory.CreateAsync(
             builder.ConnectionString,
@@ -153,20 +156,26 @@ public sealed class SqlServerProviderTests : RelationalProviderContractTests, IA
             () => new SqlConnection(builder.ConnectionString),
             () =>
             {
+                if (Interlocked.Increment(ref created) == maxPoolSize + 1)
+                    queuedSessionRequested.TrySetResult();
                 var connection = new SqlConnection(builder.ConnectionString);
                 connection.StateChange += (_, args) =>
                 {
-                    if (args.CurrentState == System.Data.ConnectionState.Open && Interlocked.Increment(ref opened) == 2)
-                        twoConnectionsOpened.TrySetResult();
+                    if (args.CurrentState == System.Data.ConnectionState.Open &&
+                        Interlocked.Increment(ref opened) == maxPoolSize)
+                        poolSaturated.TrySetResult();
                 };
                 return connection;
             },
             Groundwork.Documents.Scoping.DocumentStoreAccess.Global);
         var blocker = await RelationalSessionPoolPressure.BlockSqlServerDocumentsAsync(blockerBuilder.ConnectionString);
 
-        await RelationalSessionPoolPressure.AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
+        await RelationalSessionPoolPressure.AssertOperationsRunWhileTheNextWaitsForTheProviderPoolAsync(
             store,
-            twoConnectionsOpened.Task,
+            poolSaturated.Task,
+            queuedSessionRequested.Task,
+            () => Volatile.Read(ref opened),
+            maxPoolSize,
             blocker);
     }
 
