@@ -824,10 +824,15 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             dialect);
         var applicationLock = await executor.AcquireApplicationLockAsync(model.Target.Identity, CancellationToken.None);
 
-        // Wait for the heartbeat to actually observe the injected failure rather than inferring it
-        // from the ownership signal, which other paths can also raise.
+        // Nothing else may have lost ownership yet, or the wait below would prove nothing.
+        Assert.False(applicationLock.OwnershipLost.IsCancellationRequested);
+
+        // Two waits, because either alone is insufficient. The first proves the heartbeat invoked
+        // the failing verification; the second proves its catch ran past recording the failure,
+        // since the heartbeat records it and only then signals lost ownership.
         dialect.FailVerification = true;
         await dialect.VerificationFailed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await WaitForOwnershipLossAsync(applicationLock);
         dialect.FailReleases = true;
 
         var exception = await Assert.ThrowsAsync<AggregateException>(() => applicationLock.DisposeAsync().AsTask());
@@ -842,6 +847,18 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
             exception.InnerExceptions,
             inner => inner.Message == FailureInjectingSchemaDialect.VerificationFailureMessage);
         Assert.True(applicationLock.OwnershipLost.IsCancellationRequested);
+    }
+
+    private static async Task WaitForOwnershipLossAsync(IPhysicalSchemaApplicationLock applicationLock)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (!applicationLock.OwnershipLost.IsCancellationRequested)
+        {
+            Assert.True(
+                DateTimeOffset.UtcNow < deadline,
+                "The heartbeat never signalled lost ownership after its verification failed.");
+            await Task.Delay(25);
+        }
     }
 
     private string LockConnectionString() =>
