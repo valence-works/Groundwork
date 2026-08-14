@@ -149,16 +149,11 @@ public static class BenchmarkModelFactory
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(table),
                 [indexedLogical, orderedLogical],
-                [indexedQuery, orderedQuery])
-        };
+                [indexedQuery, orderedQuery]));
         return new StorageManifest(
             new StorageManifestIdentity($"benchmark.{instance}"),
             new StorageManifestOwner("groundwork-benchmark-harness"),

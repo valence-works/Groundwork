@@ -644,28 +644,6 @@ public sealed class ExecutableStorageRouteCompilerTests
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-ROUTE-006");
     }
 
-    [Fact]
-    public void LegacyOptimizedDeclarationCompilesToSharedLinkedBehavior()
-    {
-        var binding = new SharedStorageBinding("runtime-documents");
-        var template = SampleManifests.MetadataManifest();
-        var legacyUnit = template.StorageUnits.Single() with { Physicalization = PhysicalizationPolicy.Optimized };
-        var converted = LegacyPhysicalStorageBridge.Apply(legacyUnit, binding);
-        var manifest = template with
-        {
-            StorageUnits = [converted],
-            SharedDocumentStorages =
-            [new SharedDocumentStorageDefinition(binding, "documents", new DocumentEnvelopeDefinition())]
-        };
-
-        var route = AssertRoute(ExecutableStorageRouteCompiler.Compile(Resolve(manifest)));
-
-        Assert.Equal(PhysicalStorageForm.SharedDocuments, route.Form);
-        Assert.NotNull(route.LinkedIndexStorage);
-        Assert.Equal("document_id", route.LinkedRelationship!.DocumentId.Identifier);
-        Assert.All(route.ProjectedColumns, column => Assert.Equal(ExecutableStorageObjectRole.LinkedIndexStorage, column.Target));
-    }
-
     private static ExecutableStorageRoute AssertRoute(ExecutableStorageRouteCompilationResult result)
     {
         Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));

@@ -6,8 +6,10 @@ using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.Documents.UnitOfWork;
 using Groundwork.Provider.Relational;
+using Groundwork.Relational.Documents;
 using Groundwork.Sqlite.Documents;
 using Groundwork.Sqlite.PhysicalStorage;
+using Groundwork.TestInfrastructure;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -49,6 +51,45 @@ public sealed class SqlitePhysicalDocumentStoreTests
         Assert.True(dialect.IsUniqueConstraintException(unique));
         Assert.Equal(1299, notNull.SqliteExtendedErrorCode);
         Assert.False(dialect.IsUniqueConstraintException(notNull));
+    }
+
+    [Theory]
+    [InlineData(StorageIdentityKind.Guid)]
+    [InlineData(StorageIdentityKind.Composite)]
+    public async Task NonStringIdentityKindsPreserveOrdinalProjection(StorageIdentityKind identityKind)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var (template, _) = SqlitePhysicalSchemaExecutorTests.CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: false);
+        var manifest = template with
+        {
+            StorageUnits =
+            [
+                template.StorageUnits.Single() with
+                {
+                    IdentityPolicy = new IdentityPolicy(identityKind, "id")
+                }
+            ]
+        };
+        var target = PhysicalSchemaTargetCompiler.Compile(
+            manifest,
+            SqliteTestManifests.Provider,
+            SqliteGroundworkCapabilities.PhysicalNames);
+        await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
+        var store = new SqlitePhysicalDocumentStore(connection, manifest, target.Routes, DocumentStoreAccess.Global);
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "A-B", "1", """{"category":"upper"}""", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "a-b", "1", """{"category":"lower"}""", 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "configurationDocument", "A-B", "1", """{"category":"updated"}""", 1))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
+            "configurationDocument", "a-b", 1))).Status);
+        Assert.Contains("updated", (await store.LoadAsync("configurationDocument", "A-B"))!.ContentJson);
+        Assert.Null(await store.LoadAsync("configurationDocument", "a-b"));
     }
 
     [Fact]
@@ -405,20 +446,85 @@ public sealed class SqlitePhysicalDocumentStoreTests
         }
     }
 
-    [Fact]
-    public void StatelessSqliteFacadeRejectsPrivateInMemoryStorage()
+    [Theory]
+    [InlineData("Data Source=:memory:")]
+    [InlineData("Data Source=:MEMORY:")]
+    [InlineData("Data Source=file::memory:")]
+    [InlineData("Data Source=file::memory:?cache=shared")]
+    [InlineData("Data Source=file:groundwork.db?mode=memory")]
+    [InlineData("Data Source=file:groundwork.db?MODE=MEMORY&cache=shared")]
+    [InlineData("Data Source=groundwork.db;Mode=Memory")]
+    public void StatelessSqliteFacadeRejectsPrivateInMemoryStorage(string connectionString)
     {
         var (manifest, target) = SqlitePhysicalSchemaExecutorTests.CreateModel(
             PhysicalStorageForm.PhysicalEntityTable,
             includePriority: true);
 
         var exception = Assert.Throws<ArgumentException>(() => new SqlitePhysicalDocumentStore(
-            "Data Source=:memory:",
+            connectionString,
             manifest,
             target.Routes,
             DocumentStoreAccess.Global));
 
+        Assert.Equal("connectionString", exception.ParamName);
         Assert.Contains("direct-connection constructor", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("Cache=Shared")]
+    [InlineData("Data Source=")]
+    [InlineData("Data Source=   ")]
+    public void StatelessSqliteFacadeRejectsAnEmptyOrWhitespaceDataSource(string connectionString)
+    {
+        var (manifest, target) = SqlitePhysicalSchemaExecutorTests.CreateModel(
+            PhysicalStorageForm.PhysicalEntityTable,
+            includePriority: true);
+
+        var exception = Assert.Throws<ArgumentException>(() => new SqlitePhysicalDocumentStore(
+            connectionString,
+            manifest,
+            target.Routes,
+            DocumentStoreAccess.Global));
+
+        Assert.Equal("connectionString", exception.ParamName);
+        Assert.Contains("non-empty file-backed data source", exception.Message);
+    }
+
+    [Fact]
+    public async Task StatelessSqliteFacadeAcceptsAFilePathWhoseTextContainsModeMemory()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"groundwork-memory-guard-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(directory, "mode=memory.db"),
+                Pooling = false
+            }.ConnectionString;
+            Assert.Contains("mode=memory", connectionString, StringComparison.OrdinalIgnoreCase);
+            var (manifest, target) = SqlitePhysicalSchemaExecutorTests.CreateModel(
+                PhysicalStorageForm.PhysicalEntityTable,
+                includePriority: true);
+            await using (var materializationConnection = new SqliteConnection(connectionString))
+            {
+                await materializationConnection.OpenAsync();
+                await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(materializationConnection));
+            }
+
+            var store = new SqlitePhysicalDocumentStore(
+                connectionString,
+                manifest,
+                target.Routes,
+                DocumentStoreAccess.Global);
+
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(Save("one", "tools", 1, 0))).Status);
+            Assert.NotNull(await store.LoadAsync("configurationDocument", "one"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -541,6 +647,182 @@ public sealed class SqlitePhysicalDocumentStoreTests
         {
             File.Delete(database);
         }
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task UnguardedUpdateWhosePrimaryWriteAffectsZeroRowsIsNotFoundAndRollsBackCompletely(PhysicalStorageForm form)
+    {
+        await using var harness = await CreateInterceptedHarnessAsync(form);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await harness.Store.SaveAsync(Save("victim", "tools", 1, 0))).Status);
+        harness.Store.WriteInterceptor = DeletePrimaryRowsAt(
+            RelationalPhysicalWriteExecutionPoint.AfterPrimaryLock,
+            RelationalPhysicalWriteOperation.Save,
+            harness.Route);
+
+        var result = await harness.Store.SaveAsync(Save("victim", "loser", 9));
+        harness.Store.WriteInterceptor = null;
+
+        Assert.Equal(DocumentStoreWriteStatus.NotFound, result.Status);
+        var retained = await harness.Store.LoadAsync("configurationDocument", "victim");
+        Assert.Equal(1, retained!.Version);
+        Assert.Contains("\"category\":\"tools\"", retained.ContentJson);
+        Assert.Equal(1, (await harness.Queries.QueryAsync(CategoryQuery("tools"))).TotalCount);
+        Assert.Equal(0, (await harness.Queries.QueryAsync(CategoryQuery("loser"))).TotalCount);
+        await AssertLinkedCategoryAsync(harness, "tools");
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task UnguardedDeleteWhosePrimaryWriteAffectsZeroRowsIsRefusedAndRollsBackLinkedMaintenance(PhysicalStorageForm form)
+    {
+        await using var harness = await CreateInterceptedHarnessAsync(form);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await harness.Store.SaveAsync(Save("victim", "tools", 1, 0))).Status);
+        harness.Store.WriteInterceptor = DeletePrimaryRowsAt(
+            RelationalPhysicalWriteExecutionPoint.AfterPrimaryLock,
+            RelationalPhysicalWriteOperation.Delete,
+            harness.Route);
+
+        var result = await harness.Store.DeleteAsync(new DeleteDocumentRequest("configurationDocument", "victim"));
+        harness.Store.WriteInterceptor = null;
+
+        // A row that vanishes between the in-transaction locked read and the primary delete can only
+        // be a lost concurrent race, so the store reports it as a concurrency conflict (an unguarded
+        // delete of a document that never existed is NotFound before any write is attempted, which
+        // the storage-scope and physical-storage conformances assert). Either way nothing commits:
+        // the already-executed linked maintenance is rolled back with the transaction.
+        Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, result.Status);
+        var retained = await harness.Store.LoadAsync("configurationDocument", "victim");
+        Assert.Equal(1, retained!.Version);
+        Assert.Equal(1, (await harness.Queries.QueryAsync(CategoryQuery("tools"))).TotalCount);
+        await AssertLinkedCategoryAsync(harness, "tools");
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    public async Task DependencyStepFailureDuringLinkedMaintenanceRollsBackThePrimaryMutation(PhysicalStorageForm form)
+    {
+        await using var harness = await CreateInterceptedHarnessAsync(form);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await harness.Store.SaveAsync(Save("victim", "tools", 1, 0))).Status);
+        harness.Store.WriteInterceptor = async (point, operation, connection, transaction, cancellationToken) =>
+        {
+            if (point != RelationalPhysicalWriteExecutionPoint.AfterPrimaryMutation ||
+                operation != RelationalPhysicalWriteOperation.Save)
+                return;
+            await using var drop = connection.CreateCommand();
+            drop.Transaction = transaction;
+            drop.CommandText = $"DROP TABLE \"{harness.Route.LinkedIndexStorage!.Name.Identifier}\";";
+            await drop.ExecuteNonQueryAsync(cancellationToken);
+        };
+
+        await Assert.ThrowsAsync<SqliteException>(() => harness.Store.SaveAsync(Save("victim", "gadgets", 2, 1)));
+        harness.Store.WriteInterceptor = null;
+
+        var retained = await harness.Store.LoadAsync("configurationDocument", "victim");
+        Assert.Equal(1, retained!.Version);
+        Assert.Contains("\"category\":\"tools\"", retained.ContentJson);
+        Assert.Equal(1, (await harness.Queries.QueryAsync(CategoryQuery("tools"))).TotalCount);
+        Assert.Equal(0, (await harness.Queries.QueryAsync(CategoryQuery("gadgets"))).TotalCount);
+        await AssertLinkedCategoryAsync(harness, "tools");
+    }
+
+    [Fact]
+    public async Task PublicFactoryRejectsIdentityPolicyDriftInAppliedDatabaseState()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"groundwork-identity-drift-{Guid.NewGuid():N}.db");
+        var connectionString = $"Data Source={path};Pooling=False";
+        try
+        {
+            var options = new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true };
+            var ordinal = SqliteTestManifests.MetadataManifest();
+            await SqliteDocumentStoreFactory.OpenPhysicalAsync(
+                connectionString,
+                ordinal,
+                SqliteTestManifests.Provider,
+                DocumentStoreAccess.Global,
+                options: options);
+
+            var unicode = TestManifests.WithUnicodeIdentity(ordinal);
+            var exception = await Assert.ThrowsAsync<GroundworkRuntimeSchemaAdmissionException>(() =>
+                SqliteDocumentStoreFactory.OpenPhysicalAsync(
+                    connectionString,
+                    unicode,
+                    SqliteTestManifests.Provider,
+                    DocumentStoreAccess.Global,
+                    options: options));
+
+            Assert.Contains("GW-SCHEMA-006", exception.Message, StringComparison.Ordinal);
+            // The rejected admission repaired or re-keyed nothing: the applied ordinal target still
+            // opens cleanly afterwards.
+            Assert.NotNull(await SqliteDocumentStoreFactory.OpenPhysicalAsync(
+                connectionString,
+                ordinal,
+                SqliteTestManifests.Provider,
+                DocumentStoreAccess.Global,
+                options: options));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    private static async Task<InterceptedStoreHarness> CreateInterceptedHarnessAsync(PhysicalStorageForm form)
+    {
+        var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var (manifest, target) = SqlitePhysicalSchemaExecutorTests.CreateModel(form, includePriority: true);
+        await PhysicalSchemaApplication.ApplyAsync(target, new SqlitePhysicalSchemaExecutor(connection));
+        var route = target.Routes.Single();
+        var store = new SqlitePhysicalDocumentStore(connection, manifest, target.Routes, DocumentStoreAccess.Global);
+        return new InterceptedStoreHarness(
+            connection,
+            store,
+            SqlitePhysicalQueryRuntime.Create(store, manifest, route, SqliteTestManifests.Provider),
+            route);
+    }
+
+    private static RelationalPhysicalWriteInterceptor DeletePrimaryRowsAt(
+        RelationalPhysicalWriteExecutionPoint targetPoint,
+        RelationalPhysicalWriteOperation targetOperation,
+        ExecutableStorageRoute route) =>
+        async (point, operation, connection, transaction, cancellationToken) =>
+        {
+            if (point != targetPoint || operation != targetOperation)
+                return;
+            await using var vanish = connection.CreateCommand();
+            vanish.Transaction = transaction;
+            vanish.CommandText = $"DELETE FROM \"{route.PrimaryStorage.Name.Identifier}\";";
+            await vanish.ExecuteNonQueryAsync(cancellationToken);
+        };
+
+    private static async Task AssertLinkedCategoryAsync(InterceptedStoreHarness harness, string expectedCategory)
+    {
+        if (harness.Route.LinkedIndexStorage is null)
+            return;
+        var category = harness.Route.ProjectedColumns.Single(column => column.Definition.LogicalName == "category");
+        Assert.Equal(expectedCategory, await ScalarAsync(
+            harness.Connection,
+            $"SELECT \"{category.Column.Identifier}\" FROM \"{harness.Route.LinkedIndexStorage.Name.Identifier}\";"));
+    }
+
+    private static DocumentQuery CategoryQuery(string category) => new(
+        "configurationDocument",
+        "list-by-category",
+        [DocumentQueryClause.Of(DocumentQueryComparison.Equal("category", category))]);
+
+    private sealed record InterceptedStoreHarness(
+        SqliteConnection Connection,
+        SqlitePhysicalDocumentStore Store,
+        IBoundedDocumentStore Queries,
+        ExecutableStorageRoute Route) : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() => Connection.DisposeAsync();
     }
 
     private static SaveDocumentRequest Save(string id, string category, int priority, long? expectedVersion = null) =>

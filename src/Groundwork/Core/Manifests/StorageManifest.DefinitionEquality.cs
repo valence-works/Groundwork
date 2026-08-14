@@ -1,6 +1,4 @@
-using Groundwork.Core.Indexing;
 using Groundwork.Core.PhysicalStorage;
-using Groundwork.Core.Queries;
 
 namespace Groundwork.Core.Manifests;
 
@@ -47,10 +45,7 @@ public sealed partial record StorageManifest
         first.Tenancy == second.Tenancy &&
         first.Concurrency == second.Concurrency &&
         first.Serialization == second.Serialization &&
-        first.Physicalization == second.Physicalization &&
-        first.PhysicalStorage == second.PhysicalStorage &&
-        SequenceBy(first.Indexes, second.Indexes, item => item.Identity, IndexDeclarationComparer.Instance) &&
-        SequenceBy(first.Queries, second.Queries, item => item.Identity, PortableQueryDeclarationComparer.Instance);
+        first.PhysicalStorage == second.PhysicalStorage;
 
     private static bool SequenceBy<T>(
         IReadOnlyList<T> first,
@@ -62,43 +57,4 @@ public sealed partial record StorageManifest
             var matches = second.Where(candidate => identity(candidate) == identity(item)).ToArray();
             return matches.Length == 1 && comparer.Equals(item, matches[0]);
         });
-
-    private sealed class IndexDeclarationComparer : IEqualityComparer<IndexDeclaration>
-    {
-        public static IndexDeclarationComparer Instance { get; } = new();
-
-        public bool Equals(IndexDeclaration? first, IndexDeclaration? second) =>
-            first is not null &&
-            second is not null &&
-            first.Identity == second.Identity &&
-            first.Fields.SequenceEqual(second.Fields) &&
-            first.ValueKind == second.ValueKind &&
-            first.IsUnique == second.IsUnique &&
-            first.IsSortable == second.IsSortable &&
-            first.MissingValueBehavior == second.MissingValueBehavior &&
-            first.SupportedOperations.SetEquals(second.SupportedOperations) &&
-            first.Physicalization == second.Physicalization;
-
-        public int GetHashCode(IndexDeclaration item) =>
-            item.Identity.GetHashCode(StringComparison.Ordinal);
-    }
-
-    private sealed class PortableQueryDeclarationComparer : IEqualityComparer<PortableQueryDeclaration>
-    {
-        public static PortableQueryDeclarationComparer Instance { get; } = new();
-
-        public bool Equals(PortableQueryDeclaration? first, PortableQueryDeclaration? second) =>
-            first is not null &&
-            second is not null &&
-            first.Identity == second.Identity &&
-            first.IndexIdentity == second.IndexIdentity &&
-            first.Operations.SetEquals(second.Operations) &&
-            first.SortSupport == second.SortSupport &&
-            first.PagingSupport == second.PagingSupport &&
-            first.SupportsDisjunction == second.SupportsDisjunction &&
-            first.SupportsTotalCount == second.SupportsTotalCount;
-
-        public int GetHashCode(PortableQueryDeclaration item) =>
-            item.Identity.GetHashCode(StringComparison.Ordinal);
-    }
 }

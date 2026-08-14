@@ -1,4 +1,5 @@
 using Groundwork.Core.Manifests;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Scoping;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
@@ -7,13 +8,20 @@ using Xunit;
 
 namespace Groundwork.TestInfrastructure;
 
-/// <summary>The provider-independent black-box contract for storage-boundary scoping.</summary>
+/// <summary>
+/// The provider-independent black-box contract for storage-boundary scoping, exercised through the
+/// physical document-store surface (<see cref="IDocumentStore"/> plus the bounded query surface of
+/// <see cref="IBoundedDocumentStore"/>). Stores are created against a manifest whose single unit is
+/// scoped and declares the shared "find-by-key" bounded query over the unique "by-key" index.
+/// </summary>
 public static class StorageScopeDocumentStoreConformance
 {
     public static async Task VerifyAsync(
         StorageManifest manifest,
-        Func<StorageManifest, DocumentStoreAccess, Task<IDocumentStore>> createStore)
+        Func<StorageManifest, DocumentStoreAccess, Task<IDocumentStore>> createStore,
+        Func<IDocumentStore, StorageManifest, IBoundedDocumentStore>? createQueries = null)
     {
+        createQueries ??= (store, _) => Assert.IsAssignableFrom<IBoundedDocumentStore>(store);
         var aAccess = DocumentStoreAccess.Scoped(new StorageScope("tenant-a"));
         var bAccess = DocumentStoreAccess.Scoped(new StorageScope("TENANT-A"));
         var unicodeAccess = DocumentStoreAccess.Scoped(new StorageScope("租户-Å"));
@@ -23,11 +31,19 @@ public static class StorageScopeDocumentStoreConformance
         var b = await createStore(manifest, bAccess);
         var unicode = await createStore(manifest, unicodeAccess);
         var all = await createStore(manifest, privilegedAccess);
+        var aQueries = createQueries(a, manifest);
+        var bQueries = createQueries(b, manifest);
+        var unicodeQueries = createQueries(unicode, manifest);
+        var allQueries = createQueries(all, manifest);
         var kind = manifest.StorageUnits.Single().Identity.Value;
         var suffix = Guid.NewGuid().ToString("N");
         var sharedId = $"same-id-{suffix}";
         var onlyA = $"only-a-{suffix}";
         var key = $"same-key-{suffix}";
+        DocumentQuery FindByKey(string value) => new(
+            kind,
+            "find-by-key",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("key", value))]);
 
         var savedA = await a.SaveAsync(new SaveDocumentRequest(
             kind, sharedId, "1", $$"""{"tenantId":"payload-b","key":"{{key}}","category":"scope","sort":"1"}"""));
@@ -57,19 +73,20 @@ public static class StorageScopeDocumentStoreConformance
             kind, onlyA, "1", $$"""{"key":"{{updatedKey}}","category":"scope","sort":"2"}""", ExpectedVersion: 1))).Status);
         Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, (await a.SaveAsync(new SaveDocumentRequest(
             kind, onlyA, "1", $$"""{"key":"{{staleKey}}","category":"scope","sort":"2"}""", ExpectedVersion: 1))).Status);
-        Assert.Single(await a.QueryAsync(new DocumentStoreQuery(kind, "by-key", updatedKey)));
-        Assert.Empty(await a.QueryAsync(new DocumentStoreQuery(kind, "by-key", staleKey)));
+        Assert.Single((await aQueries.QueryAsync(FindByKey(updatedKey))).Documents);
+        Assert.Empty((await aQueries.QueryAsync(FindByKey(staleKey))).Documents);
 
-        Assert.Single(await a.QueryAsync(new DocumentStoreQuery(kind, "by-key", key)));
-        Assert.Single(await b.QueryAsync(new DocumentStoreQuery(kind, "by-key", key)));
-        Assert.Single(await unicode.QueryAsync(new DocumentStoreQuery(kind, "by-key", key)));
-        Assert.Equal(3, (await all.QueryAsync(new DocumentStoreQuery(kind, "by-key", key))).Count);
-        Assert.Equal(2, (await a.QueryAsync(new PortableDocumentQuery(kind))).TotalCount);
-        Assert.Equal(1, (await b.QueryAsync(new PortableDocumentQuery(kind))).TotalCount);
-        Assert.Equal(1, (await unicode.QueryAsync(new PortableDocumentQuery(kind))).TotalCount);
-        Assert.Equal(4, (await all.QueryAsync(new PortableDocumentQuery(kind))).TotalCount);
-        Assert.True(await a.AnyAsync(new PortableDocumentQuery(kind)));
-        Assert.Equal("tenant-a", (await a.FirstOrDefaultAsync(new PortableDocumentQuery(kind)))!.Scope!.Value);
+        Assert.Single((await aQueries.QueryAsync(FindByKey(key))).Documents);
+        Assert.Single((await bQueries.QueryAsync(FindByKey(key))).Documents);
+        Assert.Single((await unicodeQueries.QueryAsync(FindByKey(key))).Documents);
+        Assert.Equal(3, (await allQueries.QueryAsync(FindByKey(key))).Documents.Count);
+        Assert.Equal(1, await aQueries.CountAsync(FindByKey(key).Select(BoundedQueryResultOperation.Count)));
+        Assert.Equal(3, await allQueries.CountAsync(FindByKey(key).Select(BoundedQueryResultOperation.Count)));
+        Assert.True(await aQueries.AnyAsync(FindByKey(key).Select(BoundedQueryResultOperation.Any)));
+        Assert.False(await bQueries.AnyAsync(FindByKey(updatedKey).Select(BoundedQueryResultOperation.Any)));
+        Assert.Equal(
+            "tenant-a",
+            (await aQueries.FirstOrDefaultAsync(FindByKey(key).Select(BoundedQueryResultOperation.First)))!.Scope!.Value);
 
         var exactId = $"exact-{suffix}";
         var spacedId = $"{exactId} ";
@@ -79,8 +96,8 @@ public static class StorageScopeDocumentStoreConformance
             kind, exactId, "1", $$"""{"key":"{{exactKey}}"}"""))).Status);
         Assert.Equal(DocumentStoreWriteStatus.Saved, (await a.SaveAsync(new SaveDocumentRequest(
             kind, spacedId, "1", $$"""{"key":"{{spacedKey}}"}"""))).Status);
-        Assert.Equal(exactId, Assert.Single(await a.QueryAsync(new DocumentStoreQuery(kind, "by-key", exactKey))).Id);
-        Assert.Equal(spacedId, Assert.Single(await a.QueryAsync(new DocumentStoreQuery(kind, "by-key", spacedKey))).Id);
+        Assert.Equal(exactId, Assert.Single((await aQueries.QueryAsync(FindByKey(exactKey))).Documents).Id);
+        Assert.Equal(spacedId, Assert.Single((await aQueries.QueryAsync(FindByKey(spacedKey))).Documents).Id);
         Assert.Equal(exactId, (await a.LoadAsync(kind, exactId))!.Id);
         Assert.Equal(spacedId, (await a.LoadAsync(kind, spacedId))!.Id);
 
@@ -91,7 +108,7 @@ public static class StorageScopeDocumentStoreConformance
         var stale = await b.SaveAsync(new SaveDocumentRequest(
             kind, onlyA, "1", $$"""{"key":"cross-scope-index-{{suffix}}"}""", ExpectedVersion: 1));
         Assert.Equal(DocumentStoreWriteStatus.NotFound, stale.Status);
-        Assert.Empty(await a.QueryAsync(new DocumentStoreQuery(kind, "by-key", $"cross-scope-index-{suffix}")));
+        Assert.Empty((await aQueries.QueryAsync(FindByKey($"cross-scope-index-{suffix}"))).Documents);
 
         var rolledBackId = $"rolled-back-{suffix}";
         await using (var unitOfWork = await a.BeginAsync(DocumentCommitScope.Of(kind)))

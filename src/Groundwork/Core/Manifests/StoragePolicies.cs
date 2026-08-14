@@ -75,23 +75,3 @@ public enum SerializationKind
     Binary,
     ProviderNative
 }
-
-[Obsolete(
-    "Use StorageUnit.PhysicalStorage with PhysicalStoragePolicy. Convert existing declarations with LegacyPhysicalStorageBridge.",
-    DiagnosticId = "GW0001")]
-public sealed record PhysicalizationPolicy(PhysicalizationKind Kind)
-{
-    public static PhysicalizationPolicy Portable { get; } = new(PhysicalizationKind.Portable);
-    public static PhysicalizationPolicy Optimized { get; } = new(PhysicalizationKind.Optimized);
-    public static PhysicalizationPolicy Specialized { get; } = new(PhysicalizationKind.Specialized);
-}
-
-[Obsolete(
-    "Use PhysicalStorageForm and PhysicalStoragePolicy. Convert existing declarations with LegacyPhysicalStorageBridge.",
-    DiagnosticId = "GW0001")]
-public enum PhysicalizationKind
-{
-    Portable,
-    Optimized,
-    Specialized
-}

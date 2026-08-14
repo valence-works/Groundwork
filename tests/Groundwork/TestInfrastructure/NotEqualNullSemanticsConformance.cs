@@ -83,16 +83,11 @@ public static class NotEqualNullSemanticsConformance
             TenancyPolicy.Global,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [index],
-                [query])
-        };
+                [query]));
         return new StorageManifest(
             new StorageManifestIdentity($"not-equal-null-semantics.{instance}"),
             new StorageManifestOwner("tests"),

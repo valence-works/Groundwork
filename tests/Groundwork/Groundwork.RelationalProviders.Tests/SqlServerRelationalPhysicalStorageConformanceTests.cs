@@ -39,6 +39,69 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
 {
     private readonly MsSqlContainer container = fixture.Container;
 
+    // The shared storage-scope conformance (StorageScopeDocumentStoreConformance) is deliberately
+    // not run here: its exact-spelling arm saves two documents whose unique "by-key" values differ
+    // only by a trailing space, and SQL Server's ANSI-padded NVARCHAR equality treats those as
+    // duplicates in the unique index, so the second save reports ConcurrencyConflict. Whether the
+    // SQL Server provider should normalize keyword index values to restore exactness is a
+    // provider-semantics decision; until then the contract is unsatisfiable on this provider.
+    // Sqlite, PostgreSQL, and MongoDB run the conformance in their suites.
+
+    [Fact]
+    public async Task IndependentOperationsUseTheProviderPoolWithoutGlobalSerialization()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            SqlServerGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: SqlServerGroundworkCapabilities.PhysicalNames);
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new SqlServerPhysicalSchemaExecutor(container.GetConnectionString()));
+        var table = model.Target.Routes.Single().PrimaryStorage.Name.Identifier;
+        const int maxPoolSize = 2;
+        var pooled = new SqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            MaxPoolSize = maxPoolSize
+        }.ConnectionString;
+        var blockerConnectionString = new SqlConnectionStringBuilder(pooled) { Pooling = false }.ConnectionString;
+        var poolSaturated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var opened = 0;
+        var created = 0;
+        var sessions = RelationalSessionFactory.Concurrent(() =>
+        {
+            if (Interlocked.Increment(ref created) == maxPoolSize + 1)
+                queuedSessionRequested.TrySetResult();
+            var connection = new SqlConnection(pooled);
+            connection.StateChange += (_, args) =>
+            {
+                if (args.CurrentState == ConnectionState.Open &&
+                    Interlocked.Increment(ref opened) == maxPoolSize)
+                    poolSaturated.TrySetResult();
+            };
+            return connection;
+        });
+        var store = new RelationalPhysicalDocumentStore(
+            sessions,
+            model.Manifest,
+            model.Target.Routes,
+            new SqlServerPhysicalDocumentDialect(),
+            DocumentStoreAccess.Global);
+
+        var blocker = await RelationalSessionPoolPressure.BlockSqlServerDocumentsAsync(
+            blockerConnectionString,
+            table);
+        await RelationalSessionPoolPressure.AssertOperationsRunWhileTheNextWaitsForTheProviderPoolAsync(
+            store,
+            poolSaturated.Task,
+            queuedSessionRequested.Task,
+            () => Volatile.Read(ref opened),
+            maxPoolSize,
+            blocker);
+    }
+
     [Fact]
     public async Task Failed_collection_schema_transition_preserves_old_writer_admission()
     {

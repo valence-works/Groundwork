@@ -1,6 +1,6 @@
-using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
+using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.Queries;
 using Groundwork.Core.Intents;
 
@@ -8,8 +8,11 @@ namespace Groundwork.TestInfrastructure;
 
 /// <summary>
 /// Shared builder behind the per-suite manifest helpers (Sqlite, Relational, MongoDb, Sample).
-/// The suites differ only in tenancy, the operation sets admitted by the shared indexes, whether a
-/// spare "by-sort" index exists, StartsWith support on the category surface, and the description list.
+/// The suites differ only in tenancy, whether a spare "by-sort" index exists, StartsWith support on
+/// the category surface, and the description list. The unit is fully declared through the current
+/// physical-storage surface (logical indexes plus scale-bearing bounded queries under the default
+/// policy), so the resolver synthesizes the projected columns and physical indexes and the manifest
+/// is materializable as-is on every provider.
 /// </summary>
 public static class TestManifests
 {
@@ -19,51 +22,55 @@ public static class TestManifests
         bool startsWithCategory = false,
         string? description = null)
     {
-        var categoryOperations = new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
-        if (extendedIndexOperations)
-            categoryOperations.Add(PortableQueryOperation.In);
-        if (startsWithCategory)
-            categoryOperations.Add(PortableQueryOperation.StartsWith);
         var listByCategoryOperations = new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
         if (startsWithCategory)
             listByCategoryOperations.Add(PortableQueryOperation.StartsWith);
-        var keyOperations = new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
-        if (extendedIndexOperations)
-        {
-            keyOperations.Add(PortableQueryOperation.In);
-            keyOperations.Add(PortableQueryOperation.Contains);
-            keyOperations.Add(PortableQueryOperation.NotContains);
-        }
-        var indexes = new List<IndexDeclaration>
+        var indexes = new List<LogicalIndexDeclaration>
         {
             new(
                 "by-key",
                 [new IndexField("key")],
                 IndexValueKind.Keyword,
                 true,
-                true,
                 MissingValueBehavior.Excluded,
-                keyOperations),
+                length: 128),
             new(
                 "by-category",
                 [new IndexField("category")],
                 IndexValueKind.String,
                 false,
-                true,
                 MissingValueBehavior.Excluded,
-                categoryOperations)
+                length: 200)
         };
         if (extendedIndexOperations)
         {
-            indexes.Add(new IndexDeclaration(
+            indexes.Add(new LogicalIndexDeclaration(
                 "by-sort",
                 [new IndexField("sort")],
                 IndexValueKind.String,
                 false,
-                true,
                 MissingValueBehavior.Excluded,
-                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal }));
+                length: 200));
         }
+        var queries = new List<BoundedQueryDeclaration>
+        {
+            new(
+                "find-by-key",
+                "by-key",
+                new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
+                QuerySortSupport.None,
+                QueryPagingSupport.None,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true),
+            new(
+                "list-by-category",
+                "by-category",
+                listByCategoryOperations,
+                QuerySortSupport.Both,
+                QueryPagingSupport.Offset,
+                BoundedQueryExecutionClass.ScaleBearing,
+                supportsTotalCount: true)
+        };
         return new StorageManifest(
             new StorageManifestIdentity("configuration.documents"),
             new StorageManifestOwner("sample.application"),
@@ -78,22 +85,11 @@ public static class TestManifests
                     tenancy ?? TenancyPolicy.Global,
                     ConcurrencyPolicy.Optimistic(),
                     SerializationPolicy.Json(),
-                    indexes,
-                    [
-                        new PortableQueryDeclaration(
-                            "find-by-key",
-                            "by-key",
-                            new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal },
-                            QuerySortSupport.None,
-                            QueryPagingSupport.None),
-                        new PortableQueryDeclaration(
-                            "list-by-category",
-                            "by-category",
-                            listByCategoryOperations,
-                            QuerySortSupport.Both,
-                            QueryPagingSupport.Offset)
-                    ],
-                    PhysicalizationPolicy.Portable)
+                    new StorageUnitPhysicalStorage(
+                        StorageUnitProvisioningMode.Declared,
+                        PhysicalStoragePolicy.Default(),
+                        indexes,
+                        queries))
             ],
             new HashSet<string> { "schema-history", "optimistic-concurrency" },
             description is null ? [] : [description]);

@@ -16,7 +16,7 @@ a global session cannot access a scoped unit, and the mismatch is rejected befor
 Application authorization for acquiring either session remains outside Groundwork.
 
 Scope values are opaque and compared ordinally, including case and Unicode code-unit distinctions.
-For portable provider behavior they are limited to 128 UTF-16 code units, cannot have leading or
+For provider-neutral behavior they are limited to 128 UTF-16 code units, cannot have leading or
 trailing whitespace, and cannot use Groundwork's reserved `__groundwork_` prefix. The explicit
 envelope field name is `storageScope`; a payload field named `tenantId` remains ordinary payload.
 
@@ -31,7 +31,7 @@ operation, required policy, and rejection reason.
 ## Provider keys
 
 Relational providers persist `storage_scope` in the document envelope. Document primary keys,
-dependent foreign keys, portable-index keys, unique indexes, linked projection keys, and optimized
+dependent foreign keys, unique indexes, linked projection keys, and declared
 projection indexes include it. SQL predicates join and filter dependent rows on the same value.
 SQL Server retains exact binary-collated originals and uses persisted fixed-width SHA-256 shadow
 columns for native composite keys, so maximum legal values cannot exceed its 900/1700-byte index

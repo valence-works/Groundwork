@@ -173,22 +173,6 @@ public sealed class MongoDbPhysicalDocumentStore :
     public Task<bool> AnyAsync(DocumentQuery query, CancellationToken cancellationToken = default) =>
         QueryStore(query.DocumentKind).AnyAsync(query, cancellationToken);
 
-    public Task<IReadOnlyList<DocumentEnvelope>> QueryAsync(
-        DocumentStoreQuery query,
-        CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven MongoDB storage requires DocumentQuery with an explicit bounded-query identity.");
-
-#pragma warning disable GW0004
-    public Task<DocumentQueryResult> QueryAsync(PortableDocumentQuery query, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven MongoDB storage requires DocumentQuery with an explicit bounded-query identity.");
-
-    public Task<DocumentEnvelope?> FirstOrDefaultAsync(PortableDocumentQuery query, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven MongoDB storage requires DocumentQuery with an explicit bounded-query identity.");
-
-    public Task<bool> AnyAsync(PortableDocumentQuery query, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven MongoDB storage requires DocumentQuery with an explicit bounded-query identity.");
-#pragma warning restore GW0004
-
     /// <summary>
     /// Returns ordered native MongoDB evidence. Linked queries can execute the bounded selector to
     /// derive exact hydration identities; this sensitive diagnostic operation can therefore be costly.

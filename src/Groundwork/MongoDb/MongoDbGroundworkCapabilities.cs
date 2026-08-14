@@ -1,8 +1,6 @@
 using Groundwork.Core.Capabilities;
-using Groundwork.Core.Materialization;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
-using Groundwork.Materialization;
 
 namespace Groundwork.MongoDb;
 
@@ -17,8 +15,6 @@ public static class MongoDbGroundworkCapabilities
     private static readonly IReadOnlySet<ConcurrencyKind> ConcurrencyModes =
         Enum.GetValues<ConcurrencyKind>().ToHashSet();
 
-    private static readonly IReadOnlySet<MaterializationOperationKind> MaterializationOperations =
-        Enum.GetValues<MaterializationOperationKind>().ToHashSet();
 
     public static ProviderIdentity Provider { get; } = new("groundwork-mongodb", "1.0.0");
 
@@ -56,8 +52,4 @@ public static class MongoDbGroundworkCapabilities
         };
     }
 
-    public static MaterializationCapabilityReport Materialization() => Materialization(Provider);
-
-    public static MaterializationCapabilityReport Materialization(ProviderIdentity provider) =>
-        new(provider, MaterializationOperations, SupportsSchemaHistory: true);
 }

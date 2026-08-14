@@ -1,11 +1,11 @@
 {
     "schema_version": 1,
-    "commit": "9276ae7a66eaaf40f19985a0a908946bebfa9611",
-    "indexed_at": "2026-06-25T18:08:24Z",
+    "commit": "d739896ef4348f7963002791b9a8fcac0e86aeae",
+    "indexed_at": "2026-08-14T09:15:42Z",
     "project": "Users-sipke-Projects-ValenceWorks-Groundwork",
-    "nodes": 0,
-    "edges": 0,
-    "original_size": 102400,
-    "compressed_size": 1396,
+    "nodes": 18020,
+    "edges": 72198,
+    "original_size": 68747264,
+    "compressed_size": 9431538,
     "compression_level": 3
 }

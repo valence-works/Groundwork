@@ -41,6 +41,74 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     private readonly PostgreSqlContainer container = fixture.Container;
 
     [Fact]
+    public Task SatisfiesSharedStorageScopeBlackBoxContract() =>
+        RelationalStorageScopeConformance.VerifyAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            target => PhysicalSchemaApplication.ApplyAsync(
+                target,
+                new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString())),
+            (manifest, target, access) => new PostgreSqlPhysicalDocumentStore(
+                container.GetConnectionString(), manifest, target.Routes, access),
+            (store, manifest, route, provider) => PostgreSqlPhysicalQueryRuntime.Create(
+                (PostgreSqlPhysicalDocumentStore)store, manifest, route, provider));
+
+    [Fact]
+    public async Task IndependentOperationsUseTheProviderPoolWithoutGlobalSerialization()
+    {
+        var model = RelationalPhysicalStorageTestModels.Create(
+            PhysicalStorageForm.PhysicalEntityTable,
+            PostgreSqlGroundworkCapabilities.Provider,
+            includePriority: false,
+            instance: Guid.NewGuid().ToString("N")[..8],
+            normalizer: PostgreSqlGroundworkCapabilities.PhysicalNames);
+        await PhysicalSchemaApplication.ApplyAsync(
+            model.Target,
+            new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString()));
+        var table = model.Target.Routes.Single().PrimaryStorage.Name.Identifier;
+        const int maxPoolSize = 2;
+        var pooled = new NpgsqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            MaxPoolSize = maxPoolSize
+        }.ConnectionString;
+        var blockerConnectionString = new NpgsqlConnectionStringBuilder(pooled) { Pooling = false }.ConnectionString;
+        var poolSaturated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var opened = 0;
+        var created = 0;
+        var sessions = Groundwork.Provider.Relational.RelationalSessionFactory.Concurrent(() =>
+        {
+            if (Interlocked.Increment(ref created) == maxPoolSize + 1)
+                queuedSessionRequested.TrySetResult();
+            var connection = new NpgsqlConnection(pooled);
+            connection.StateChange += (_, args) =>
+            {
+                if (args.CurrentState == System.Data.ConnectionState.Open &&
+                    Interlocked.Increment(ref opened) == maxPoolSize)
+                    poolSaturated.TrySetResult();
+            };
+            return connection;
+        });
+        var store = new RelationalPhysicalDocumentStore(
+            sessions,
+            model.Manifest,
+            model.Target.Routes,
+            new PostgreSqlPhysicalDocumentDialect(),
+            DocumentStoreAccess.Global);
+
+        var blocker = await RelationalSessionPoolPressure.BlockPostgreSqlDocumentsAsync(
+            blockerConnectionString,
+            table);
+        await RelationalSessionPoolPressure.AssertOperationsRunWhileTheNextWaitsForTheProviderPoolAsync(
+            store,
+            poolSaturated.Task,
+            queuedSessionRequested.Task,
+            () => Volatile.Read(ref opened),
+            maxPoolSize,
+            blocker);
+    }
+
+    [Fact]
     public async Task Failed_collection_schema_transition_preserves_old_writer_admission()
     {
         var instance = Guid.NewGuid().ToString("N")[..8];

@@ -143,19 +143,14 @@ public static class NullExcludedIndexConformance
             TenancyPolicy.Global,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [logicalIndex],
                 [query],
                 boundedMutations: includeDelete
                     ? [new BoundedMutationDeclaration(DeleteIdentity, QueryIdentity, BoundedMutationAction.Delete())]
-                    : [])
-        };
+                    : []));
         return new StorageManifest(
             new StorageManifestIdentity($"null-excluded-index.{instance}"),
             new StorageManifestOwner("tests"),

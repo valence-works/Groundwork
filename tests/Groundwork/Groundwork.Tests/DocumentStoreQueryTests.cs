@@ -42,29 +42,6 @@ public sealed class DocumentStoreQueryTests
     }
 
     [Fact]
-    public void LegacyEqualityQueryBridgesToTheSingleDocumentQueryContract()
-    {
-#pragma warning disable GW0004
-        var legacy = new DocumentStoreQuery(
-            "workflowTriggerBinding",
-            "by-stimulus-type",
-            "http",
-            skip: 5,
-            take: 10);
-#pragma warning restore GW0004
-
-        var query = legacy.ToDocumentQuery("list-by-stimulus-type", "stimulusType");
-
-        Assert.Equal("list-by-stimulus-type", query.QueryIdentity);
-        var comparison = Assert.Single(Assert.Single(query.Clauses).Comparisons);
-        Assert.Equal("stimulusType", comparison.Path);
-        Assert.Equal(QueryComparisonOperator.Equal, comparison.Operator);
-        Assert.Equal("http", Assert.Single(comparison.Values));
-        Assert.Equal(5, query.Skip);
-        Assert.Equal(10, query.Take);
-    }
-
-    [Fact]
     public void DocumentQueryExpressesTheFullPlannedRuntimeShape()
     {
         var query = new DocumentQuery(
@@ -117,27 +94,18 @@ public sealed class DocumentStoreQueryTests
                 ["a", null]));
     }
 
-    [Fact]
-    public void SupersededQueryTypesCarryActionableDeprecationGuidance()
-    {
-        var portable = Assert.Single(typeof(PortableDocumentQuery).GetCustomAttributes(
-            typeof(ObsoleteAttribute), inherit: false).Cast<ObsoleteAttribute>());
-        var equality = Assert.Single(typeof(DocumentStoreQuery).GetCustomAttributes(
-            typeof(ObsoleteAttribute), inherit: false).Cast<ObsoleteAttribute>());
-
-        Assert.Contains(nameof(DocumentQuery), portable.Message, StringComparison.Ordinal);
-        Assert.Contains(nameof(DocumentQuery), equality.Message, StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData(-1, null, "skip")]
     [InlineData(null, -1, "take")]
     public void NegativePagingValuesFailClearly(int? skip, int? take, string parameterName)
     {
         var exception = Assert.Throws<ArgumentOutOfRangeException>(() =>
-#pragma warning disable GW0004
-            new DocumentStoreQuery("configurationDocument", "by-key", "alpha", skip, take));
-#pragma warning restore GW0004
+            new DocumentQuery(
+                "configurationDocument",
+                "find-by-key",
+                [DocumentQueryClause.Of(DocumentQueryComparison.Equal("key", "alpha"))],
+                skip: skip,
+                take: take));
 
         Assert.Equal(parameterName, exception.ParamName);
     }

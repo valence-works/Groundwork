@@ -581,20 +581,6 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         }
     }
 
-    public Task<IReadOnlyList<DocumentEnvelope>> QueryAsync(DocumentStoreQuery query, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven stores execute declared bounded DocumentQuery plans through IBoundedDocumentStore.");
-
-#pragma warning disable GW0004
-    public Task<DocumentQueryResult> QueryAsync(PortableDocumentQuery query, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven stores execute declared bounded DocumentQuery plans through IBoundedDocumentStore.");
-
-    public Task<DocumentEnvelope?> FirstOrDefaultAsync(PortableDocumentQuery query, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven stores execute declared bounded DocumentQuery plans through IBoundedDocumentStore.");
-
-    public Task<bool> AnyAsync(PortableDocumentQuery query, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("Route-driven stores execute declared bounded DocumentQuery plans through IBoundedDocumentStore.");
-#pragma warning restore GW0004
-
     internal ExecutableStorageRoute GetRoute(string documentKind) =>
         routes.TryGetValue(documentKind, out var route)
             ? route

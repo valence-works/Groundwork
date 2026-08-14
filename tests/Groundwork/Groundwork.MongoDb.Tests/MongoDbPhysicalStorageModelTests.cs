@@ -1044,54 +1044,6 @@ public sealed class MongoDbPhysicalStorageModelTests
     }
 
     [Fact]
-    public async Task Conventional_unit_of_work_disposes_an_owned_session_when_transaction_startup_fails()
-    {
-        var database = new MongoClient("mongodb://localhost").GetDatabase("groundwork_conventional_session_disposal");
-        var session = DispatchProxy.Create<IClientSessionHandle, FailingSessionProxy>();
-        var proxy = (FailingSessionProxy)(object)session;
-        var store = new MongoDbDocumentStore(
-            database,
-            Manifest(),
-            DocumentStoreAccess.Scoped(new("tenant-a")),
-            scopeObserver: null,
-            _ => Task.FromResult(true),
-            _ => Task.FromResult(session));
-
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            store.BeginAsync(DocumentCommitScope.Of("orders")));
-
-        Assert.Equal("transaction startup failed", exception.Message);
-        Assert.True(proxy.Disposed);
-    }
-
-    [Fact]
-    public async Task Conventional_unit_of_work_rejects_out_of_scope_kinds_without_becoming_terminal()
-    {
-        var database = new MongoClient("mongodb://localhost").GetDatabase("groundwork_conventional_commit_scope");
-        var session = DispatchProxy.Create<IClientSessionHandle, ActiveSessionProxy>();
-        var proxy = (ActiveSessionProxy)(object)session;
-        var store = new MongoDbDocumentStore(
-            database,
-            Manifest(),
-            DocumentStoreAccess.Scoped(new("tenant-a")),
-            scopeObserver: null,
-            _ => Task.FromResult(true),
-            _ => Task.FromResult(session));
-        await using var transaction = await store.BeginAsync(DocumentCommitScope.Of("orders"));
-
-        await Assert.ThrowsAsync<ArgumentException>(() => transaction.SaveAsync(new SaveDocumentRequest(
-            "undeclared-kind", "outside-save", "1", "{}")));
-        await Assert.ThrowsAsync<ArgumentException>(() => transaction.DeleteAsync(new DeleteDocumentRequest(
-            "undeclared-kind", "outside-delete")));
-        await Assert.ThrowsAsync<ArgumentException>(() => transaction.LoadAsync(
-            "undeclared-kind", "outside-load"));
-
-        await transaction.RollbackAsync();
-        Assert.True(proxy.Aborted);
-        Assert.True(proxy.Disposed);
-    }
-
-    [Fact]
     public void Transaction_topology_probe_distinguishes_standalone_replica_set_and_sharded_hello_evidence()
     {
         Assert.False(MongoDbTransactionTopology.IsHelloTransactionCapable(new BsonDocument("ok", 1)));
@@ -1283,14 +1235,9 @@ public sealed class MongoDbPhysicalStorageModelTests
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
-                PhysicalStoragePolicy.Explicit(definition))
-        };
+                PhysicalStoragePolicy.Explicit(definition)));
 
     private static async Task InvokePhysicalOperationAsync(
         MongoDbPhysicalDocumentStore store,

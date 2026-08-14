@@ -1073,6 +1073,146 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
     }
 
     [Fact]
+    public async Task Unit_of_work_lookup_collision_aborts_without_partial_commit()
+    {
+        var (database, model, store) = await CreateIdentityStoreAsync(
+            PhysicalStorageForm.PhysicalEntityTable,
+            StringIdentityCasePolicy.Ordinal);
+        const string retainedId = "retained-id";
+        const string requestedId = "requested-id";
+        await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", retainedId, "1", """{"status":"open"}""", ExpectedVersion: 0));
+        var route = Assert.Single(model.Routes);
+        var collection = database.GetCollection<BsonDocument>(route.PrimaryStorage.Name.Identifier);
+        var retained = await collection.Find(Builders<BsonDocument>.Filter.Empty).SingleAsync();
+        await collection.DeleteOneAsync(Builders<BsonDocument>.Filter.Eq(
+            MongoDbPhysicalStorageFields.Id,
+            retained[MongoDbPhysicalStorageFields.Id]));
+        var requestedProjection = route.Envelope.Identity.Project(requestedId);
+        retained[route.Envelope.Identity.LookupKey.Identifier] = requestedProjection.LookupKey;
+        retained[MongoDbPhysicalStorageFields.Id] = MongoDbPhysicalSchemaExecutor.KeyDocument(
+            route.PrimaryKey,
+            retained);
+        await collection.InsertOneAsync(retained);
+
+        await using (var transaction = await store.BeginAsync(DocumentCommitScope.Of("workItem")))
+        {
+            Assert.Equal(DocumentStoreWriteStatus.Saved, (await transaction.SaveAsync(new SaveDocumentRequest(
+                "workItem", "staged-before-collision", "1", """{"status":"staged"}""", ExpectedVersion: 0))).Status);
+
+            var exception = await Assert.ThrowsAsync<DocumentIdentityLookupCollisionException>(() =>
+                transaction.SaveAsync(new SaveDocumentRequest(
+                    "workItem", requestedId, "1", """{"status":"closed"}""", ExpectedVersion: 0)));
+
+            Assert.Equal(requestedId, exception.RequestedId);
+            Assert.Equal(retainedId, exception.RetainedId);
+        }
+
+        Assert.Null(await store.LoadAsync("workItem", "staged-before-collision"));
+        Assert.Equal(1, await collection.CountDocumentsAsync(Builders<BsonDocument>.Filter.Empty));
+    }
+
+    [Fact]
+    public async Task Unit_of_work_create_only_save_losing_to_an_uncommitted_rival_is_a_concurrency_conflict()
+    {
+        var database = Database();
+        var model = Model(PhysicalStorageForm.PhysicalEntityTable);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
+        await using var winner = await store.BeginAsync(DocumentCommitScope.Of("workItem"));
+        await using var loser = await store.BeginAsync(DocumentCommitScope.Of("workItem"));
+        Assert.Null(await loser.LoadAsync("workItem", "contested"));
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await winner.SaveAsync(new SaveDocumentRequest(
+            "workItem", "contested", "1", """{"status":"winner"}""", ExpectedVersion: 0))).Status);
+        // The winner stays open, so its row is invisible to the classifier's read outside the session.
+        // A create-only claim can still never be NotFound: an absent document is exactly what it expects.
+        Assert.Null(await store.LoadAsync("workItem", "contested"));
+
+        var conflict = await loser.SaveAsync(new SaveDocumentRequest(
+            "workItem", "contested", "1", """{"status":"loser"}""", ExpectedVersion: 0));
+
+        Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, conflict.Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            loser.LoadAsync("workItem", "contested"));
+        await winner.CommitAsync();
+        Assert.Contains("winner", (await store.LoadAsync("workItem", "contested"))!.ContentJson);
+    }
+
+    [Fact]
+    public async Task Unit_of_work_delete_losing_to_an_outside_write_is_a_conflict_without_replay()
+    {
+        var database = Database();
+        var model = Model(PhysicalStorageForm.PhysicalEntityTable);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
+        await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "target", "1", """{"status":"first"}""", ExpectedVersion: 0));
+        await using var transaction = await store.BeginAsync(DocumentCommitScope.Of("workItem"));
+        Assert.Equal(1, (await transaction.LoadAsync("workItem", "target"))!.Version);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "target", "1", """{"status":"second"}""", ExpectedVersion: 1))).Status);
+
+        var conflict = await transaction.DeleteAsync(new DeleteDocumentRequest(
+            "workItem", "target", ExpectedVersion: 1));
+
+        Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, conflict.Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            transaction.LoadAsync("workItem", "target"));
+        Assert.Equal(2, (await store.LoadAsync("workItem", "target"))!.Version);
+    }
+
+    [Theory]
+    [InlineData(StorageIdentityKind.Guid)]
+    [InlineData(StorageIdentityKind.Composite)]
+    public async Task Non_string_identity_kinds_preserve_ordinal_projection(StorageIdentityKind identityKind)
+    {
+        var database = Database();
+        var template = Model(PhysicalStorageForm.PhysicalEntityTable);
+        var model = MongoDbPhysicalStorageModel.Compile(template.Manifest with
+        {
+            StorageUnits =
+            [
+                template.Manifest.StorageUnits.Single() with
+                {
+                    IdentityPolicy = new IdentityPolicy(identityKind, "id")
+                }
+            ]
+        });
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
+
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "A-B", "1", """{"status":"upper"}""", ExpectedVersion: 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "a-b", "1", """{"status":"lower"}""", ExpectedVersion: 0))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Saved, (await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "A-B", "1", """{"status":"updated"}""", ExpectedVersion: 1))).Status);
+        Assert.Equal(DocumentStoreWriteStatus.Deleted, (await store.DeleteAsync(new DeleteDocumentRequest(
+            "workItem", "a-b", ExpectedVersion: 1))).Status);
+        Assert.Contains("updated", (await store.LoadAsync("workItem", "A-B"))!.ContentJson);
+        Assert.Null(await store.LoadAsync("workItem", "a-b"));
+    }
+
+    [Fact]
+    public async Task Loaded_content_json_remains_standard_json_for_large_numbers()
+    {
+        var database = Database();
+        var model = Model(PhysicalStorageForm.PhysicalEntityTable);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(model);
+        var store = new MongoDbPhysicalDocumentStore(database, model, DocumentStoreAccess.Scoped(new("tenant-a")));
+        const long largeValue = 1717254000000;
+
+        await store.SaveAsync(new SaveDocumentRequest(
+            "workItem", "large", "1", $$"""{"status":"system","value":{{largeValue}}}""", ExpectedVersion: 0));
+
+        var loaded = await store.LoadAsync("workItem", "large");
+
+        Assert.NotNull(loaded);
+        using var content = System.Text.Json.JsonDocument.Parse(loaded.ContentJson);
+        Assert.Equal(largeValue, content.RootElement.GetProperty("value").GetInt64());
+    }
+
+    [Fact]
     public async Task Applied_state_is_restart_safe_and_rejects_an_out_of_band_index_conflict()
     {
         var database = Database();
@@ -1507,6 +1647,31 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
             .Find(Builders<BsonDocument>.Filter.Eq(route.Envelope.Id.Identifier, "existing"))
             .SingleAsync();
         Assert.Equal("open", persisted[status.Column.Identifier].AsString);
+        var store = new MongoDbPhysicalDocumentStore(database, changed, DocumentStoreAccess.Scoped(new("tenant-a")));
+        Assert.Single((await store.QueryAsync(new DocumentQuery(
+            "workItem", "list-by-status",
+            [DocumentQueryClause.Of(DocumentQueryComparison.Equal("status", "open"))]))).Documents);
+    }
+
+    [Fact]
+    public async Task Added_index_backfills_preexisting_documents_across_a_manifest_version_bump()
+    {
+        var database = Database();
+        var initial = EntityEvolutionModel(includeStatus: false);
+        await new MongoDbGroundworkMaterializer(database).MaterializeAsync(initial);
+        var initialStore = new MongoDbPhysicalDocumentStore(database, initial, DocumentStoreAccess.Scoped(new("tenant-a")));
+        await initialStore.SaveAsync(new SaveDocumentRequest(
+            "workItem", "existing", "1", """{"rank":7,"status":"open"}"""));
+
+        var changed = MongoDbPhysicalStorageModel.Compile(
+            EntityEvolutionModel(includeStatus: true).Manifest with
+            {
+                Version = new StorageManifestVersion("1.1.0")
+            });
+        var materializer = new MongoDbGroundworkMaterializer(database);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, (await materializer.MaterializeAsync(changed)).Outcome);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, (await materializer.MaterializeAsync(changed)).Outcome);
+
         var store = new MongoDbPhysicalDocumentStore(database, changed, DocumentStoreAccess.Scoped(new("tenant-a")));
         Assert.Single((await store.QueryAsync(new DocumentQuery(
             "workItem", "list-by-status",
@@ -3450,11 +3615,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
             scoped ? TenancyPolicy.Scoped : TenancyPolicy.Global,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = withoutLinkedProjection
+            withoutLinkedProjection
                 ? new StorageUnitPhysicalStorage(
                     StorageUnitProvisioningMode.Declared,
                     PhysicalStoragePolicy.Explicit(definition))
@@ -3462,8 +3623,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
                     StorageUnitProvisioningMode.Declared,
                     PhysicalStoragePolicy.Explicit(definition),
                     logicalIndexes,
-                    boundedQueries)
-        };
+                    boundedQueries));
         var manifest = new StorageManifest(
             new StorageManifestIdentity($"mongo.conformance.{form}"),
             new StorageManifestOwner("tests"),
@@ -3506,11 +3666,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
             TenancyPolicy.Global,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
                     "global_configuration_documents",
@@ -3522,8 +3678,7 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
                             [new PhysicalIndexColumnDefinition("id_comparison_key", 0)])
                     ])),
                 [index],
-                [query])
-        };
+                [query]));
         return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
             new StorageManifestIdentity("mongo.conformance.unfiltered-global-id"),
             new StorageManifestOwner("tests"),
@@ -3682,16 +3837,11 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [logical],
-                [query])
-        };
+                [query]));
         var manifest = new StorageManifest(
             new StorageManifestIdentity($"mongo.{form}"),
             new StorageManifestOwner("tests"),
@@ -3787,19 +3937,14 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
                     "work_items_collection_evolution",
                     columns,
                     indexes: [categoryIndex])),
                 logicalIndexes,
-                queries)
-        };
+                queries));
         return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
             new StorageManifestIdentity("mongo.collection-evolution"),
             new StorageManifestOwner("tests"),
@@ -3856,14 +4001,12 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
         var unit = new StorageUnit(
             new StorageUnitIdentity("workItem"), "Work item", StorageIntent.PortableDocument(),
             LifecyclePolicy.Mutable, IdentityPolicy.StringId(), TenancyPolicy.Scoped,
-            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(), [], [], PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(),
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [logical],
-                [query])
-        };
+                [query]));
         return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
             new StorageManifestIdentity("mongo.unindexed-keyword-contains"),
             new StorageManifestOwner("tests"),
@@ -3958,16 +4101,11 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
             TenancyPolicy.Scoped,
             ConcurrencyPolicy.Optimistic(),
             SerializationPolicy.Json(),
-            [],
-            [],
-            PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [logical],
-                [query])
-        };
+                [query]));
         var manifest = new StorageManifest(
             new StorageManifestIdentity($"mongo.latest-per-key.{form}"),
             new StorageManifestOwner("tests"),
@@ -4044,14 +4182,12 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
         var unit = new StorageUnit(
             new StorageUnitIdentity("workItem"), "Work item", StorageIntent.PortableDocument(),
             LifecyclePolicy.Mutable, IdentityPolicy.StringId(), TenancyPolicy.Scoped,
-            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(), [], [], PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(),
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 includeStatus ? [logical] : [],
-                includeStatus ? [query] : [])
-        };
+                includeStatus ? [query] : []));
         return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
             new StorageManifestIdentity($"mongo.projection.{form}"),
             new StorageManifestOwner("tests"),
@@ -4090,15 +4226,13 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
         var unit = new StorageUnit(
             new StorageUnitIdentity("workItem"), "Work item", StorageIntent.PortableDocument(),
             LifecyclePolicy.Mutable, IdentityPolicy.StringId(), TenancyPolicy.Scoped,
-            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(), [], [], PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(),
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(PhysicalTableDefinition.PhysicalEntityTable(
                     "evolution_items", projections, indexes: indexes)),
                 includeStatus ? [logical] : [],
-                includeStatus ? [query] : [])
-        };
+                includeStatus ? [query] : []));
         return MongoDbPhysicalStorageModel.Compile(new StorageManifest(
             new StorageManifestIdentity("mongo.entity.evolution"),
             new StorageManifestOwner("tests"),
@@ -4121,12 +4255,10 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
         var unit = new StorageUnit(
             new StorageUnitIdentity("workItem"), "Work item", StorageIntent.PortableDocument(),
             LifecyclePolicy.Mutable, IdentityPolicy.StringId(), TenancyPolicy.Scoped,
-            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(), [], [], PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(),
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
-                PhysicalStoragePolicy.Explicit(definition))
-        };
+                PhysicalStoragePolicy.Explicit(definition)));
         var manifest = new StorageManifest(
             new StorageManifestIdentity("mongo.shared.evolution"),
             new StorageManifestOwner("tests"),
@@ -4175,14 +4307,12 @@ public sealed class MongoDbPhysicalStorageConformanceTests(MongoDbReplicaSetTest
         var unit = new StorageUnit(
             new StorageUnitIdentity("workItem"), "Work item", StorageIntent.PortableDocument(),
             LifecyclePolicy.Mutable, IdentityPolicy.StringId(), TenancyPolicy.Scoped,
-            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(), [], [], PhysicalizationPolicy.Portable)
-        {
-            PhysicalStorage = new StorageUnitPhysicalStorage(
+            ConcurrencyPolicy.Optimistic(), SerializationPolicy.Json(),
+            new StorageUnitPhysicalStorage(
                 StorageUnitProvisioningMode.Declared,
                 PhysicalStoragePolicy.Explicit(definition),
                 [logical],
-                [query])
-        };
+                [query]));
         var manifest = new StorageManifest(
             new StorageManifestIdentity("mongo.shared.unique-backfill"),
             new StorageManifestOwner("tests"),

@@ -54,12 +54,12 @@ Identity always includes the compiled discriminator and storage scope. The same 
 and unique projected value can therefore exist in independent scopes when the physical unique index
 includes scope. Dedicated document storage works with or without a linked object.
 
-Until creation/update timestamps become portable envelope fields, relational providers reserve the
+Until creation/update timestamps become provider-neutral envelope fields, relational providers reserve the
 provider column identifiers `created_utc` and `updated_utc`. Route validation rejects envelope or
 in-primary projection mappings that collide with either reserved identifier; providers never
 silently reinterpret a compiled route mapping.
 
-Canonical JSON is parsed before mutation. One portable typed projection converter feeds live
+Canonical JSON is parsed before mutation. One provider-neutral typed projection converter feeds live
 primary/linked maintenance, physical predicates, and bounded canonical-JSON backfill batches.
 Physical query plans always carry the declared logical value kind. A logical index provides a
 default kind and heterogeneous compound fields declare an explicit `IndexField.ValueKind` override.
@@ -73,7 +73,7 @@ Decimal projections require explicit precision and scale. SQLite supports precis
 stores the checked fixed-scale value as an integer; values outside the declared precision/scale fail
 before SQL mutation. Numeric conversion parses the original sign, digits, decimal point, and
 exponent before creating a CLR numeric value, so underflow, excess precision, and rounded collisions
-cannot enter live, default, backfill, or query paths. Portable date-time projections are UTC instants
+cannot enter live, default, backfill, or query paths. Declared date-time projections are UTC instants
 at .NET tick precision (100ns), require an explicit UTC designator or numeric offset, and reject
 fractional seconds beyond seven digits before parsing; SQLite stores their UTC ticks as an integer.
 SQLite does not certify canonical-JSON Number or
@@ -143,8 +143,8 @@ and retained original. A native key violation is probed by digest and a differen
 raises `PhysicalIdentityHashCollisionException` rather than masquerading as optimistic concurrency.
 Provider-owned column names use the same deterministic 128-character normalizer as declared names,
 and a route whose visible column collides with one is rejected before use. PostgreSQL stores
-portable `DateTime` projections as UTC ticks because native timestamps round Groundwork's 100ns
-contract to microseconds; SQL Server uses `datetimeoffset(7)`. Both providers restrict portable
+declared `DateTime` projections as UTC ticks because native timestamps round Groundwork's 100ns
+contract to microseconds; SQL Server uses `datetimeoffset(7)`. Both providers restrict declared
 `Decimal` projections to precision 1–28 with explicit scale, matching the exact CLR decimal
 conversion boundary used by live writes, backfills, defaults, and query parameters.
 `SqlServerGroundworkCapabilities.PhysicalNames` enforces SQL Server's 128-character identifier

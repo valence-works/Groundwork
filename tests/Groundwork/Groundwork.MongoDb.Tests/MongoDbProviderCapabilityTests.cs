@@ -34,19 +34,21 @@ public sealed class MongoDbProviderCapabilityTests
     }
 
     [Fact]
-    public async Task Conventional_store_reports_atomic_boundary_after_fallback_probe_evidence()
+    public async Task Physical_store_reports_atomic_boundary_after_fallback_probe_evidence()
     {
         var capability = new MongoDbTransactionCapability(_ => Task.FromResult(true));
         Assert.True(await capability.SupportsTransactionsAsync(CancellationToken.None));
         var database = new MongoClient("mongodb://localhost").GetDatabase("groundwork_capability_probe");
-        var store = new MongoDbDocumentStore(
+        var store = new MongoDbPhysicalDocumentStore(
             database,
-            MongoDbTestManifests.MetadataManifest(),
+            MongoDbPhysicalStorageModel.Compile(MongoDbTestManifests.MetadataManifest()),
             DocumentStoreAccess.Global,
             scopeObserver: null,
-            capability.SupportsTransactionsAsync,
+            options: null,
+            TimeProvider.System,
+            hooks: null,
             startSessionAsync: null,
-            isTransactionSupportKnown: () => capability.IsKnownSupported);
+            transactionCapability: capability);
 
         Assert.Equal(TransactionBoundary.CrossUnitAtomic, store.TransactionBoundary);
     }

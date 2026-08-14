@@ -197,21 +197,13 @@ Plan diagnostics are canonically serialized and fingerprinted with the provider,
 index/fields, mandatory scope, predicates/operators, ordering/tie-break, paging, result operations,
 latest selection, scale class, and executable-route fingerprint.
 
-## Compatibility bridge
+## Runtime binding
 
 `DocumentQuery` is the runtime contract and binds each request to a bounded-query identity.
-`PortableDocumentQuery` and `DocumentStoreQuery` carry `GW0004` obsolete guidance.
 `PhysicalQueryDocumentStore` is the executable runtime seam: construction verifies registered
 handler identities, compiles every declaration, and returns no traffic-capable store when planning
 fails. Runtime requests resolve by bounded-query identity and stable predicate/order paths before
-dispatch to the selected handler. `DocumentStoreQuery.ToDocumentQuery(queryIdentity, path)` requires
-both values explicitly; it never guesses a query identity from an index name.
-
-`LegacyPortableDocumentQueryHandler` is an explicit ordinary-query bridge for the old provider
-surface. It certifies only single-field logical indexes, applies a representable planned default
-order, and rejects scale-bearing, compound/multi-path, keyset, latest, and operator shapes the legacy
-contract cannot express. It never collapses several stable paths into one legacy index identity.
-Providers must not add a third query family.
+dispatch to the selected handler. It is the only query family; providers must not add another.
 
 ## Runtime plan explanation
 
@@ -236,8 +228,8 @@ The [relational physical storage runtime](relational-physical-storage-runtime.md
 reusable relational handler and SQLite reference execution for linked+primary, dedicated, and entity
 plans. Exact handler certifications are built from compiled plans; predicates, compound filters,
 ordering, offset pages, counts, any, and first execute in SQL, and SQLite explain assertions prove
-physical-index selection. The SQLite profile does not advertise keyset or latest-per-key execution.
-Typed projected predicates bind provider values through the same portable conversion used by live
+physical-index selection.
+Typed projected predicates bind provider values through the same provider-neutral conversion used by live
 writes and backfills. Plan fields retain the declared logical semantic kind; a checked conversion
 boundary then emits the compatible native representation, including GUID and binary parameters,
 without changing comparison semantics. Numeric literals are validated lexically before CLR

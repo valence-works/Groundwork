@@ -12,7 +12,6 @@
     <Project Path="src/Groundwork/Documents/Groundwork.Documents.csproj" />
     <Project Path="src/Groundwork/DiagnosticRecords/Groundwork.DiagnosticRecords.csproj" />
     <Project Path="src/Groundwork/DiagnosticRecords.Relational/Groundwork.DiagnosticRecords.Relational.csproj" />
-    <Project Path="src/Groundwork/Materialization/Groundwork.Materialization.csproj" />
     <Project Path="src/Groundwork/MongoDb/Groundwork.MongoDb.csproj" />
     <Project Path="src/Groundwork/PostgreSql/Groundwork.PostgreSql.csproj" />
     <Project Path="src/Groundwork/Provider.Relational/Groundwork.Provider.Relational.csproj" />
@@ -29,7 +28,6 @@
     <Project Path="tests/Groundwork/Groundwork.DocumentCursor.ProcessProbe/Groundwork.DocumentCursor.ProcessProbe.csproj" />
     <Project Path="tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.DiagnosticRecords.Tests/Groundwork.DiagnosticRecords.Tests.csproj" />
-    <Project Path="tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.RelationalProviders.Tests/Groundwork.RelationalProviders.Tests.csproj" />

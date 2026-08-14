@@ -1,3 +1,4 @@
+using Groundwork.Core.SchemaEvolution;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.Sqlite;
@@ -79,16 +80,17 @@ public sealed class SqliteConnectionPragmaTests
     public async Task DocumentStoreFactoryLeavesFileDatabaseInWalMode()
     {
         using var database = new TempDatabase();
-        var manifest = ClosedQueryManifests.WidgetManifest();
+        var manifest = SqliteTestManifests.MetadataManifest();
 
-        var store = await SqliteDocumentStoreFactory.CreateAsync(
+        var store = await SqliteDocumentStoreFactory.OpenPhysicalAsync(
             database.ConnectionString,
             manifest,
-            ClosedQueryManifests.Provider,
-            DocumentStoreAccess.Global);
+            SqliteTestManifests.Provider,
+            DocumentStoreAccess.Global,
+            options: new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
 
         var saved = await store.SaveAsync(new SaveDocumentRequest(
-            "widget", "w1", "1.0.0", """{"name":"w1","category":"tools","sortKey":"001"}"""));
+            "configurationDocument", "w1", "1.0.0", """{"key":"w1","category":"tools"}"""));
         Assert.Equal(DocumentStoreWriteStatus.Saved, saved.Status);
 
         await using var probe = new SqliteConnection(database.ConnectionString);

@@ -28,7 +28,6 @@ public enum CanonicalJsonBackfillSubjectKind
 {
     ProjectedColumn,
     PhysicalIndex,
-    LogicalIndex,
     CollectionElements
 }
 
@@ -332,8 +331,7 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
             subjectKind,
             subjectIdentity,
             sourcePaths,
-            [subjectFingerprint],
-            null)
+            [subjectFingerprint])
     {
         // This backfill names the definition it reconciles, so its own fingerprint moves whenever that
         // subject's does. A superseded subject therefore has to carry its dependent backfill with it, or
@@ -347,8 +345,7 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
                 subjectKind,
                 subjectIdentity,
                 sourcePaths,
-                [supersededSubjectFingerprint],
-                null);
+                [supersededSubjectFingerprint]);
         }
     }
 
@@ -369,7 +366,6 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
                 collectionStorage.Storage.Name.Identifier,
                 PhysicalSchemaOperationCanonicalizer.CollectionElementStorage(collectionStorage)
             ],
-            null,
             collectionStorage)
     {
     }
@@ -382,7 +378,6 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
         string subjectIdentity,
         IReadOnlyList<string> sourcePaths,
         IReadOnlyList<string?> semanticParts,
-        IndexDeclaration? logicalIndex,
         ExecutableCollectionElementStorageRoute? collectionStorage = null)
         : base(
             PhysicalSchemaOperationKind.BackfillCanonicalJson,
@@ -405,7 +400,6 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
         Target = target;
         SubjectKind = subjectKind;
         SourcePaths = Array.AsReadOnly(sourcePaths.Order(StringComparer.Ordinal).ToArray());
-        LogicalIndex = logicalIndex;
         CollectionStorage = collectionStorage;
     }
 
@@ -417,8 +411,6 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
 
     public IReadOnlyList<string> SourcePaths { get; }
 
-    public IndexDeclaration? LogicalIndex { get; }
-
     public ExecutableCollectionElementStorageRoute? CollectionStorage { get; }
 
     public ExecutableStorageObjectRoute? Storage => CollectionStorage?.Storage ??
@@ -429,30 +421,6 @@ public sealed class BackfillCanonicalJsonOperation : PhysicalSchemaOperation, IP
 
     string IProviderMaterializationOperation.Target =>
         $"{StorageUnit!.Value}.{SubjectIdentity}.backfill-canonical-json";
-
-    public static BackfillCanonicalJsonOperation ForLogicalIndex(
-        StorageUnitIdentity storageUnit,
-        IndexDeclaration index)
-    {
-        ArgumentNullException.ThrowIfNull(index);
-        var semanticParts = new string?[]
-        {
-            index.ValueKind.ToString(),
-            index.IsUnique.ToString(CultureInfo.InvariantCulture),
-            index.IsSortable.ToString(CultureInfo.InvariantCulture),
-            index.MissingValueBehavior.ToString()
-        };
-        return new BackfillCanonicalJsonOperation(
-            storageUnit,
-            null,
-            ExecutableStorageObjectRole.LinkedIndexStorage,
-            CanonicalJsonBackfillSubjectKind.LogicalIndex,
-            index.Identity,
-            index.Fields.Select(field => field.Path).ToArray(),
-            semanticParts,
-            index);
-    }
-
 }
 
 /// <summary>

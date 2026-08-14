@@ -26,7 +26,20 @@ public sealed class StorageUnitConstructionTests
             physicalStorage);
 
         Assert.Same(physicalStorage, unit.PhysicalStorage);
-        Assert.Empty(unit.Indexes);
-        Assert.Empty(unit.Queries);
+    }
+
+    [Fact]
+    public void Create_requires_a_physical_storage_declaration()
+    {
+        Assert.Throws<ArgumentNullException>(() => StorageUnit.Create(
+            new StorageUnitIdentity("current-api"),
+            "Current API",
+            StorageIntent.PortableDocument(),
+            LifecyclePolicy.Mutable,
+            IdentityPolicy.StringId(),
+            TenancyPolicy.Scoped,
+            ConcurrencyPolicy.Optimistic(),
+            SerializationPolicy.Json(),
+            null!));
     }
 }
