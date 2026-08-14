@@ -1,10 +1,11 @@
 name: Publish NuGet Packages
 
 on:
-  push:
-    branches: [main]
   release:
     types: [published]
+  # V1 is frozen. Manual runs are retained only for an explicitly approved critical-security
+  # maintenance build; ordinary pushes to main must not produce more v1 preview packages.
+  workflow_dispatch:
 
 permissions:
   contents: read
