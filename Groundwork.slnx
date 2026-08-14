@@ -29,6 +29,7 @@
     <Project Path="tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.DiagnosticRecords.Tests/Groundwork.DiagnosticRecords.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj" />
+    <Project Path="tests/Groundwork/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.RelationalProviders.Tests/Groundwork.RelationalProviders.Tests.csproj" />
     <Project Path="tests/Groundwork/Groundwork.PhysicalStorage.Benchmarks.Tests/Groundwork.PhysicalStorage.Benchmarks.Tests.csproj" />

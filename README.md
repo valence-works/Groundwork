@@ -438,9 +438,13 @@ npm --prefix samples/Groundwork.SupportTickets/Client run build
 Provider integration suites can be run separately when Docker-backed databases are available:
 
 ```bash
+dotnet test tests/Groundwork/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj
 dotnet test tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj
 dotnet test tests/Groundwork/Groundwork.RelationalProviders.Tests/Groundwork.RelationalProviders.Tests.csproj
 ```
+
+The four-provider differential suite is the standing portability gate. Its normalize-or-refuse
+decisions are recorded in the [draft portable semantics contract](docs/v2/portable-semantics-draft.md).
 
 The physical-storage macrobenchmark scaffolding and its current evidence limits are documented in
 [`benchmarks/Groundwork.PhysicalStorage.Benchmarks`](benchmarks/Groundwork.PhysicalStorage.Benchmarks/README.md).

@@ -72,6 +72,8 @@ jobs:
             project: tests/Groundwork/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj
           - name: PostgreSQL and SQL Server
             project: tests/Groundwork/Groundwork.RelationalProviders.Tests/Groundwork.RelationalProviders.Tests.csproj
+          - name: G2 cross-provider differential semantics
+            project: tests/Groundwork/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj
           - name: Schema tool parity
             project: tests/Groundwork/Groundwork.SchemaTool.ProviderTests/Groundwork.SchemaTool.ProviderTests.csproj
           - name: Benchmark harness contracts
