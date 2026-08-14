@@ -32,6 +32,7 @@ REPO_NAME = "Groundwork"
 PROJECT_NUMBER = 5
 LABEL = "v2"
 GATES = {"G1", "G2", "G3"}
+SHARED_TARGET_BRANCH = "codex/groundwork-v2"
 
 DRY_RUN = "--dry-run" in sys.argv
 TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -155,6 +156,7 @@ query($owner:String!, $repo:String!, $cursor:String) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
+        baseRefName
         title
         body
         closingIssuesReferences(first:100) {
@@ -177,9 +179,10 @@ while True:
                 f"{REPO_OWNER}/{REPO_NAME}".casefold()
             ):
                 issues_with_open_pr.add(issue["number"])
-        issues_with_open_pr.update(
-            closing_issue_references(f"{pr['title']}\n{pr['body'] or ''}")
-        )
+        if pr["baseRefName"] == SHARED_TARGET_BRANCH:
+            issues_with_open_pr.update(
+                closing_issue_references(f"{pr['title']}\n{pr['body'] or ''}")
+            )
     page = connection["pageInfo"]
     if not page["hasNextPage"]:
         break
