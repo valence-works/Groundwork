@@ -1,0 +1,70 @@
+name: v2 board sync
+
+# Keeps the Groundwork v2 project board (https://github.com/orgs/valence-works/projects/5)
+# in step with reality. Status is derived from GitHub state, never hand-maintained, so a
+# card cannot go stale because somebody forgot to drag it:
+#
+#   issue closed .................. Done
+#   open linked pull request ...... In review
+#   has an assignee ............... In progress
+#   every blocker closed .......... Ready
+#   otherwise ..................... Blocked
+#
+# Blockers are read from each issue's "## Dependencies" section, so the graph lives in the
+# issues themselves and stays correct when one is edited.
+#
+# SETUP: needs a repository (or organisation) secret `PROJECT_TOKEN` — a fine-grained or
+# classic PAT with `project` (read/write) and `repo` scope. The default GITHUB_TOKEN
+# cannot write to organisation projects, and the job fails loudly if the secret is absent.
+
+on:
+  issues:
+    types: [opened, closed, reopened, assigned, unassigned, labeled, unlabeled, edited]
+  pull_request_target:
+    types: [opened, closed, reopened, edited, ready_for_review]
+  schedule:
+    # Hourly backstop: catches anything an event was missed for, and picks up an issue
+    # whose blockers closed while it was untouched.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the plan without writing"
+        type: boolean
+        default: false
+
+concurrency:
+  group: v2-board-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Skip issue events for issues that are not part of the programme.
+    if: >-
+      github.event_name != 'issues' ||
+      contains(join(github.event.issue.labels.*.name, ','), 'v2')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the token is configured
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          if [ -z "$PROJECT_TOKEN" ]; then
+            echo "::error::PROJECT_TOKEN secret is not set. Create a PAT with 'project'"
+            echo "::error::(read/write) and 'repo' scope, then add it as a repository secret."
+            echo "::error::The default GITHUB_TOKEN cannot write to organisation projects."
+            exit 1
+          fi
+
+      - name: Sync the board
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          python3 .github/scripts/v2_board_sync.py \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }} \
+            | tee "$GITHUB_STEP_SUMMARY"
