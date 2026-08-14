@@ -63,6 +63,32 @@ def graphql(query, **variables):
     return result["data"]
 
 
+def issue_references(text):
+    """Return issue numbers, expanding compact ranges such as #239–#243."""
+    numbers = set()
+    for match in re.finditer(r"#(\d+)(?:\s*[-–—]\s*#?(\d+))?", text):
+        first = int(match.group(1))
+        last = int(match.group(2) or first)
+        if last < first or last - first > 100:
+            numbers.add(first)
+            continue
+        numbers.update(range(first, last + 1))
+    return numbers
+
+
+def closing_issue_references(text):
+    """Return only issue references on GitHub closing-keyword lines."""
+    numbers = set()
+    closing = re.compile(
+        r"^\s*(?:[-*]\s*)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b",
+        re.IGNORECASE,
+    )
+    for line in text.splitlines():
+        if closing.match(line):
+            numbers.update(issue_references(line))
+    return numbers
+
+
 # --------------------------------------------------------------------- read state
 
 PROJECT_QUERY = """
@@ -117,8 +143,9 @@ query($owner:String!, $repo:String!) {
 prs = graphql(PR_QUERY, owner=REPO_OWNER, repo=REPO_NAME)["repository"]["pullRequests"]["nodes"]
 issues_with_open_pr = set()
 for pr in prs:
-    for ref in re.findall(r"#(\d+)", f"{pr['title']}\n{pr['body'] or ''}"):
-        issues_with_open_pr.add(int(ref))
+    issues_with_open_pr.update(
+        closing_issue_references(f"{pr['title']}\n{pr['body'] or ''}")
+    )
 
 # --------------------------------------------------------------- dependency graph
 
@@ -145,13 +172,13 @@ for number, info in tracked.items():
     section = body.split("## Dependencies", 1)[1].split("\n---")[0] if "## Dependencies" in body else ""
     flat = " ".join(section.split())
     for match in re.finditer(r"Blocked by ([^.]*)\.", flat):
-        for ref in re.findall(r"#(\d+)", match.group(1)):
-            if int(ref) in tracked:
-                blockers[number].add(int(ref))
+        for ref in issue_references(match.group(1)):
+            if ref in tracked:
+                blockers[number].add(ref)
     for match in re.finditer(r"(?:Blocks|[Mm]ust land before) ([^.]*)\.", flat):
-        for ref in re.findall(r"#(\d+)", match.group(1)):
-            if int(ref) in tracked:
-                blockers[int(ref)].add(number)
+        for ref in issue_references(match.group(1)):
+            if ref in tracked:
+                blockers[ref].add(number)
 
 gate_numbers = {n for n, w in work_id.items() if w in GATES}
 for number in tracked:
