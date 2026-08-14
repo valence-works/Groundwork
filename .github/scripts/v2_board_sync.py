@@ -89,7 +89,7 @@ def closing_issue_references(text):
     """
     references = set()
     closing = re.compile(
-        r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+        r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s+|:\s*)"
         r"(?:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+))?"
         r"#(?P<number>\d+)",
         re.IGNORECASE,
