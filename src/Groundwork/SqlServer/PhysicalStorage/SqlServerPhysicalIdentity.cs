@@ -45,6 +45,56 @@ internal sealed class SqlServerPhysicalIdentity
             Array.AsReadOnly(logicalPrimaryKey.Select(HiddenColumn).ToArray()));
     }
 
+    /// <summary>
+    /// The key columns SQL Server emits for <paramref name="index"/>. ANSI-padded NVARCHAR equality
+    /// treats values differing only by trailing spaces as duplicates, so a unique index gains one
+    /// provider-owned persisted hash column per projected string key column; the hash is byte-exact,
+    /// restoring the portable exact-match uniqueness contract. The declared columns stay in front so
+    /// query seeks and index pins are unaffected.
+    /// </summary>
+    public IReadOnlyList<RelationalPhysicalIndexKeyColumn> IndexKeyColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index,
+        Func<string, string> quote)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        ArgumentNullException.ThrowIfNull(index);
+        ArgumentNullException.ThrowIfNull(quote);
+        var declared = index.Columns
+            .Select(column => new RelationalPhysicalIndexKeyColumn(column.Column.Identifier, column.Direction));
+        return index.IsUnique
+            ? declared.Concat(UniqueStringKeyColumns(route, index).Select(projection =>
+            {
+                var hidden = HiddenColumn(projection.Column.Identifier);
+                var expression = hash.Expression(quote(projection.Column.Identifier));
+                return new RelationalPhysicalIndexKeyColumn(
+                    hidden,
+                    PhysicalSortDirection.Ascending,
+                    new RelationalProviderOwnedPhysicalColumn(
+                        hidden,
+                        $"{quote(hidden)} AS {expression} PERSISTED{(projection.Definition.IsNullable ? "" : " NOT NULL")}",
+                        "binary(32)",
+                        projection.Definition.IsNullable,
+                        IsComputed: true,
+                        IsPersisted: true,
+                        ComputedDefinition: expression));
+            })).ToArray()
+            : declared.ToArray();
+    }
+
+    /// <summary>The projected string key columns of <paramref name="index"/> in declared order.</summary>
+    public static IReadOnlyList<ExecutableProjectedColumnRoute> UniqueStringKeyColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index) =>
+        index.Columns
+            .Select(indexColumn => route.ProjectedColumns.SingleOrDefault(column =>
+                column.Target == index.Target &&
+                column.Column.Identifier == indexColumn.Column.Identifier &&
+                column.Definition.Type == PortablePhysicalType.String))
+            .Where(projection => projection is not null)
+            .Select(projection => projection!)
+            .ToArray();
+
     public void ValidateRoute(ExecutableStorageRoute route)
     {
         ArgumentNullException.ThrowIfNull(route);
@@ -59,7 +109,7 @@ internal sealed class SqlServerPhysicalIdentity
         ValidateTable(
             route,
             route.PrimaryStorage.Name.Identifier,
-            primaryIdentityColumns,
+            primaryIdentityColumns.Concat(IndexHashColumnSources(route, ExecutableStorageObjectRole.PrimaryStorage)).ToArray(),
             primaryIdentityColumns.Concat(
             [
                 route.Envelope.SchemaVersion.Identifier,
@@ -85,7 +135,7 @@ internal sealed class SqlServerPhysicalIdentity
             ValidateTable(
                 route,
                 route.LinkedIndexStorage.Name.Identifier,
-                linkedIdentityColumns,
+                linkedIdentityColumns.Concat(IndexHashColumnSources(route, ExecutableStorageObjectRole.LinkedIndexStorage)).ToArray(),
                 linkedIdentityColumns.Concat(route.ProjectedColumns
                     .Where(column => column.Target == ExecutableStorageObjectRole.LinkedIndexStorage)
                     .Select(column => column.Column.Identifier)));
@@ -123,21 +173,30 @@ internal sealed class SqlServerPhysicalIdentity
         }));
     }
 
+    private static IEnumerable<string> IndexHashColumnSources(
+        ExecutableStorageRoute route,
+        ExecutableStorageObjectRole target) =>
+        route.Indexes
+            .Where(index => index.IsUnique && index.Target == target)
+            .SelectMany(index => UniqueStringKeyColumns(route, index))
+            .Select(projection => projection.Column.Identifier)
+            .Distinct(StringComparer.Ordinal);
+
     private static void ValidateTable(
         ExecutableStorageRoute route,
         string table,
-        IReadOnlyList<string> identityColumns,
+        IReadOnlyList<string> hiddenColumnSources,
         IEnumerable<string> visibleColumns)
     {
-        var hidden = identityColumns.Select(HiddenColumn).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var hidden = hiddenColumnSources.Select(HiddenColumn).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var collision = visibleColumns.FirstOrDefault(hidden.Contains);
         if (collision is not null)
         {
             throw new InvalidOperationException(
-                $"Executable route '{route.StorageUnit.Value}' maps visible column '{table}.{collision}', which collides with a SQL Server provider-owned identity column.");
+                $"Executable route '{route.StorageUnit.Value}' maps visible column '{table}.{collision}', which collides with a SQL Server provider-owned column.");
         }
-        if (hidden.Count != identityColumns.Count)
-            throw new InvalidOperationException($"Executable route '{route.StorageUnit.Value}' produces duplicate SQL Server provider-owned identity columns in '{table}'.");
+        if (hidden.Count != hiddenColumnSources.Count)
+            throw new InvalidOperationException($"Executable route '{route.StorageUnit.Value}' produces duplicate SQL Server provider-owned columns in '{table}'.");
     }
 
     public static string HiddenColumn(string retainedColumn) =>

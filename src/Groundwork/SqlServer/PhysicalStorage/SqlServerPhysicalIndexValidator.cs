@@ -12,13 +12,19 @@ internal static class SqlServerPhysicalIndexValidator
         ArgumentNullException.ThrowIfNull(route);
         foreach (var index in route.Indexes)
         {
-            if (index.Columns.Count > MaximumKeyColumns)
+            // A unique index carries one provider-owned binary(32) hash key per projected string
+            // column so its uniqueness stays byte-exact under ANSI-padded NVARCHAR equality.
+            var hashColumns = index.IsUnique
+                ? SqlServerPhysicalIdentity.UniqueStringKeyColumns(route, index).Count
+                : 0;
+            var keyColumns = index.Columns.Count + hashColumns;
+            if (keyColumns > MaximumKeyColumns)
             {
                 throw new InvalidOperationException(
-                    $"SQL Server physical index '{index.Identity}' declares {index.Columns.Count} key columns; the provider limit is {MaximumKeyColumns}.");
+                    $"SQL Server physical index '{index.Identity}' requires {keyColumns} key columns; the provider limit is {MaximumKeyColumns}.");
             }
 
-            long keyBytes = 0;
+            long keyBytes = hashColumns * 32L;
             foreach (var indexColumn in index.Columns)
             {
                 var projection = route.ProjectedColumns.SingleOrDefault(column =>

@@ -49,6 +49,11 @@ snapshot while a retention transaction is staged.
   only a bounded native key. A hypothetical digest collision cannot overwrite or disclose another
   original identity: the native constraint rejects the colliding write and original-value
   predicates never treat the values as equal.
+- String values are byte-exact, including trailing spaces. SQL Server's ANSI-padded `NVARCHAR`
+  equality would otherwise treat values differing only by trailing spaces as duplicates, so every
+  unique physical index appends a persisted SHA-256 `BINARY(32)` shadow key per projected string
+  column, and string equality predicates pair the native (sargable) comparison with a byte-exact
+  `varbinary` residual. Declared index columns stay in front, so index pins and seeks are unchanged.
 - Diagnostic identifiers use U+0020 through U+007E without boundary whitespace. Scope, stream,
   field, and nonce components are limited to 64 bytes; record ids to 128 bytes. Ordinal string field
   bounds are limited to 128 UTF-8 bytes and their sortable keys to `VARCHAR(512)`. Definitions that

@@ -115,10 +115,14 @@ internal class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysicalSchemaD
     public override string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
         $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} SET NOT NULL;";
 
-    public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
+    public override string CreateIndexSql(
+        string table,
+        ExecutablePhysicalIndexRoute index,
+        IReadOnlyList<RelationalPhysicalIndexKeyColumn> keyColumns,
+        IReadOnlyList<string> excludedColumns) =>
         $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)} " +
-        $"({string.Join(", ", index.Columns.Select(column =>
-            $"{QuoteIdentifier(column.Column.Identifier)} " +
+        $"({string.Join(", ", keyColumns.Select(column =>
+            $"{QuoteIdentifier(column.Identifier)} " +
             (column.Direction == PhysicalSortDirection.Descending ? "DESC NULLS LAST" : "ASC NULLS FIRST")))})" +
         (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
 
