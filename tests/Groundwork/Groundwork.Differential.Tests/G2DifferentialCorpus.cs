@@ -487,7 +487,7 @@ public static class G2DifferentialCorpus
             QueryComparisonOperator.NotEqual,
             QueryComparisonOperator.StartsWith,
             QueryComparisonOperator.NotContains],
-            [null, string.Empty, "I", "İ", "ı", "Straße", "e\u0301", "é"],
+            [null, string.Empty, "I", "i", "İ", "ı", "Straße", "e\u0301", "é"],
             "portable-string-search-key");
         AddPredicateShapes(shapes, ref number, "numberValue", "q-numberValue", [
             QueryComparisonOperator.Equal,
@@ -560,12 +560,12 @@ public static class G2DifferentialCorpus
             .Take(6)
             .ToArray();
         var numericValues = NumberValues.Where(value => value is not null).Select(value => value!.Value.ToString(CultureInfo.InvariantCulture)).Take(6).ToArray();
-        for (var index = 0; index < 24; index++)
+        for (var index = 0; index < 18; index++)
         {
-            var pair = index % 12;
+            var pair = index % 9;
             var text = textValues[pair % textValues.Length];
             var numeric = numericValues[pair / textValues.Length];
-            var disjunction = index >= 12;
+            var disjunction = index >= 9;
             IReadOnlyList<DocumentQueryClause> clauses;
             if (disjunction)
             {

@@ -55,6 +55,12 @@ public sealed class G2DifferentialAcceptanceTests
         Assert.Contains(comparisons, comparison =>
             comparison.Operator == QueryComparisonOperator.Contains &&
             comparison.Values.SequenceEqual([string.Empty]));
+        foreach (var turkishI in new[] { "I", "i", "İ", "ı" })
+        {
+            Assert.Contains(comparisons, comparison =>
+                comparison.Path == "textSearch" &&
+                comparison.Values.Contains(turkishI, StringComparer.Ordinal));
+        }
         Assert.All(G2DifferentialCorpus.Shapes, shape =>
         {
             Assert.False(string.IsNullOrWhiteSpace(shape.DecisionId));
