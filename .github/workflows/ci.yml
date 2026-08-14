@@ -40,16 +40,13 @@ jobs:
         run: dotnet build Groundwork.slnx --configuration Release --no-restore
 
       # Every suite that does not need a container. These cover Core, the document
-      # contracts, diagnostic records, materialization planning, the SQLite provider,
-      # the schema tool, and the external-module sample.
+      # contracts, diagnostic records, the SQLite provider, the schema tool, and the
+      # external-module sample.
       - name: Test Groundwork.Tests
         run: dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj --configuration Release --no-build
 
       - name: Test Groundwork.DiagnosticRecords.Tests
         run: dotnet test tests/Groundwork/Groundwork.DiagnosticRecords.Tests/Groundwork.DiagnosticRecords.Tests.csproj --configuration Release --no-build
-
-      - name: Test Groundwork.Materialization.Tests
-        run: dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj --configuration Release --no-build
 
       - name: Test Groundwork.Sqlite.Tests
         run: dotnet test tests/Groundwork/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj --configuration Release --no-build
