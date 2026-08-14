@@ -40,6 +40,19 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
     private readonly PostgreSqlContainer container = fixture.Container;
 
     [Fact]
+    public Task SatisfiesSharedStorageScopeBlackBoxContract() =>
+        RelationalStorageScopeConformance.VerifyAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            target => PhysicalSchemaApplication.ApplyAsync(
+                target,
+                new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString())),
+            (manifest, target, access) => new PostgreSqlPhysicalDocumentStore(
+                container.GetConnectionString(), manifest, target.Routes, access),
+            (store, manifest, route, provider) => PostgreSqlPhysicalQueryRuntime.Create(
+                (PostgreSqlPhysicalDocumentStore)store, manifest, route, provider));
+
+    [Fact]
     public async Task IndependentOperationsUseTheProviderPoolWithoutGlobalSerialization()
     {
         var model = RelationalPhysicalStorageTestModels.Create(

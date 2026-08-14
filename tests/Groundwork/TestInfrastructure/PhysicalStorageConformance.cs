@@ -129,6 +129,32 @@ public abstract class PhysicalStorageConformance
         Assert.Equal(
             DocumentStoreWriteStatus.NotFound,
             (await fixture.Documents.DeleteAsync(new DeleteDocumentRequest("configurationDocument", "absent", 1))).Status);
+        Assert.Equal(
+            DocumentStoreWriteStatus.NotFound,
+            (await fixture.Documents.DeleteAsync(new DeleteDocumentRequest("configurationDocument", "absent", 0))).Status);
+    }
+
+    [Theory]
+    [InlineData(PhysicalStorageForm.SharedDocuments)]
+    [InlineData(PhysicalStorageForm.DedicatedDocumentTable)]
+    [InlineData(PhysicalStorageForm.PhysicalEntityTable)]
+    public async Task CreateOnlySaveWinsAtVersionOneAndARefusedCreateLeavesTheWinnerUntouched(PhysicalStorageForm form)
+    {
+        await using var fixture = await CreateAsync(form);
+
+        var winner = await fixture.Documents.SaveAsync(Save("create-only", "tools", 0));
+        Assert.Equal(DocumentStoreWriteStatus.Saved, winner.Status);
+        Assert.Equal(1, winner.Document!.Version);
+
+        var refused = await fixture.Documents.SaveAsync(Save("create-only", "loser", 0));
+        Assert.Equal(DocumentStoreWriteStatus.ConcurrencyConflict, refused.Status);
+
+        var retained = await fixture.Documents.LoadAsync("configurationDocument", "create-only");
+        Assert.Equal(1, retained!.Version);
+        Assert.Contains("tools", retained.ContentJson);
+        Assert.DoesNotContain("loser", retained.ContentJson);
+        Assert.Equal(1, await fixture.Queries!.CountAsync(CategoryCount("tools")));
+        Assert.Equal(0, await fixture.Queries.CountAsync(CategoryCount("loser")));
     }
 
     [Theory]

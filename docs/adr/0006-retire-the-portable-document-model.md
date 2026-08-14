@@ -78,8 +78,9 @@ the interface at the same time their implementations do.
   and treats portable code as frozen; the portable stores' known error-swallowing divergence is
   fixed by adopting the physical semantics in the shared core rather than by patching the frozen
   copy twice.
-- The `tests/Directory.Build.props` NoWarn (GW0001–GW0005) is the single remaining sanctioned
-  suppression, scoped to suites that intentionally pin legacy behavior until removal.
+- The `tests/Directory.Build.props` NoWarn (GW0001–GW0005) was the single remaining sanctioned
+  suppression, scoped to suites that intentionally pinned legacy behavior until removal; it was
+  deleted with that coverage when the cleanup executed (see Outcome).
 
 ## Outcome
 

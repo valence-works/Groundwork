@@ -1,6 +1,7 @@
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
+using Groundwork.Core.Transactions;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.MongoDb.Documents;
@@ -173,6 +174,21 @@ public sealed class MongoDbPhysicalStoreAdmissionTests(MongoDbReplicaSetTestCont
 
         Assert.Throws<ObjectDisposedException>(() =>
             handle.CreateStore(DocumentStoreAccess.Scoped(new("tenant-a"))));
+    }
+
+    [Fact]
+    public async Task Factory_admits_atomic_commit_manifest_on_a_replica_set()
+    {
+        var databaseName = $"groundwork_{Guid.NewGuid():N}";
+
+        await using var handle = await MongoDbDocumentStoreFactory.CreatePhysicalAsync(
+            container.GetConnectionString(),
+            databaseName,
+            MongoDbTestManifests.AtomicCommitManifest(),
+            MongoDbTestManifests.Provider,
+            DocumentStoreAccess.Global);
+
+        Assert.Equal(TransactionBoundary.CrossUnitAtomic, handle.Store.TransactionBoundary);
     }
 
     [Fact]
