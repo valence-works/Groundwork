@@ -30,7 +30,7 @@ public sealed class G2DifferentialAcceptanceTests
     {
         Assert.Equal(G2DifferentialCorpus.ExpectedRowCount, G2DifferentialCorpus.Rows.Count);
         Assert.Equal(40, G2DifferentialCorpus.AcceptedRows.Count);
-        Assert.Equal(3, G2DifferentialCorpus.RejectedRows.Count);
+        Assert.Equal(4, G2DifferentialCorpus.RejectedRows.Count);
         Assert.All(G2DifferentialCorpus.AcceptedRows, row => Assert.True(row.Accepted));
         Assert.Equal(G2DifferentialCorpus.ExpectedShapeCount, G2DifferentialCorpus.Shapes.Count);
         var shapeKeys = G2DifferentialCorpus.Shapes.Select(shape =>
@@ -56,6 +56,11 @@ public sealed class G2DifferentialAcceptanceTests
         {
             Assert.False(string.IsNullOrWhiteSpace(shape.DecisionId));
             Assert.False(string.IsNullOrWhiteSpace(shape.Description));
+        });
+        Assert.All(G2DifferentialCorpus.MixedTypeCandidates, candidate =>
+        {
+            Assert.Equal(G2SemanticDecision.Refuse, candidate.Decision);
+            Assert.False(string.IsNullOrWhiteSpace(candidate.Rationale));
         });
     }
 
@@ -101,12 +106,12 @@ public sealed class G2DifferentialRejectedInputTests
     {
         Assert.Throws<InvalidDataException>(() => G2DifferentialCorpus.Serialize(
             G2DifferentialCorpus.RejectedRows.Single(row => row.Id == "rejected-excess-decimal-scale")));
-        Assert.False(PortableQueryOperationCompatibility.Supports(
-            IndexValueKind.Number,
-            PortablePhysicalType.String));
-        Assert.False(PortableQueryOperationCompatibility.Supports(
-            IndexValueKind.Number,
-            PortablePhysicalType.Json));
+        Assert.Throws<InvalidDataException>(() => G2DifferentialCorpus.Serialize(
+            G2DifferentialCorpus.RejectedRows.Single(row => row.Id == "rejected-decimal-max-value")));
+        Assert.All(G2DifferentialCorpus.MixedTypeCandidates, candidate =>
+            Assert.False(PortableQueryOperationCompatibility.Supports(
+                candidate.LogicalKind,
+                candidate.PhysicalType)));
     }
 
     [Fact]

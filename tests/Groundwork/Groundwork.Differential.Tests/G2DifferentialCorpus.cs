@@ -23,6 +23,13 @@ public enum G2ShapeKind
     Compound
 }
 
+public sealed record G2MixedTypeCandidate(
+    string Identity,
+    IndexValueKind LogicalKind,
+    PortablePhysicalType PhysicalType,
+    G2SemanticDecision Decision,
+    string Rationale);
+
 public sealed record G2Row(
     string Id,
     string? Text,
@@ -157,6 +164,21 @@ public static class G2DifferentialCorpus
         () => Rows.Where(row => row.Accepted).ToArray());
     private static readonly Lazy<IReadOnlyList<G2Row>> RejectedRowsValue = new(CreateRejectedRows);
     private static readonly Lazy<IReadOnlyList<G2QueryShape>> ShapesValue = new(CreateShapes);
+    private static readonly IReadOnlyList<G2MixedTypeCandidate> MixedTypeCandidatesValue =
+    [
+        new(
+            "number-vs-string",
+            IndexValueKind.Number,
+            PortablePhysicalType.String,
+            G2SemanticDecision.Refuse,
+            "String coercion into a numeric comparison is provider-specific."),
+        new(
+            "number-vs-json",
+            IndexValueKind.Number,
+            PortablePhysicalType.Json,
+            G2SemanticDecision.Refuse,
+            "Untyped JSON/BSON numeric comparison would expose provider coercion and BSON type rules.")
+    ];
 
     public static IReadOnlyList<G2Row> Rows => RowsValue.Value;
 
@@ -165,6 +187,8 @@ public static class G2DifferentialCorpus
     public static IReadOnlyList<G2Row> RejectedRows => RejectedRowsValue.Value;
 
     public static IReadOnlyList<G2QueryShape> Shapes => ShapesValue.Value;
+
+    public static IReadOnlyList<G2MixedTypeCandidate> MixedTypeCandidates => MixedTypeCandidatesValue;
 
     public static string Serialize(G2Row row)
     {
@@ -438,7 +462,18 @@ public static class G2DifferentialCorpus
             [9],
             OmitNullProperties: false,
             Accepted: false,
-            RejectionReason: "decimal scale exceeds the declared decimal(18,4) domain")
+            RejectionReason: "decimal scale exceeds the declared decimal(18,4) domain"),
+        new G2Row(
+            "rejected-decimal-max-value",
+            "decimal",
+            decimal.MaxValue,
+            true,
+            DateTimeOffset.UnixEpoch,
+            Guid.Empty,
+            [9],
+            OmitNullProperties: false,
+            Accepted: false,
+            RejectionReason: "decimal value exceeds the declared decimal(18,4) precision")
     ];
 
     private static IReadOnlyList<G2QueryShape> CreateShapes()
@@ -674,6 +709,26 @@ public static class G2DifferentialCorpus
 
 public static class G2Oracle
 {
+    private static readonly IReadOnlyDictionary<string, string> PinnedUnicodeComparisonKeys =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [string.Empty] = string.Empty,
+            [" "] = "000020",
+            ["  \t"] = "000020000020000009",
+            ["I"] = "000049",
+            ["i"] = "000049",
+            ["İ"] = "000130",
+            ["ı"] = "000131",
+            ["Straße"] = "0000530000540000520000410000DF000045",
+            ["STRASSE"] = "000053000054000052000041000053000053000045",
+            ["e\u0301"] = "000045000301",
+            ["é"] = "0000C9",
+            ["A😀"] = "00004101F600",
+            ["😀A"] = "01F600000041",
+            ["xxxxxxxxxxxxxxxx"] = "000058000058000058000058000058000058000058000058000058000058000058000058000058000058000058000058",
+            ["alpha/beta"] = "00004100004C00005000004800004100002F000042000045000054000041"
+        };
+
     public static IReadOnlyList<string> Evaluate(IReadOnlyList<G2Row> rows, G2QueryShape shape)
     {
         var candidates = rows.Where(row => Matches(row, shape.Clauses)).ToArray();
@@ -773,7 +828,11 @@ public static class G2Oracle
         _ => throw new InvalidOperationException($"Unknown G2 order path '{path}'.")
     };
 
-    // Deliberately independent of Groundwork's key encoder. The providers receive encoded keys,
-    // while the oracle evaluates the declared semantic relation from raw fixture/query text.
-    private static string IndependentUnicodeOrdinalIgnoreCase(string value) => value.ToUpperInvariant();
+    // Deliberately independent of Groundwork's runtime key encoder and Unicode tables. These
+    // reviewed golden vectors pin the finite edge corpus, so a runtime/framework mapping change
+    // cannot silently move both the providers and oracle together.
+    private static string IndependentUnicodeOrdinalIgnoreCase(string value) =>
+        PinnedUnicodeComparisonKeys.TryGetValue(value, out var key)
+            ? key
+            : throw new InvalidOperationException($"No pinned G2 Unicode comparison vector exists for '{value}'.");
 }
