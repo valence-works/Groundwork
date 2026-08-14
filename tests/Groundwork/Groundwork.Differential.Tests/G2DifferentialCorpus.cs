@@ -147,13 +147,20 @@ public static class G2DifferentialCorpus
         [255, 0]
     ];
 
+    private static readonly ProjectedColumnDefinition RawTextDefinition = new(
+        "rawText",
+        "rawText",
+        PortablePhysicalType.String,
+        Length: StringMaximumCodeUnits);
     private static readonly Lazy<IReadOnlyList<G2Row>> RowsValue = new(CreateRows);
+    private static readonly Lazy<IReadOnlyList<G2Row>> AcceptedRowsValue = new(
+        () => Rows.Where(row => row.Accepted).ToArray());
     private static readonly Lazy<IReadOnlyList<G2Row>> RejectedRowsValue = new(CreateRejectedRows);
     private static readonly Lazy<IReadOnlyList<G2QueryShape>> ShapesValue = new(CreateShapes);
 
     public static IReadOnlyList<G2Row> Rows => RowsValue.Value;
 
-    public static IReadOnlyList<G2Row> AcceptedRows => Rows;
+    public static IReadOnlyList<G2Row> AcceptedRows => AcceptedRowsValue.Value;
 
     public static IReadOnlyList<G2Row> RejectedRows => RejectedRowsValue.Value;
 
@@ -161,6 +168,7 @@ public static class G2DifferentialCorpus
 
     public static string Serialize(G2Row row)
     {
+        ValidateForAdmission(row);
         var values = new Dictionary<string, object?>
         {
             ["rawText"] = row.Text,
@@ -184,6 +192,23 @@ public static class G2DifferentialCorpus
                 values.Remove(key);
         }
         return JsonSerializer.Serialize(values);
+    }
+
+    private static void ValidateForAdmission(G2Row row)
+    {
+        if (row.Text is not null)
+        {
+            PhysicalProjectionValueValidation.ValidateStringLength(
+                row.Text,
+                RawTextDefinition);
+        }
+        if (row.Number is { } number)
+        {
+            _ = ExactNumericLiteral.Parse(number.ToString(CultureInfo.InvariantCulture)).ToDecimal(
+                DecimalPrecision,
+                DecimalScale,
+                "numberValue");
+        }
     }
 
     public static StorageManifest CreateManifest(string instance)
@@ -353,7 +378,10 @@ public static class G2DifferentialCorpus
 
     public static string? ProviderValue(string path, string? value) => path switch
     {
-        "textSearch" or "numberValue" or "dateTicks" or "guidKey" or "binaryValue" => value,
+        "textSearch" => value is null ? null : PortableStringComparison.CreateSearchKey(
+            value,
+            PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+        "numberValue" or "dateTicks" or "guidKey" or "binaryValue" => value,
         "boolValue" => value is null ? null : value.Equals("true", StringComparison.OrdinalIgnoreCase) ? "2" : "1",
         _ => value ?? string.Empty
     };
@@ -379,7 +407,7 @@ public static class G2DifferentialCorpus
     private static IReadOnlyList<G2Row> CreateRejectedRows() =>
     [
         new G2Row(
-            "row-38-overlength",
+            "rejected-overlength",
             new string('z', StringMaximumCodeUnits + 1),
             1m,
             true,
@@ -390,7 +418,7 @@ public static class G2DifferentialCorpus
             Accepted: false,
             RejectionReason: "textSearch exceeds the declared UTF-16 maximum length"),
         new G2Row(
-            "row-39-lone-surrogate",
+            "rejected-lone-surrogate",
             "\uD800",
             1m,
             true,
@@ -399,7 +427,18 @@ public static class G2DifferentialCorpus
             [9],
             OmitNullProperties: false,
             Accepted: false,
-            RejectionReason: "implicit Unicode normalization and malformed UTF-16 are refused")
+            RejectionReason: "implicit Unicode normalization and malformed UTF-16 are refused"),
+        new G2Row(
+            "rejected-excess-decimal-scale",
+            "decimal",
+            1.23456m,
+            true,
+            DateTimeOffset.UnixEpoch,
+            Guid.Empty,
+            [9],
+            OmitNullProperties: false,
+            Accepted: false,
+            RejectionReason: "decimal scale exceeds the declared decimal(18,4) domain")
     ];
 
     private static IReadOnlyList<G2QueryShape> CreateShapes()
@@ -413,12 +452,7 @@ public static class G2DifferentialCorpus
             QueryComparisonOperator.NotEqual,
             QueryComparisonOperator.StartsWith,
             QueryComparisonOperator.NotContains],
-            TextValues.Select(value => value is null ? null : PortableStringComparison.CreateSearchKey(
-                value,
-                PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase))
-                .Distinct(StringComparer.Ordinal)
-                .Take(6)
-                .ToArray(),
+            [null, "I", "i", "İ", "ı", "Straße", "e\u0301", "é"],
             "portable-string-search-key");
         AddPredicateShapes(shapes, ref number, "numberValue", "q-numberValue", [
             QueryComparisonOperator.Equal,
@@ -426,7 +460,8 @@ public static class G2DifferentialCorpus
             QueryComparisonOperator.GreaterThan,
             QueryComparisonOperator.GreaterThanOrEqual,
             QueryComparisonOperator.LessThan,
-            QueryComparisonOperator.LessThanOrEqual],
+            QueryComparisonOperator.LessThanOrEqual,
+            QueryComparisonOperator.NotEqual],
             NumberValues.Take(6).Select(value => value?.ToString(CultureInfo.InvariantCulture)).ToArray(),
             "typed-decimal-18-4");
         AddPredicateShapes(shapes, ref number, "boolValue", "q-boolValue", [
@@ -441,7 +476,8 @@ public static class G2DifferentialCorpus
             QueryComparisonOperator.GreaterThan,
             QueryComparisonOperator.GreaterThanOrEqual,
             QueryComparisonOperator.LessThan,
-            QueryComparisonOperator.LessThanOrEqual],
+            QueryComparisonOperator.LessThanOrEqual,
+            QueryComparisonOperator.NotEqual],
             InstantValues.Take(6).Select(value => value?.UtcTicks.ToString(CultureInfo.InvariantCulture)).ToArray(),
             "utc-ticks");
         AddPredicateShapes(shapes, ref number, "guidKey", "q-guidKey", [
@@ -485,17 +521,16 @@ public static class G2DifferentialCorpus
 
         var textValues = TextValues
             .Where(value => value is not null)
-            .Select(value => PortableStringComparison.CreateSearchKey(value!, PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase))
             .Distinct(StringComparer.Ordinal)
             .Take(6)
             .ToArray();
         var numericValues = NumberValues.Where(value => value is not null).Select(value => value!.Value.ToString(CultureInfo.InvariantCulture)).Take(6).ToArray();
-        for (var index = 0; index < 48; index++)
+        for (var index = 0; index < 24; index++)
         {
-            var pair = index % 24;
+            var pair = index % 12;
             var text = textValues[pair % textValues.Length];
             var numeric = numericValues[pair / textValues.Length];
-            var disjunction = index >= 24;
+            var disjunction = index >= 12;
             IReadOnlyList<DocumentQueryClause> clauses;
             if (disjunction)
             {
@@ -671,7 +706,7 @@ public static class G2Oracle
         {
             "textSearch" => row.Text is null
                 ? null
-                : PortableStringComparison.CreateSearchKey(row.Text, PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+                : IndependentUnicodeOrdinalIgnoreCase(row.Text),
             "numberValue" => row.Number?.ToString(CultureInfo.InvariantCulture),
             "boolValue" => row.Flag is null ? null : row.Flag.Value ? "2" : "1",
             "dateTicks" => row.Instant?.UtcTicks.ToString(CultureInfo.InvariantCulture),
@@ -715,7 +750,8 @@ public static class G2Oracle
 
     private static string? OracleValue(string path, string? value) => path switch
     {
-        "textSearch" or "numberValue" or "dateTicks" or "guidKey" or "binaryValue" => value,
+        "textSearch" => value is null ? null : IndependentUnicodeOrdinalIgnoreCase(value),
+        "numberValue" or "dateTicks" or "guidKey" or "binaryValue" => value,
         "boolValue" => value is null ? null : value.Equals("true", StringComparison.OrdinalIgnoreCase) ? "2" : "1",
         _ => value ?? string.Empty
     };
@@ -724,7 +760,7 @@ public static class G2Oracle
     {
         "textOrderKey" => row.Text is null
             ? "0"
-            : "1" + PortableStringComparison.CreateSearchKey(row.Text, PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase),
+            : "1" + IndependentUnicodeOrdinalIgnoreCase(row.Text),
         "numberValue" => row.Number is { } number
             ? (number + 100000000000000000m).ToString("000000000000000000.0000", CultureInfo.InvariantCulture)
             : "000000000000000000.0000",
@@ -736,4 +772,8 @@ public static class G2Oracle
         "binaryValue" => row.Binary is null ? string.Empty : Convert.ToHexString(row.Binary),
         _ => throw new InvalidOperationException($"Unknown G2 order path '{path}'.")
     };
+
+    // Deliberately independent of Groundwork's key encoder. The providers receive encoded keys,
+    // while the oracle evaluates the declared semantic relation from raw fixture/query text.
+    private static string IndependentUnicodeOrdinalIgnoreCase(string value) => value.ToUpperInvariant();
 }

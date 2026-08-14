@@ -1,9 +1,9 @@
+using System.Text.Json;
 using Groundwork.Core.Capabilities;
 using Groundwork.Core.Indexing;
 using Groundwork.Core.Manifests;
 using Groundwork.Core.PhysicalStorage;
 using Groundwork.Core.SchemaEvolution;
-using Groundwork.Core.Text;
 using Groundwork.Documents.Scoping;
 using Groundwork.Documents.Store;
 using Groundwork.MongoDb;
@@ -30,7 +30,8 @@ public sealed class G2DifferentialAcceptanceTests
     {
         Assert.Equal(G2DifferentialCorpus.ExpectedRowCount, G2DifferentialCorpus.Rows.Count);
         Assert.Equal(40, G2DifferentialCorpus.AcceptedRows.Count);
-        Assert.Equal(2, G2DifferentialCorpus.RejectedRows.Count);
+        Assert.Equal(3, G2DifferentialCorpus.RejectedRows.Count);
+        Assert.All(G2DifferentialCorpus.AcceptedRows, row => Assert.True(row.Accepted));
         Assert.Equal(G2DifferentialCorpus.ExpectedShapeCount, G2DifferentialCorpus.Shapes.Count);
         var shapeKeys = G2DifferentialCorpus.Shapes.Select(shape =>
                 $"{shape.Kind}|{shape.QueryIdentity}|{shape.Skip}|{shape.Take}|" +
@@ -80,15 +81,9 @@ public sealed class G2DifferentialRejectedInputTests
     [Fact]
     public void Overlength_projection_is_rejected_before_provider_write()
     {
-        var definition = new ProjectedColumnDefinition(
-            "textSearch",
-            "textSearch",
-            PortablePhysicalType.String,
-            Length: G2DifferentialCorpus.StringMaximumCodeUnits);
         var exception = Assert.Throws<PhysicalProjectionValueValidationException>(() =>
-            PhysicalProjectionValueValidation.ValidateStringLength(
-                new string('x', G2DifferentialCorpus.StringMaximumCodeUnits + 1),
-                definition));
+            G2DifferentialCorpus.Serialize(G2DifferentialCorpus.RejectedRows.Single(row =>
+                row.Id == "rejected-overlength")));
         Assert.Equal("GW-PHYSICAL-037", exception.Diagnostic.Code);
     }
 
@@ -96,20 +91,16 @@ public sealed class G2DifferentialRejectedInputTests
     public void Malformed_utf16_is_refused_before_search_key_generation()
     {
         var exception = Assert.Throws<ArgumentException>(() =>
-            PortableStringComparison.CreateSearchKey(
-                "\uD800",
-                PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase));
+            G2DifferentialCorpus.Serialize(G2DifferentialCorpus.RejectedRows.Single(row =>
+                row.Id == "rejected-lone-surrogate")));
         Assert.Contains("well-formed UTF-16", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Decimal_shape_and_untyped_mixed_values_fail_closed()
     {
-        Assert.Throws<InvalidDataException>(() =>
-            ExactNumericLiteral.Parse("1.23456").ToDecimal(
-                G2DifferentialCorpus.DecimalPrecision,
-                G2DifferentialCorpus.DecimalScale,
-                "numberValue"));
+        Assert.Throws<InvalidDataException>(() => G2DifferentialCorpus.Serialize(
+            G2DifferentialCorpus.RejectedRows.Single(row => row.Id == "rejected-excess-decimal-scale")));
         Assert.False(PortableQueryOperationCompatibility.Supports(
             IndexValueKind.Number,
             PortablePhysicalType.String));
@@ -119,7 +110,7 @@ public sealed class G2DifferentialRejectedInputTests
     }
 
     [Fact]
-    public void Refused_shapes_have_an_explicit_pre_io_guard()
+    public void Refused_shapes_are_stopped_by_the_conformance_admission_guard()
     {
         var refused = G2DifferentialCorpus.Shapes
             .Where(shape => shape.Decision == G2SemanticDecision.Refuse)
@@ -160,6 +151,10 @@ public sealed class G2DifferentialProviderMatrixTests(G2DifferentialProviderCont
 
         foreach (var provider in providers)
             await SeedAsync(provider);
+        var expectedDocuments = G2DifferentialCorpus.AcceptedRows.ToDictionary(
+            row => row.Id,
+            G2DifferentialCorpus.Serialize,
+            StringComparer.Ordinal);
 
         foreach (var shape in G2DifferentialCorpus.Shapes)
         {
@@ -177,6 +172,16 @@ public sealed class G2DifferentialProviderMatrixTests(G2DifferentialProviderCont
                     expected.SequenceEqual(ids, StringComparer.Ordinal),
                     $"shape={shape.Number} decision={shape.DecisionId} provider={providerIndex} description={shape.Description}{Environment.NewLine}" +
                     $"expected={string.Join(',', expected)}{Environment.NewLine}actual={string.Join(',', ids)}");
+                foreach (var document in result.Documents)
+                {
+                    Assert.Equal("1", document.SchemaVersion);
+                    Assert.Equal(1, document.Version);
+                    using var expectedContent = JsonDocument.Parse(expectedDocuments[document.Id]);
+                    using var actualContent = JsonDocument.Parse(document.ContentJson);
+                    Assert.True(JsonElement.DeepEquals(
+                        expectedContent.RootElement,
+                        actualContent.RootElement));
+                }
                 var unpaged = shape with { Skip = null, Take = null };
                 Assert.Equal(G2Oracle.Evaluate(G2DifferentialCorpus.AcceptedRows, unpaged).Count, result.TotalCount);
             }

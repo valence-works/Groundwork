@@ -4,17 +4,20 @@ Status: Phase 0 input for Groundwork v2, produced by the G2 differential gate in
 This document records only two outcomes: a portable shape is normalized, or it is refused before
 provider I/O. It is evidence for the v2 contract, not a promise that the v1 public API will grow.
 
-The standing test uses 40 accepted edge rows, two rejected inputs, and exactly 300 unique query
+The standing test uses 40 accepted edge rows, three rejected inputs, and exactly 300 unique query
 shapes against SQLite, PostgreSQL, SQL Server, and MongoDB. One accepted document omits its null
 properties while other documents contain explicit JSON nulls. The independent oracle and every
-provider must return the same document IDs in the same order.
+provider must return the same document IDs in the same order and the same canonical document values.
+It verifies the normalized contract after the throwaway native probe demonstrated that 28 of 33
+native shapes diverged. The measured native evidence is preserved in the
+[G2 issue report](https://github.com/valence-works/groundwork/issues/230#issuecomment-5297618900).
 
 ## Decisions
 
 | Family | Decision | Portable rule | Cost or restriction | Rationale |
 |---|---|---|---|---|
 | Unicode equality, membership, inequality, and substring search | Normalize | Compare a persisted `UnicodeOrdinalIgnoreCase` search key, not a provider collation or case-folding function. Empty substring matches every non-null string. | An extra bounded projected string column and index; the declared maximum is enforced in UTF-16 code units. | Provider-native `ILIKE`, `LOWER`, collations, and regex folding disagree for Turkish I, sharp S, and composed/decomposed text. |
-| Case-insensitive prefix and negative-substring search on a scale-bearing route | Refuse | `StartsWith` and `NotContains` are rejected before provider I/O for this route class. | These shapes are unavailable until every provider can certify the same indexed semantics. | MongoDB cannot certify Groundwork's case-insensitive regex semantics on the declared ordinary B-tree for these operations. |
+| Case-insensitive prefix and negative-substring search on a scale-bearing route | Refuse | The conformance admission guard rejects `StartsWith` and `NotContains`; the v2 compiler must do the same before provider I/O for this route class. This is a v2 contract decision, not a claim about every v1 entry point. | These shapes are unavailable until every provider can certify the same indexed semantics. | MongoDB cannot certify Groundwork's case-insensitive regex semantics on the declared ordinary B-tree for these operations. |
 | Malformed UTF-16 and implicit Unicode normalization | Refuse | Input must be well-formed UTF-16; canonically equivalent strings remain distinct unless the caller explicitly normalizes them. | Callers choose and pay for normalization before persistence. | Silent normalization would change identity and length semantics. |
 | Overlength projected strings | Refuse | A value exceeding its declared UTF-16 bound fails validation before a provider write. | Every portable string projection needs a finite declared bound. | Truncation and provider-specific index limits are not portable. |
 | Null and missing projected values | Normalize | Missing and explicit null are the same logical null. Equality and `In` may target null; `In []` is false; `In [x, null]` matches either. Negation is the total complement of the positive predicate. | Materialization must preserve the declared `IncludedAsNull` behavior; providers may not expose their native missing/null distinction. | MongoDB `$in: [null]` also matches missing fields, while relational engines have no missing column state. |
@@ -25,7 +28,8 @@ provider must return the same document IDs in the same order.
 | Date/time values | Normalize | Instants are projected as UTC ticks, preserving sub-millisecond precision and comparing numerically from year 1 through year 9999. | Offset identity is discarded; the contract represents instants, not local clock readings. | Provider date ranges, offset handling, and timestamp precision differ. |
 | GUID equality, membership, inequality, and order | Normalize | GUIDs use an RFC 4122/network-byte-order hexadecimal key. | One projected key replaces native GUID ordering. | SQL Server `uniqueidentifier` byte ordering differs from lexical/RFC ordering. |
 | Binary equality and membership | Normalize | Binary values use an exact base64 equality key; null and empty remain distinct. | One bounded projected key and base64 expansion. | Equality is portable when the representation is exact. |
-| Binary range, prefix, negation-by-range, and order | Refuse | Only equality and membership compile for binary data. | No portable binary sorting or prefix ranges. | BSON `BinData` orders by length, subtype, and bytes, which is incompatible with relational byte/text order. |
+| Binary range, prefix, negation-by-range, and order | Refuse | The conformance admission guard accepts only equality and membership; the v2 compiler must reject the other shapes before provider I/O. | No portable binary sorting or prefix ranges. | BSON `BinData` orders by length, subtype, and bytes, which is incompatible with relational byte/text order. |
+| Negation surface | Normalize or refuse explicitly | `NotEqual` covers text, number, boolean, date/time, and GUID; `NotContains` is refused for the scale-bearing route above. The v1 query enum has no `NotIn`, `NotStartsWith`, or separate negated-range operators, so the gate does not synthesize them. | The v2 AST must either omit those operators or add them with new differential evidence. | An absent operator cannot be treated as silently equivalent to a provider-specific rewrite. |
 | Conjunction and disjunction | Normalize | Clauses are ANDed; comparisons within a clause are ORed. Results still use the ordinal ID tie-break when no explicit sort is declared. | Plans must declare every participating predicate path. | This avoids provider optimizer order becoming observable. |
 
 ## Standing proof
