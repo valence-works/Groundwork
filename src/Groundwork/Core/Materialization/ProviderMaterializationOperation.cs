@@ -1,9 +1,8 @@
 namespace Groundwork.Core.Materialization;
 
 /// <summary>
-/// The one kind vocabulary shared by the compatibility <c>Groundwork.Materialization</c> plan and the
-/// route-native <c>Groundwork.Core.SchemaEvolution</c> operations, so a provider can schedule both
-/// through <see cref="IProviderMaterializationOperation"/> without a second enumeration.
+/// Provider-facing storage-preparation operation kinds. Route-native schema evolution uses
+/// <see cref="BackfillCanonicalJson"/> through <see cref="IProviderMaterializationOperation"/>.
 /// </summary>
 public enum MaterializationOperationKind
 {
@@ -14,7 +13,7 @@ public enum MaterializationOperationKind
     RecordSchemaHistory
 }
 
-/// <summary>Common execution contract for legacy and schema-evolution materialization steps.</summary>
+/// <summary>Execution contract implemented by route-native canonical JSON backfill operations.</summary>
 public interface IProviderMaterializationOperation
 {
     MaterializationOperationKind Kind { get; }

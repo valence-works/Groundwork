@@ -87,6 +87,6 @@ the interface at the same time their implementations do.
 2026-08-13: the breaking cleanup announced in decision 4 has been executed. The `GW0005` surface
 (the portable stores and factory `CreateAsync` entry points), the GW0001–GW0004 declaration/query
 types, `LegacyPhysicalStorageBridge`, the portable materializers and planners, and the
-`Groundwork.Materialization` package are removed. `IDocumentStore` now carries only the physical
+compatibility materialization package are removed. `IDocumentStore` now carries only the physical
 surface (`SaveAsync`/`LoadAsync`/`DeleteAsync` plus session creation); bounded querying lives on
 `PhysicalQueryDocumentStore` via declared `DocumentQuery` plans.
