@@ -1,10 +1,10 @@
 name: Publish NuGet Packages
 
 on:
-  push:
-    branches: [main]
   release:
     types: [published]
+  # V1 is frozen. An explicitly approved critical-security fix must be published through a
+  # deliberate GitHub release; ordinary pushes and arbitrary manual refs must not publish.
 
 permissions:
   contents: read

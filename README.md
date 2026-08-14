@@ -2,6 +2,14 @@
 
 ![Groundwork banner](docs/assets/groundwork-banner.png)
 
+> [!IMPORTANT]
+> **Groundwork v1 is frozen.** The frozen source is tagged
+> [`v1-frozen`](https://github.com/valence-works/groundwork/tree/v1-frozen), and existing consumers
+> should remain pinned to their current v1 preview while v2 is developed. V1 receives no features
+> or routine bug fixes; only critical security fixes are eligible for narrowly scoped maintenance.
+> See the [Groundwork v2 program](docs/v2/program.md) for the replacement direction and delivery
+> plan.
+
 Groundwork is a provider-neutral persistence foundation for .NET applications. Modules describe
 storage intent through manifests — storage units, logical indexes, and one bounded query
 declaration per read the application performs — and providers (SQLite, PostgreSQL, SQL Server,
