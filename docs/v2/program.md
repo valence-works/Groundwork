@@ -73,10 +73,11 @@ Epic: **#228**. Work items: **#229–#274**, one milestone per phase.
 
 The board maintains itself. `Status` is recomputed from GitHub state by
 `.github/workflows/v2-board.yml` on every issue and pull-request event and hourly —
-closed is Done, an open linked PR is In review, an assignee is In progress, all blockers
-closed is Ready, otherwise Blocked. Dragging a card is pointless; change the underlying
-fact instead. Blockers are parsed from each issue's `## Dependencies` section, so the
-dependency graph lives in the issues and stays correct when one is edited.
+closed is Done, an open PR with a closing-keyword link is In review, an assignee is In
+progress, all blockers closed is Ready, otherwise Blocked. Parent and dependency references
+do not move unrelated cards. Dragging a card is pointless; change the underlying fact instead.
+Blockers are parsed from each issue's `## Dependencies` section, so the dependency graph lives
+in the issues and stays correct when one is edited.
 
 Setup requirement: a `PROJECT_TOKEN` repository secret (PAT with `project` read/write and
 `repo` scope). The default `GITHUB_TOKEN` cannot write to organisation projects, and the

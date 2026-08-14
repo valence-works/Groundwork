@@ -6,7 +6,7 @@ already knows, so it cannot drift from reality and no contributor has to remembe
 move a card:
 
     issue closed .................. Done
-    open linked pull request ...... In review
+    open pull request that closes . In review
     has an assignee ............... In progress
     every blocker closed .......... Ready
     otherwise ..................... Blocked
@@ -132,7 +132,8 @@ while True:
 status_field = fields["Status"]
 status_option = {o["name"]: o["id"] for o in status_field["options"]}
 
-# Open pull requests, so an item with work in flight shows as In review.
+# Open pull requests with closing-keyword links, so directly implemented items show as In review
+# while parent and dependency references do not move unrelated cards.
 PR_QUERY = """
 query($owner:String!, $repo:String!) {
   repository(owner:$owner, name:$repo) {

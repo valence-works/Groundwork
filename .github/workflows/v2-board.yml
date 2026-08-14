@@ -5,7 +5,7 @@ name: v2 board sync
 # card cannot go stale because somebody forgot to drag it:
 #
 #   issue closed .................. Done
-#   open linked pull request ...... In review
+#   open pull request that closes . In review
 #   has an assignee ............... In progress
 #   every blocker closed .......... Ready
 #   otherwise ..................... Blocked
