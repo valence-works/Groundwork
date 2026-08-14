@@ -487,7 +487,7 @@ public static class G2DifferentialCorpus
             QueryComparisonOperator.NotEqual,
             QueryComparisonOperator.StartsWith,
             QueryComparisonOperator.NotContains],
-            [null, "I", "i", "İ", "ı", "Straße", "e\u0301", "é"],
+            [null, string.Empty, "I", "İ", "ı", "Straße", "e\u0301", "é"],
             "portable-string-search-key");
         AddPredicateShapes(shapes, ref number, "numberValue", "q-numberValue", [
             QueryComparisonOperator.Equal,

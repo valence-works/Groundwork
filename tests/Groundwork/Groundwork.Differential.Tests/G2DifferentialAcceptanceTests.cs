@@ -52,6 +52,9 @@ public sealed class G2DifferentialAcceptanceTests
             comparison.Operator == QueryComparisonOperator.In &&
             comparison.Values.Any(value => value is null) &&
             comparison.Values.Any(value => value is not null));
+        Assert.Contains(comparisons, comparison =>
+            comparison.Operator == QueryComparisonOperator.Contains &&
+            comparison.Values.SequenceEqual([string.Empty]));
         Assert.All(G2DifferentialCorpus.Shapes, shape =>
         {
             Assert.False(string.IsNullOrWhiteSpace(shape.DecisionId));
