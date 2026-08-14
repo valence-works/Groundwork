@@ -472,7 +472,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         var excludedColumns = PhysicalIndexNullExclusion.Columns(route, index);
         var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
         if (existing is null)
-            await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, excludedColumns), ct);
+            await ExecuteAsync(connection, transaction, dialect.CreateIndexSql(table, index, dialect.IndexKeyColumns(route, index), excludedColumns), ct);
         await ValidateIndexAsync(connection, transaction, route, table, index, ct);
     }
 
@@ -501,7 +501,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             index,
             PhysicalIndexNullExclusion.Columns(route, index, MissingValueBehavior.Excluded));
         var existing = await dialect.ReadIndexAsync(connection, transaction, table, index.Name.Identifier, ct);
-        if (existing is not null && IndexMatches(existing, index, superseded))
+        if (existing is not null && IndexMatches(existing, index, dialect.IndexKeyColumns(route, index), superseded))
             await ExecuteAsync(connection, transaction, dialect.DropIndexSql(table, index.Name.Identifier), ct);
         await CreateIndexAsync(connection, transaction, route, table, index, ct);
     }
@@ -512,10 +512,11 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     private static bool IndexMatches(
         RelationalPhysicalIndexMetadata actual,
         ExecutablePhysicalIndexRoute expected,
+        IReadOnlyList<RelationalPhysicalIndexKeyColumn> expectedColumns,
         string? expectedFilter) =>
-        IndexShapeMatches(actual, expected, expectedFilter) &&
-        actual.Columns.Zip(expected.Columns).All(pair =>
-            pair.First.Name == pair.Second.Column.Identifier &&
+        IndexShapeMatches(actual, expected, expectedColumns, expectedFilter) &&
+        actual.Columns.Zip(expectedColumns).All(pair =>
+            pair.First.Name == pair.Second.Identifier &&
             pair.First.Direction == pair.Second.Direction);
 
     /// <summary>
@@ -525,9 +526,10 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     private static bool IndexShapeMatches(
         RelationalPhysicalIndexMetadata actual,
         ExecutablePhysicalIndexRoute expected,
+        IReadOnlyList<RelationalPhysicalIndexKeyColumn> expectedColumns,
         string? expectedFilter) =>
         actual.IsUnique == expected.IsUnique &&
-        actual.Columns.Count == expected.Columns.Count &&
+        actual.Columns.Count == expectedColumns.Count &&
         string.Equals(
             NormalizeIndexFilter(actual.Filter),
             NormalizeIndexFilter(expectedFilter),
@@ -986,13 +988,34 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         var expectedFilter = dialect.IndexFilter(
             expected,
             PhysicalIndexNullExclusion.Columns(route, expected));
-        if (!IndexShapeMatches(actual, expected, expectedFilter))
+        var expectedColumns = dialect.IndexKeyColumns(route, expected);
+        if (!IndexShapeMatches(actual, expected, expectedColumns, expectedFilter))
             throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' has incompatible uniqueness, filter, or column count.");
-        for (var index = 0; index < expected.Columns.Count; index++)
+        for (var index = 0; index < expectedColumns.Count; index++)
         {
-            if (actual.Columns[index].Name != expected.Columns[index].Column.Identifier ||
-                actual.Columns[index].Direction != expected.Columns[index].Direction)
+            if (actual.Columns[index].Name != expectedColumns[index].Identifier ||
+                actual.Columns[index].Direction != expectedColumns[index].Direction)
                 throw new InvalidOperationException($"Physical index '{expected.Name.Identifier}' column {index} does not match the compiled route.");
+        }
+        var providerOwned = expectedColumns
+            .Where(column => column.ProviderOwnedColumn is not null)
+            .Select(column => column.ProviderOwnedColumn!)
+            .ToArray();
+        if (providerOwned.Length != 0)
+        {
+            var tableColumns = await dialect.ReadColumnsAsync(connection, transaction, table, ct);
+            foreach (var column in providerOwned)
+            {
+                EnsureColumnCompatible(table, new ExpectedColumn(
+                    column.Name,
+                    column.Type,
+                    column.IsNullable,
+                    column.DefaultValue,
+                    column.Collation,
+                    column.IsComputed,
+                    column.IsPersisted,
+                    column.ComputedDefinition), tableColumns.GetValueOrDefault(column.Name));
+            }
         }
     }
 
@@ -1513,6 +1536,16 @@ public sealed record RelationalPhysicalColumnMetadata(
 
 public sealed record RelationalPhysicalIndexColumnMetadata(string Name, PhysicalSortDirection Direction);
 
+/// <summary>
+/// One key column of a physical index as the provider emits it. Route-declared columns carry no
+/// backing definition; a provider-owned entry carries the column the provider must add so the key
+/// can exist (e.g. a persisted hash restoring byte-exact uniqueness).
+/// </summary>
+public sealed record RelationalPhysicalIndexKeyColumn(
+    string Identifier,
+    PhysicalSortDirection Direction,
+    RelationalProviderOwnedPhysicalColumn? ProviderOwnedColumn = null);
+
 public sealed record RelationalPhysicalIndexMetadata(
     bool IsUnique,
     IReadOnlyList<RelationalPhysicalIndexColumnMetadata> Columns,
@@ -1655,7 +1688,26 @@ public abstract class RelationalServerPhysicalSchemaDialect
         excludedColumns.Count > 0
             ? $"({string.Join(" AND ", excludedColumns.Select(column => $"{QuoteIdentifier(column)} IS NOT NULL"))})"
             : null;
-    public abstract string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns);
+    /// <summary>
+    /// The key columns this provider emits for <paramref name="index"/>. The default is the compiled
+    /// route's columns verbatim; a provider whose native string equality cannot enforce the portable
+    /// exact-match contract may append provider-owned key columns carrying their backing definitions.
+    /// Creation and validation both consume this, so the emitted and expected shapes cannot diverge.
+    /// </summary>
+    public virtual IReadOnlyList<RelationalPhysicalIndexKeyColumn> IndexKeyColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        return index.Columns
+            .Select(column => new RelationalPhysicalIndexKeyColumn(column.Column.Identifier, column.Direction))
+            .ToArray();
+    }
+    public abstract string CreateIndexSql(
+        string table,
+        ExecutablePhysicalIndexRoute index,
+        IReadOnlyList<RelationalPhysicalIndexKeyColumn> keyColumns,
+        IReadOnlyList<string> excludedColumns);
     /// <summary>
     /// Drops an index so a widened definition can replace it. Only ever issued for an index this executor
     /// has just proved it emitted itself.

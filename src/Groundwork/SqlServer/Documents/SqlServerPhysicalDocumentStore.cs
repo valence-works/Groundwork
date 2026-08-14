@@ -201,6 +201,23 @@ internal sealed class SqlServerPhysicalDocumentDialect : RelationalPhysicalDocum
         _ => value
     };
 
+    /// <summary>
+    /// SQL Server's ANSI-padded NVARCHAR equality treats strings differing only by trailing spaces as
+    /// equal, so string comparisons keep the native form for the index seek and add a byte-exact
+    /// varbinary residual to restore the portable exact-match contract.
+    /// </summary>
+    public override string ScalarEquality(string fieldExpression, string parameterExpression, IndexValueKind valueKind) =>
+        valueKind is IndexValueKind.Keyword or IndexValueKind.String
+            ? $"({fieldExpression} = {parameterExpression} AND " +
+              $"CONVERT(varbinary(max), {fieldExpression}) = CONVERT(varbinary(max), {parameterExpression}))"
+            : base.ScalarEquality(fieldExpression, parameterExpression, valueKind);
+
+    public override string ScalarInequality(string fieldExpression, string parameterExpression, IndexValueKind valueKind) =>
+        valueKind is IndexValueKind.Keyword or IndexValueKind.String
+            ? $"({fieldExpression} <> {parameterExpression} OR " +
+              $"CONVERT(varbinary(max), {fieldExpression}) <> CONVERT(varbinary(max), {parameterExpression}))"
+            : base.ScalarInequality(fieldExpression, parameterExpression, valueKind);
+
     public override string Contains(string fieldExpression, string parameterExpression) =>
         $"LOWER({fieldExpression}) LIKE LOWER({parameterExpression}) ESCAPE '\\'";
 

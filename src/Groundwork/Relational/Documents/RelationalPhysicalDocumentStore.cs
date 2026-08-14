@@ -156,6 +156,22 @@ public abstract class RelationalPhysicalDocumentDialect
         string expression,
         PhysicalQueryFieldSource source,
         Groundwork.Core.Indexing.IndexValueKind valueKind) => expression;
+    /// <summary>
+    /// Renders one scalar equality comparison. The default relies on native equality; a provider
+    /// whose native string equality is not byte-exact (e.g. ANSI-padded) overrides this to restore
+    /// the portable exact-match contract while keeping the native form sargable for index seeks.
+    /// </summary>
+    public virtual string ScalarEquality(
+        string fieldExpression,
+        string parameterExpression,
+        Groundwork.Core.Indexing.IndexValueKind valueKind) =>
+        $"{fieldExpression} = {parameterExpression}";
+    /// <summary>The complement of <see cref="ScalarEquality"/> for non-null operands.</summary>
+    public virtual string ScalarInequality(
+        string fieldExpression,
+        string parameterExpression,
+        Groundwork.Core.Indexing.IndexValueKind valueKind) =>
+        $"{fieldExpression} <> {parameterExpression}";
     public virtual object? ConvertProjectionValue(object? value, ProjectedColumnDefinition definition) => value;
     public virtual object ConvertQueryValue(
         string value,
@@ -905,6 +921,16 @@ public class RelationalPhysicalDocumentStore : IDocumentStore
         PhysicalQueryFieldSource source,
         Groundwork.Core.Indexing.IndexValueKind valueKind) =>
         dialect.NormalizeQueryExpression(expression, source, valueKind);
+    internal string ScalarEquality(
+        string fieldExpression,
+        string parameterExpression,
+        Groundwork.Core.Indexing.IndexValueKind valueKind) =>
+        dialect.ScalarEquality(fieldExpression, parameterExpression, valueKind);
+    internal string ScalarInequality(
+        string fieldExpression,
+        string parameterExpression,
+        Groundwork.Core.Indexing.IndexValueKind valueKind) =>
+        dialect.ScalarInequality(fieldExpression, parameterExpression, valueKind);
     internal object ConvertPhysicalQueryValue(
         string value,
         Groundwork.Core.Indexing.IndexValueKind valueKind,

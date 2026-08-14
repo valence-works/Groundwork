@@ -143,10 +143,31 @@ internal class SqlServerPhysicalSchemaDialect : RelationalServerPhysicalSchemaDi
     public override string FinalizeColumnSql(string table, string column, ProjectedColumnDefinition definition) =>
         $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} {ProjectedType(definition)}{CollationSql(definition)} NOT NULL;";
 
-    public override string CreateIndexSql(string table, ExecutablePhysicalIndexRoute index, IReadOnlyList<string> excludedColumns) =>
-        $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)} " +
-        $"({string.Join(", ", index.Columns.Select(column => $"{QuoteIdentifier(column.Column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"))})" +
-        (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
+    public override IReadOnlyList<RelationalPhysicalIndexKeyColumn> IndexKeyColumns(
+        ExecutableStorageRoute route,
+        ExecutablePhysicalIndexRoute index) =>
+        identity.IndexKeyColumns(route, index, QuoteIdentifier);
+
+    public override string CreateIndexSql(
+        string table,
+        ExecutablePhysicalIndexRoute index,
+        IReadOnlyList<RelationalPhysicalIndexKeyColumn> keyColumns,
+        IReadOnlyList<string> excludedColumns)
+    {
+        var providerColumns = string.Concat(keyColumns
+            .Where(column => column.ProviderOwnedColumn is not null)
+            .Select(column =>
+                $"IF COL_LENGTH({TableLiteral(table)}, {NameLiteral(column.Identifier)}) IS NULL " +
+                $"ALTER TABLE {QuoteIdentifier(table)} ADD {column.ProviderOwnedColumn!.Definition}; "));
+        return providerColumns +
+               $"CREATE {(index.IsUnique ? "UNIQUE " : string.Empty)}INDEX {QuoteIdentifier(index.Name.Identifier)} ON {QuoteIdentifier(table)} " +
+               $"({string.Join(", ", keyColumns.Select(column => $"{QuoteIdentifier(column.Identifier)} {(column.Direction == PhysicalSortDirection.Descending ? "DESC" : "ASC")}"))})" +
+               (IndexFilter(index, excludedColumns) is { } filter ? $" WHERE {filter}" : string.Empty) + ";";
+    }
+
+    private string TableLiteral(string table) => NameLiteral($"dbo.{QuoteIdentifier(table)}");
+
+    private static string NameLiteral(string value) => $"N'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
     public override string DropIndexSql(string table, string index) =>
         $"DROP INDEX {QuoteIdentifier(index)} ON {QuoteIdentifier(table)};";

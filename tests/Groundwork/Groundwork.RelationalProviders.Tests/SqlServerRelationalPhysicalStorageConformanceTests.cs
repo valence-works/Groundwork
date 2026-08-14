@@ -39,13 +39,18 @@ public sealed class SqlServerRelationalPhysicalStorageConformanceTests(
 {
     private readonly MsSqlContainer container = fixture.Container;
 
-    // The shared storage-scope conformance (StorageScopeDocumentStoreConformance) is deliberately
-    // not run here: its exact-spelling arm saves two documents whose unique "by-key" values differ
-    // only by a trailing space, and SQL Server's ANSI-padded NVARCHAR equality treats those as
-    // duplicates in the unique index, so the second save reports ConcurrencyConflict. Whether the
-    // SQL Server provider should normalize keyword index values to restore exactness is a
-    // provider-semantics decision; until then the contract is unsatisfiable on this provider.
-    // Sqlite, PostgreSQL, and MongoDB run the conformance in their suites.
+    [Fact]
+    public Task SatisfiesSharedStorageScopeBlackBoxContract() =>
+        RelationalStorageScopeConformance.VerifyAsync(
+            SqlServerGroundworkCapabilities.Provider,
+            SqlServerGroundworkCapabilities.PhysicalNames,
+            target => PhysicalSchemaApplication.ApplyAsync(
+                target,
+                new SqlServerPhysicalSchemaExecutor(container.GetConnectionString())),
+            (manifest, target, access) => new SqlServerPhysicalDocumentStore(
+                container.GetConnectionString(), manifest, target.Routes, access),
+            (store, manifest, route, provider) => SqlServerPhysicalQueryRuntime.Create(
+                (SqlServerPhysicalDocumentStore)store, manifest, route, provider));
 
     [Fact]
     public async Task IndependentOperationsUseTheProviderPoolWithoutGlobalSerialization()

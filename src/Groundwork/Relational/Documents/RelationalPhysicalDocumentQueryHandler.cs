@@ -1145,17 +1145,23 @@ public class RelationalPhysicalDocumentQueryHandler : IPhysicalDocumentQueryHand
             parameterValue = store.ConvertDocumentIdentityQueryValue(queryField, (string)parameterValue);
         parameters.Add((name, parameterValue));
         var parameter = store.NormalizeQueryExpression(store.Parameter(name), queryField.Source, queryField.ValueKind);
+        // Document identity columns keep native equality: their retained physical evidence is already
+        // byte-exact on every provider, and their predicates elsewhere are rendered by the identity seam.
         return operation switch
         {
-            QueryComparisonOperator.Equal => $"{field} = {parameter}",
+            QueryComparisonOperator.Equal => IsDocumentIdentityField(queryField)
+                ? $"{field} = {parameter}"
+                : store.ScalarEquality(field, parameter, queryField.ValueKind),
             // NotEqual is the complement of Equal, so a row with no value matches a non-null one — the
             // same total-complement reading NotContains already carries. Bare <> is unknown for NULL and
             // would drop exactly those rows, which is how a row could fall through both halves of a
             // two-branch query. Where the field cannot be null the two forms agree, so the sargable one
             // is kept: document identity columns and non-nullable projected columns.
-            QueryComparisonOperator.NotEqual => isAlwaysPresent || IsDocumentIdentityField(queryField)
+            QueryComparisonOperator.NotEqual => IsDocumentIdentityField(queryField)
                 ? $"{field} <> {parameter}"
-                : $"({field} IS NULL OR {field} <> {parameter})",
+                : isAlwaysPresent
+                    ? store.ScalarInequality(field, parameter, queryField.ValueKind)
+                    : $"({field} IS NULL OR {store.ScalarInequality(field, parameter, queryField.ValueKind)})",
             QueryComparisonOperator.GreaterThan => $"{field} > {parameter}",
             QueryComparisonOperator.GreaterThanOrEqual => $"{field} >= {parameter}",
             QueryComparisonOperator.LessThan => $"{field} < {parameter}",
