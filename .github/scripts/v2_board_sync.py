@@ -54,10 +54,12 @@ def graphql(query, **variables):
         },
     )
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             result = json.load(response)
     except urllib.error.HTTPError as error:
         sys.exit(f"GraphQL HTTP {error.code}: {error.read().decode()[:500]}")
+    except urllib.error.URLError as error:
+        sys.exit(f"GraphQL request failed: {error.reason}")
     if "errors" in result:
         sys.exit(f"GraphQL errors: {json.dumps(result['errors'])[:800]}")
     return result["data"]
@@ -77,16 +79,28 @@ def issue_references(text):
 
 
 def closing_issue_references(text):
-    """Return only issue references on GitHub closing-keyword lines."""
-    numbers = set()
+    """Return explicit same-repository closing-keyword references in text.
+
+    GitHub does not populate ``closingIssuesReferences`` for pull requests whose base is
+    not the default branch. Slice PRs target the shared v2 branch, so this is the narrow
+    fallback for those otherwise-unreported links.
+    """
+    references = set()
     closing = re.compile(
-        r"^\s*(?:[-*]\s*)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b",
+        r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+        r"(?:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+))?"
+        r"#(?P<number>\d+)",
         re.IGNORECASE,
     )
-    for line in text.splitlines():
-        if closing.match(line):
-            numbers.update(issue_references(line))
-    return numbers
+    for match in closing.finditer(text):
+        owner = match.group("owner")
+        repo = match.group("repo")
+        if owner and repo and f"{owner}/{repo}".casefold() != (
+            f"{REPO_OWNER}/{REPO_NAME}".casefold()
+        ):
+            continue
+        references.add(int(match.group("number")))
+    return references
 
 
 # --------------------------------------------------------------------- read state
@@ -135,18 +149,41 @@ status_option = {o["name"]: o["id"] for o in status_field["options"]}
 # Open pull requests with closing-keyword links, so directly implemented items show as In review
 # while parent and dependency references do not move unrelated cards.
 PR_QUERY = """
-query($owner:String!, $repo:String!) {
+query($owner:String!, $repo:String!, $cursor:String) {
   repository(owner:$owner, name:$repo) {
-    pullRequests(states:OPEN, first:100) { nodes { number title body } }
+    pullRequests(states:OPEN, first:100, after:$cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        body
+        closingIssuesReferences(first:100) {
+          nodes { number repository { nameWithOwner } }
+        }
+      }
+    }
   }
 }
 """
-prs = graphql(PR_QUERY, owner=REPO_OWNER, repo=REPO_NAME)["repository"]["pullRequests"]["nodes"]
 issues_with_open_pr = set()
-for pr in prs:
-    issues_with_open_pr.update(
-        closing_issue_references(f"{pr['title']}\n{pr['body'] or ''}")
-    )
+cursor = None
+while True:
+    connection = graphql(
+        PR_QUERY, owner=REPO_OWNER, repo=REPO_NAME, cursor=cursor
+    )["repository"]["pullRequests"]
+    for pr in connection["nodes"]:
+        for issue in pr["closingIssuesReferences"]["nodes"]:
+            if issue["repository"]["nameWithOwner"].casefold() == (
+                f"{REPO_OWNER}/{REPO_NAME}".casefold()
+            ):
+                issues_with_open_pr.add(issue["number"])
+        issues_with_open_pr.update(
+            closing_issue_references(f"{pr['title']}\n{pr['body'] or ''}")
+        )
+    page = connection["pageInfo"]
+    if not page["hasNextPage"]:
+        break
+    cursor = page["endCursor"]
 
 # --------------------------------------------------------------- dependency graph
 
