@@ -118,11 +118,12 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     public async ValueTask<PhysicalSchemaHistoryState> ReadHistoryAsync(
         PhysicalSchemaTargetIdentity target,
         IPhysicalSchemaApplicationLock applicationLock,
-        CancellationToken cancellationToken) =>
-        await RequireApplicationLock(applicationLock, target).ExecuteAsync(async (connection, ct) =>
+        CancellationToken cancellationToken)
+    {
+        var lease = RequireApplicationLock(applicationLock, target);
+        return await lease.ExecuteAsync(async (connection, ct) =>
         {
             await using var transaction = await connection.BeginTransactionAsync(ct);
-            var lease = RequireApplicationLock(applicationLock, target);
             await dialect.AssertFenceAsync(connection, transaction, target, lease.Owner, lease.Fence, ct);
             await using var command = Command(connection, transaction, """
                 SELECT applied_state_json
@@ -137,6 +138,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 ? PhysicalSchemaHistoryState.Empty
                 : PhysicalSchemaHistoryState.FromApplied(PhysicalSchemaAppliedStateSerializer.Deserialize(json));
         }, cancellationToken);
+    }
 
     public async ValueTask<PhysicalSchemaInspectionResult> InspectHistoryAsync(
         PhysicalSchemaTarget target,
@@ -193,11 +195,12 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         PhysicalSchemaTargetIdentity target,
         PhysicalSchemaOperation operation,
         IPhysicalSchemaApplicationLock applicationLock,
-        CancellationToken cancellationToken) =>
-        await RequireApplicationLock(applicationLock, target).ExecuteAsync(async (connection, ct) =>
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var lease = RequireApplicationLock(applicationLock, target);
+        return await lease.ExecuteAsync(async (connection, ct) =>
         {
-            ArgumentNullException.ThrowIfNull(operation);
-            var lease = RequireApplicationLock(applicationLock, target);
             await using var transaction = await connection.BeginTransactionAsync(ct);
             var prior = await ReadOperationAsync(connection, transaction, target, operation.Identity, ct);
             if (prior is not null)
@@ -238,6 +241,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 throw new PhysicalSchemaFingerprintConflictException(operation.Identity, operation.Fingerprint, durable.Fingerprint);
             return new PhysicalSchemaOperationAcknowledgement(operation.Identity, durable.Fingerprint, durable.AppliedAt);
         }, cancellationToken);
+    }
 
     public async ValueTask RecordAppliedStateAsync(
         PhysicalSchemaAppliedState state,
@@ -246,20 +250,17 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(state);
-        await RequireApplicationLock(
-            applicationLock,
-            new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name)).ExecuteAsync(async (connection, ct) =>
+        var target = new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name);
+        var lease = RequireApplicationLock(applicationLock, target);
+        await lease.ExecuteAsync(async (connection, ct) =>
         {
-            var lease = RequireApplicationLock(
-                applicationLock,
-                new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name));
             await using var transaction = await connection.BeginTransactionAsync(ct);
             if (beforeAppliedStateFence is not null)
                 await beforeAppliedStateFence(state, ct);
             await dialect.AssertFenceAsync(
                 connection,
                 transaction,
-                new PhysicalSchemaTargetIdentity(state.ManifestIdentity, state.Provider.Name),
+                target,
                 lease.Owner,
                 lease.Fence,
                 ct);
@@ -1148,6 +1149,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
     {
         private static readonly TimeSpan OwnershipVerificationTimeout = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+        private const int MaxConsecutiveHeartbeatVerificationFailures = 3;
         private readonly DbConnection connection;
         private readonly string resource;
         private readonly CancellationTokenSource heartbeatStop = new();
@@ -1155,6 +1157,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         private readonly SemaphoreSlim sessionGate = new(1, 1);
         private readonly CancellationTokenSource ownershipLost = new();
         private readonly Task heartbeat;
+        private Exception? heartbeatFailure;
         private int disposed;
 
         public ApplicationLock(
@@ -1173,6 +1176,8 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             Owner = owner;
             Fence = fence;
             ServerSessionId = serverSessionId;
+            // Captured once so the token stays readable after disposal disposes the source.
+            OwnershipLost = ownershipLost.Token;
             connection.StateChange += OnConnectionStateChanged;
             heartbeat = HeartbeatAsync();
         }
@@ -1181,7 +1186,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
         public string Owner { get; }
         public long Fence { get; }
         public long ServerSessionId { get; }
-        public CancellationToken OwnershipLost => ownershipLost.Token;
+        public CancellationToken OwnershipLost { get; }
 
         public async Task<T> ExecuteAsync<T>(
             Func<DbConnection, CancellationToken, Task<T>> action,
@@ -1191,8 +1196,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             await sessionGate.WaitAsync(cancellationToken);
             try
             {
-                if (Volatile.Read(ref disposed) != 0 || ownershipLost.IsCancellationRequested ||
-                    connection.State != ConnectionState.Open)
+                if (!SessionUsable)
                 {
                     MarkOwnershipLost();
                     throw OwnershipLostException();
@@ -1202,12 +1206,11 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     return await action(connection, cancellationToken);
                 }
-                catch (Exception exception) when (exception is DbException or InvalidOperationException)
+                catch (Exception exception) when (ClassifiesAsPotentialLockLoss(exception, cancellationToken))
                 {
                     var verificationFailure = default(Exception);
                     var isOwned = false;
-                    if (Volatile.Read(ref disposed) == 0 && !ownershipLost.IsCancellationRequested &&
-                        connection.State == ConnectionState.Open)
+                    if (SessionUsable)
                     {
                         using var verificationTimeout = new CancellationTokenSource(OwnershipVerificationTimeout);
                         try
@@ -1217,8 +1220,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                                 resource,
                                 verificationTimeout.Token);
                         }
-                        catch (Exception ownershipException) when (
-                            ownershipException is DbException or InvalidOperationException or OperationCanceledException)
+                        catch (Exception ownershipException) when (ownershipException is not OutOfMemoryException)
                         {
                             verificationFailure = ownershipException;
                         }
@@ -1236,32 +1238,71 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             }
         }
 
+        /// <summary>
+        /// Best-effort teardown. Any step that cannot prove a clean release signals
+        /// <see cref="OwnershipLost"/>. The release failure, the session-close failure and the
+        /// heartbeat's last probe failure are all retained, so a report can say what went wrong
+        /// rather than only that something did.
+        /// <para>
+        /// Disposal throws an <see cref="AggregateException"/> carrying those failures only when the
+        /// lock was never released <em>and</em> closing its session also failed. Failing to release
+        /// does not leak on its own: the lock is session-scoped, so closing the connection ends the
+        /// session and the server drops the lock with it. Only when that fallback also fails can the
+        /// lock outlive this object and block the next acquirer, and a killed session -- whose
+        /// release fails precisely because the session is already gone -- must dispose quietly.
+        /// <em>Never released</em> covers the release throwing and the release being skipped because
+        /// the connection was no longer open; neither proves the lock was let go.
+        /// </para>
+        /// <para>
+        /// Throwing from disposal masks an exception already propagating out of an
+        /// <c>await using</c> block. That is accepted deliberately: the alternative used by
+        /// <c>AcquireApplicationLockAsync</c>, attaching via <c>RelationalCleanupFailures</c>, needs
+        /// the in-flight exception, which disposal cannot see, and a silently leaked lock blocks the
+        /// next acquirer with no diagnostic at all. Requiring both failures is what bounds the
+        /// masking to genuine leaks.
+        /// </para>
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0)
                 return;
             connection.StateChange -= OnConnectionStateChanged;
             await heartbeatStop.CancelAsync();
+            var cleanupFailures = new List<Exception>();
+            var lockReleased = false;
+            var sessionCloseFailed = false;
             try
             {
                 try
                 {
                     await heartbeat;
                 }
-                catch
+                catch (Exception failure)
                 {
-                    MarkOwnershipLost();
+                    // Defensive: HeartbeatAsync retains its own failures rather than faulting.
+                    SignalOwnershipLost();
+                    heartbeatFailure ??= failure;
                 }
 
                 await sessionGate.WaitAsync();
                 try
                 {
                     if (connection.State == ConnectionState.Open)
+                    {
                         await dialect.ReleaseApplicationLockAsync(connection, resource, CancellationToken.None);
+                        lockReleased = true;
+                    }
+                    else
+                    {
+                        // Skipping the release is not the same as having released: it leaves the
+                        // lock's fate resting entirely on the session close below.
+                        SignalOwnershipLost();
+                    }
                 }
-                catch
+                catch (Exception failure)
                 {
-                    MarkOwnershipLost();
+                    SignalOwnershipLost();
+                    cleanupFailures.Add(failure);
                 }
                 finally
                 {
@@ -1274,13 +1315,26 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                 {
                     await connection.DisposeAsync();
                 }
-                catch
+                catch (Exception failure)
                 {
-                    MarkOwnershipLost();
+                    SignalOwnershipLost();
+                    cleanupFailures.Add(failure);
+                    sessionCloseFailed = true;
                 }
                 heartbeatStop.Dispose();
                 sessionGate.Dispose();
                 ownershipLost.Dispose();
+            }
+            if (!lockReleased && sessionCloseFailed)
+            {
+                // The heartbeat's last probe failure explains why the session went bad, so it rides
+                // along as context. It never triggers the throw on its own.
+                if (heartbeatFailure is { } heartbeatContext)
+                    cleanupFailures.Add(heartbeatContext);
+                throw new AggregateException(
+                    $"Physical-schema application lock for target '{Target}' could not be released and its session could not be closed. " +
+                    "The lock may still be held, blocking the next acquirer until the server ends that session.",
+                    cleanupFailures);
             }
         }
 
@@ -1292,6 +1346,7 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
 
         private async Task HeartbeatAsync()
         {
+            var consecutiveVerificationFailures = 0;
             try
             {
                 while (!heartbeatStop.IsCancellationRequested)
@@ -1300,11 +1355,40 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
                     await sessionGate.WaitAsync(heartbeatStop.Token);
                     try
                     {
-                        if (!await dialect.VerifyApplicationLockAsync(connection, resource, heartbeatStop.Token))
+                        bool isOwned;
+                        try
                         {
-                            MarkOwnershipLost();
+                            isOwned = await dialect.VerifyApplicationLockAsync(connection, resource, heartbeatStop.Token);
+                        }
+                        catch (Exception exception) when (
+                            exception is DbException or InvalidOperationException or OperationCanceledException &&
+                            !heartbeatStop.IsCancellationRequested)
+                        {
+                            // A failed probe is inconclusive: the server-side lock may still be held. Only a
+                            // bounded run of consecutive failures forfeits ownership; a definitive "not owned"
+                            // verification below loses it immediately.
+                            // Retained so a forfeited lease can name the probe failure behind it. The
+                            // outer catch retains its own, and wins: it ends the heartbeat outright.
+                            heartbeatFailure = exception;
+                            if (++consecutiveVerificationFailures >= MaxConsecutiveHeartbeatVerificationFailures)
+                            {
+                                SignalOwnershipLost();
+                                return;
+                            }
+                            continue;
+                        }
+
+                        if (!isOwned)
+                        {
+                            // A definitive not-owned answer is not an error, so nothing explains this
+                            // forfeiture. Clearing first keeps an earlier, already-recovered probe
+                            // failure from being reported as its cause.
+                            heartbeatFailure = null;
+                            SignalOwnershipLost();
                             return;
                         }
+                        consecutiveVerificationFailures = 0;
+                        heartbeatFailure = null;
                     }
                     finally
                     {
@@ -1315,16 +1399,65 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             catch (OperationCanceledException) when (heartbeatStop.IsCancellationRequested)
             {
             }
-            catch
+            catch (Exception failure)
             {
-                MarkOwnershipLost();
+                // Overwrites rather than defers: this exception is the one that ended the heartbeat,
+                // so it explains the forfeiture better than any probe failure already recovered from.
+                heartbeatFailure = failure;
+                SignalOwnershipLost();
             }
         }
 
+        private bool SessionUsable =>
+            Volatile.Read(ref disposed) == 0 && !ownershipLost.IsCancellationRequested &&
+            connection.State == ConnectionState.Open;
+
+        // A session killed mid-operation surfaces as whatever the driver's protocol state permits
+        // (SqlClient can throw NullReferenceException), so lock loss is classified by verifying
+        // ownership rather than by exception type. Exempt are out-of-memory, which must never be
+        // swallowed, and cancellation requested through the caller's token. That token may be
+        // linked to OwnershipLost (PhysicalSchemaApplication links them), and lease loss observed
+        // as cancellation surfaces as OperationCanceledException by contract — the same way the
+        // application layer reports it when it checks the token between operations.
+        private static bool ClassifiesAsPotentialLockLoss(Exception exception, CancellationToken cancellationToken) =>
+            exception is not OutOfMemoryException &&
+            (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested);
+
         private void MarkOwnershipLost()
         {
-            if (Volatile.Read(ref disposed) == 0 && !ownershipLost.IsCancellationRequested)
+            if (Volatile.Read(ref disposed) == 0)
+                SignalOwnershipLost();
+        }
+
+        /// <summary>
+        /// Cancels ownership without the disposed guard, for callers that provably run before
+        /// <see cref="ownershipLost"/> is disposed: the winning disposer's own body and the
+        /// heartbeat it awaits first. <see cref="MarkOwnershipLost"/> keeps the guard for everyone
+        /// else, but that check cannot be atomic with the cancel, so a caller racing disposal can
+        /// still reach a disposed source. That is absorbed here rather than thrown, because
+        /// <see cref="OnConnectionStateChanged"/> runs on a connection event thread where nothing
+        /// would catch it.
+        /// </summary>
+        private void SignalOwnershipLost()
+        {
+            if (ownershipLost.IsCancellationRequested)
+                return;
+            try
+            {
                 ownershipLost.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Disposal won the race and already tore this lock down; ownership is moot.
+            }
+            catch (AggregateException)
+            {
+                // A subscriber's cancellation callback threw. OwnershipLost is public, so those
+                // callbacks are arbitrary consumer code, and the token is already cancelled by the
+                // time they run -- the signal landed. Letting the fault escape would abort the
+                // caller's teardown midway, skipping the remaining Dispose calls, or surface on a
+                // connection event thread with nothing to catch it.
+            }
         }
 
         private InvalidOperationException OwnershipLostException(
@@ -1334,8 +1467,9 @@ public class RelationalServerPhysicalSchemaExecutor : IPhysicalSchemaExecutor, I
             Exception? inner = executionFailure;
             if (verificationFailure is not null)
                 inner = new AggregateException(executionFailure!, verificationFailure);
+            var state = verificationFailure is null ? "was lost" : "was lost or could not be verified";
             return new InvalidOperationException(
-                $"The relational physical-schema lock session for target '{Target}' was lost during schema execution.",
+                $"The relational physical-schema lock session for target '{Target}' {state} during schema execution.",
                 inner);
         }
     }

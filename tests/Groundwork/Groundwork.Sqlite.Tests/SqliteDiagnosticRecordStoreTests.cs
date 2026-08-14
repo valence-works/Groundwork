@@ -1165,6 +1165,15 @@ internal sealed class SqliteDiagnosticRecordStoreFixture : IRelationalDiagnostic
 
     public string FieldsPrimaryAccessPath => "sqlite_autoindex_groundwork_diagnostic_fields_1";
 
+    public int PendingInterceptorCount
+    {
+        get
+        {
+            lock (interceptors)
+                return interceptors.Values.Sum(queue => queue.Count);
+        }
+    }
+
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {
         lock (interceptors)

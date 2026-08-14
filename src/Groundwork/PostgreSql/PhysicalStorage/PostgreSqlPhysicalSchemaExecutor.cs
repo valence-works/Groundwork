@@ -38,7 +38,7 @@ public sealed class PostgreSqlPhysicalSchemaExecutor : RelationalServerPhysicalS
         new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
 }
 
-internal sealed class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysicalSchemaDialect
+internal class PostgreSqlPhysicalSchemaDialect : RelationalServerPhysicalSchemaDialect
 {
     public override string ProviderDisplayName => "PostgreSQL";
     public override string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";

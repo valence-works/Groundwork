@@ -10,6 +10,7 @@ using Groundwork.PostgreSql;
 using Groundwork.PostgreSql.Documents;
 using Groundwork.PostgreSql.PhysicalStorage;
 using Groundwork.Relational.Documents;
+using Groundwork.Relational.PhysicalStorage;
 using Groundwork.TestInfrastructure;
 using Npgsql;
 using System.Data.Common;
@@ -65,17 +66,28 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             model.Target,
             new PostgreSqlPhysicalSchemaExecutor(container.GetConnectionString()));
         var table = model.Target.Routes.Single().PrimaryStorage.Name.Identifier;
+        const int maxPoolSize = 2;
         var pooled = new NpgsqlConnectionStringBuilder(container.GetConnectionString())
         {
-            MaxPoolSize = 2
+            MaxPoolSize = maxPoolSize
         }.ConnectionString;
+        var blockerConnectionString = new NpgsqlConnectionStringBuilder(pooled) { Pooling = false }.ConnectionString;
+        var poolSaturated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedSessionRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var opened = 0;
-        var twoConnectionsOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var created = 0;
         var sessions = Groundwork.Provider.Relational.RelationalSessionFactory.Concurrent(() =>
         {
-            if (Interlocked.Increment(ref opened) >= 2)
-                twoConnectionsOpened.TrySetResult();
-            return new NpgsqlConnection(pooled);
+            if (Interlocked.Increment(ref created) == maxPoolSize + 1)
+                queuedSessionRequested.TrySetResult();
+            var connection = new NpgsqlConnection(pooled);
+            connection.StateChange += (_, args) =>
+            {
+                if (args.CurrentState == System.Data.ConnectionState.Open &&
+                    Interlocked.Increment(ref opened) == maxPoolSize)
+                    poolSaturated.TrySetResult();
+            };
+            return connection;
         });
         var store = new RelationalPhysicalDocumentStore(
             sessions,
@@ -85,11 +97,14 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             DocumentStoreAccess.Global);
 
         var blocker = await RelationalSessionPoolPressure.BlockPostgreSqlDocumentsAsync(
-            container.GetConnectionString(),
+            blockerConnectionString,
             table);
-        await RelationalSessionPoolPressure.AssertTwoOperationsRunWhileThirdWaitsForProviderPoolAsync(
+        await RelationalSessionPoolPressure.AssertOperationsRunWhileTheNextWaitsForTheProviderPoolAsync(
             store,
-            twoConnectionsOpened.Task,
+            poolSaturated.Task,
+            queuedSessionRequested.Task,
+            () => Volatile.Read(ref opened),
+            maxPoolSize,
             blocker);
     }
 
@@ -683,6 +698,83 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
             TerminateSessionAsync);
 
     [Fact]
+    public Task Failed_release_alone_does_not_throw_because_closing_the_backend_frees_the_lock() =>
+        RelationalPhysicalServerAssertions.FailedReleaseAloneDisposesQuietlyAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Failed_release_and_failed_backend_close_report_the_possible_leak() =>
+        RelationalPhysicalServerAssertions.FailedReleaseAndSessionCloseReportThePossibleLeakAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Skipped_release_and_failed_backend_close_report_the_possible_leak() =>
+        RelationalPhysicalServerAssertions.SkippedReleaseAndFailedSessionCloseReportThePossibleLeakAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Failed_backend_close_alone_does_not_throw_because_the_lock_was_released() =>
+        RelationalPhysicalServerAssertions.FailedSessionCloseAloneDisposesQuietlyAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Disposal_report_carries_the_heartbeat_probe_failure() =>
+        RelationalPhysicalServerAssertions.DisposalReportCarriesTheHeartbeatProbeFailureAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    [Fact]
+    public Task Throwing_ownership_subscriber_cannot_break_lock_teardown() =>
+        RelationalPhysicalServerAssertions.ThrowingOwnershipSubscriberCannotBreakTeardownAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            LockFailureHarness);
+
+    private RelationalLockFailureHarness LockFailureHarness()
+    {
+        var switches = new RelationalLockFailureSwitches();
+        var dialect = new FailureInjectingPostgreSqlDialect(switches);
+        var connectionString = new NpgsqlConnectionStringBuilder(container.GetConnectionString())
+        {
+            Pooling = false
+        }.ConnectionString;
+        return new RelationalLockFailureHarness(
+            switches,
+            () => new RelationalServerPhysicalSchemaExecutor(
+                () => new FaultInjectingConnection(new NpgsqlConnection(connectionString), switches),
+                dialect));
+    }
+
+    private sealed class FailureInjectingPostgreSqlDialect(RelationalLockFailureSwitches switches)
+        : PostgreSqlPhysicalSchemaDialect
+    {
+        public override Task ReleaseApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken) =>
+            switches.FailReleases
+                ? throw new InvalidOperationException(RelationalLockFailureSwitches.ReleaseFailureMessage)
+                : base.ReleaseApplicationLockAsync(connection, resource, cancellationToken);
+
+        public override Task<bool> VerifyApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken) =>
+            switches.FailVerification
+                ? throw new InvalidOperationException(RelationalLockFailureSwitches.VerificationFailureMessage)
+                : base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
+    }
+
+    [Fact]
     public async Task Exhausted_fence_fails_without_poisoning_the_session_lock()
     {
         var model = RelationalPhysicalStorageTestModels.Create(
@@ -752,6 +844,40 @@ public sealed partial class PostgreSqlRelationalPhysicalStorageConformanceTests(
                 container.GetConnectionString(),
                 null,
                 beforeState));
+
+    [Fact]
+    public Task Transient_heartbeat_verification_failures_preserve_owned_lock() =>
+        RelationalPhysicalServerAssertions.TransientHeartbeatVerificationFailuresPreserveOwnershipAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            CreateHeartbeatInterceptingExecutor);
+
+    [Fact]
+    public Task Persistent_heartbeat_verification_failure_marks_lock_ownership_lost() =>
+        RelationalPhysicalServerAssertions.PersistentHeartbeatVerificationFailureMarksOwnershipLostAsync(
+            PostgreSqlGroundworkCapabilities.Provider,
+            PostgreSqlGroundworkCapabilities.PhysicalNames,
+            CreateHeartbeatInterceptingExecutor);
+
+    private IPhysicalSchemaExecutor CreateHeartbeatInterceptingExecutor(
+        Func<CancellationToken, Task> beforeVerification) =>
+        new RelationalServerPhysicalSchemaExecutor(
+            () => new NpgsqlConnection(
+                new NpgsqlConnectionStringBuilder(container.GetConnectionString()) { Pooling = false }.ConnectionString),
+            new VerificationInterceptingPostgreSqlDialect(beforeVerification));
+
+    private sealed class VerificationInterceptingPostgreSqlDialect(
+        Func<CancellationToken, Task> beforeVerification) : PostgreSqlPhysicalSchemaDialect
+    {
+        public override async Task<bool> VerifyApplicationLockAsync(
+            DbConnection connection,
+            string resource,
+            CancellationToken cancellationToken)
+        {
+            await beforeVerification(cancellationToken);
+            return await base.VerifyApplicationLockAsync(connection, resource, cancellationToken);
+        }
+    }
 
     [Fact]
     public Task Terminated_lock_backend_cannot_commit_backfill_or_operation_evidence() =>

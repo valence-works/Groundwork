@@ -126,6 +126,23 @@ internal static class PhysicalStorageDeclarationValidator
 
             foreach (var residual in query.ResidualPredicateFields)
             {
+                if (residual.Length is not null && !IsStringKind(residual.ValueKind))
+                {
+                    diagnostics.Add(GroundworkDiagnostic.Error(
+                        "GW-PHYSICAL-039",
+                        $"Residual predicate path '{residual.Path}' on bounded query '{query.Identity}' declares a key length on a non-string value kind.",
+                        $"{target}.boundedQueries.{query.Identity}.residualPredicateFields"));
+                    valid = false;
+                }
+                else if (residual.Length is <= 0)
+                {
+                    diagnostics.Add(GroundworkDiagnostic.Error(
+                        "GW-PHYSICAL-039",
+                        $"Residual predicate path '{residual.Path}' on bounded query '{query.Identity}' requires a declared key length of at least 1.",
+                        $"{target}.boundedQueries.{query.Identity}.residualPredicateFields"));
+                    valid = false;
+                }
+
                 if (residual.Path == PhysicalDocumentFieldPaths.StorageScope)
                 {
                     diagnostics.Add(GroundworkDiagnostic.Error(

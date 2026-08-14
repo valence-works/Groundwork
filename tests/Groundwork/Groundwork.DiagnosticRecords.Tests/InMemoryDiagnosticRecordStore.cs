@@ -26,6 +26,15 @@ internal sealed class InMemoryDiagnosticRecordStoreFixture : IDiagnosticRecordSt
                 : null;
     }
 
+    public int PendingInterceptorCount
+    {
+        get
+        {
+            lock (_interceptors)
+                return _interceptors.Values.Sum(queue => queue.Count);
+        }
+    }
+
     public void InterceptNext(DiagnosticExecutionPoint point, Func<CancellationToken, ValueTask> interceptor)
     {
         ArgumentNullException.ThrowIfNull(interceptor);

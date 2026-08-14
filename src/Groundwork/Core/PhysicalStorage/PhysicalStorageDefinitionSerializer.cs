@@ -89,6 +89,8 @@ public static class PhysicalStorageDefinitionSerializer
                     writer.WriteStartObject();
                     writer.WriteString("path", predicate.Path);
                     writer.WriteString("valueKind", predicate.ValueKind.ToString());
+                    if (predicate.Length is not null)
+                        writer.WriteNumber("length", predicate.Length.Value);
                     writer.WriteBoolean("required", predicate.IsRequired);
                     writer.WritePropertyName("operations");
                     writer.WriteStartArray();

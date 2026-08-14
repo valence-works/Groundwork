@@ -16,11 +16,20 @@ public sealed class SqlServerDiagnosticRecordStore : IDiagnosticRecordStore
         string connectionString,
         DiagnosticRecordStreamDefinition definition,
         TimeProvider? timeProvider = null)
+        : this(connectionString, definition, timeProvider, interceptAsync: null)
+    {
+    }
+
+    internal SqlServerDiagnosticRecordStore(
+        string connectionString,
+        DiagnosticRecordStreamDefinition definition,
+        TimeProvider? timeProvider,
+        Func<RelationalDiagnosticRecordExecutionPoint, CancellationToken, ValueTask>? interceptAsync)
         : this(
             RelationalSessionFactory.Concurrent(() => new SqlConnection(connectionString)),
             definition,
             timeProvider,
-            null,
+            interceptAsync,
             (snapshot, cancellationToken) => SqlServerDiagnosticRecordMaterializer.AdmitAsync(
                 connectionString,
                 snapshot,
