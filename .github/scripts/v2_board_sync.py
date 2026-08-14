@@ -30,6 +30,7 @@ import urllib.request
 
 REPO_OWNER = "valence-works"
 REPO_NAME = "Groundwork"
+IMPLEMENTATION_REPOSITORIES = (REPO_NAME, "groundwork-v2")
 PROJECT_NUMBER = 5
 LABEL = "v2"
 GATES = {"G1", "G2", "G3"}
@@ -80,7 +81,7 @@ def issue_references(text):
     return numbers
 
 
-def closing_issue_references(text):
+def closing_issue_references(text, source_repository=REPO_NAME):
     """Return explicit same-repository closing-keyword references in text.
 
     GitHub does not populate ``closingIssuesReferences`` for pull requests whose base is
@@ -97,9 +98,14 @@ def closing_issue_references(text):
     for match in closing.finditer(text):
         owner = match.group("owner")
         repo = match.group("repo")
-        if owner and repo and f"{owner}/{repo}".casefold() != (
-            f"{REPO_OWNER}/{REPO_NAME}".casefold()
-        ):
+        if owner and repo:
+            if f"{owner}/{repo}".casefold() != (
+                f"{REPO_OWNER}/{REPO_NAME}".casefold()
+            ):
+                continue
+        elif source_repository.casefold() != REPO_NAME.casefold():
+            # A bare #123 in the implementation repository refers to an issue in
+            # that repository, not the Groundwork programme tracker.
             continue
         references.add(int(match.group("number")))
     return references
@@ -168,25 +174,31 @@ query($owner:String!, $repo:String!, $cursor:String) {
 }
 """
 issues_with_open_pr = set()
-cursor = None
-while True:
-    connection = graphql(
-        PR_QUERY, owner=REPO_OWNER, repo=REPO_NAME, cursor=cursor
-    )["repository"]["pullRequests"]
-    for pr in connection["nodes"]:
-        for issue in pr["closingIssuesReferences"]["nodes"]:
-            if issue["repository"]["nameWithOwner"].casefold() == (
-                f"{REPO_OWNER}/{REPO_NAME}".casefold()
-            ):
-                issues_with_open_pr.add(issue["number"])
-        if pr["baseRefName"] == SHARED_TARGET_BRANCH:
-            issues_with_open_pr.update(
-                closing_issue_references(pr["body"] or "")
-            )
-    page = connection["pageInfo"]
-    if not page["hasNextPage"]:
-        break
-    cursor = page["endCursor"]
+for implementation_repository in IMPLEMENTATION_REPOSITORIES:
+    cursor = None
+    while True:
+        connection = graphql(
+            PR_QUERY,
+            owner=REPO_OWNER,
+            repo=implementation_repository,
+            cursor=cursor,
+        )["repository"]["pullRequests"]
+        for pr in connection["nodes"]:
+            for issue in pr["closingIssuesReferences"]["nodes"]:
+                if issue["repository"]["nameWithOwner"].casefold() == (
+                    f"{REPO_OWNER}/{REPO_NAME}".casefold()
+                ):
+                    issues_with_open_pr.add(issue["number"])
+            if pr["baseRefName"] == SHARED_TARGET_BRANCH:
+                issues_with_open_pr.update(
+                    closing_issue_references(
+                        pr["body"] or "", source_repository=implementation_repository
+                    )
+                )
+        page = connection["pageInfo"]
+        if not page["hasNextPage"]:
+            break
+        cursor = page["endCursor"]
 
 # --------------------------------------------------------------- dependency graph
 
