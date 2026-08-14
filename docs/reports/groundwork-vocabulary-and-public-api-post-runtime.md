@@ -73,7 +73,7 @@ Consumer usage, counted by files referencing the type:
   assumed "portable" would retire with the legacy query family; it cannot, because the live bounded
   contract depends on a type carrying that prefix.
 - **"Materialization" acquired a second, unrelated meaning after #28.** It now denotes both
-  storage preparation (`Groundwork.Materialization`, `Core.Materialization`, `Core.SchemaEvolution`)
+  storage preparation (the former compatibility package, `Core.Materialization`, `Core.SchemaEvolution`)
   and runtime relationship-reference durability (`PhysicalRelationshipMaterializationSchema`,
   `MaterializationGeneration`, `RelationshipMaterializationGeneration`). This collision is new and is
   the sharpest naming defect in the shipped surface.
@@ -102,15 +102,15 @@ Consumer usage, counted by files referencing the type:
 |---|---|---|
 | `Groundwork.Core` | Manifests, capabilities, physical storage, schema evolution, identity, scoping, text. | Keep, but ADR 0005 seam A splits the generic physical-object definition out of `PhysicalTableDefinition`. That seam is sequenced after seam B and has no spec yet. |
 | `Groundwork.Documents` | Document contract family: stores, queries, mutations, unit of work, scoping. | Keep. This is a contract family in ADR 0005 terms, not a kernel facility. |
-| `Groundwork.Materialization` | Compatibility plan/planner for the legacy document lane only. | Retire with the legacy lane. It is not a package boundary anyone should learn. |
+| Former compatibility materialization package | Compatibility plan/planner for the legacy document lane only. | Retire with the legacy lane. It is not a package boundary anyone should learn. |
 | `Groundwork.Relational` | Shared relational document store, physical storage, planning, legacy physicalization naming. | Keep, minus the legacy planning/physicalization members. |
 | `Groundwork.Provider.Relational` | Session, executor, command, and unit-of-work primitives. | Keep. This is a genuine kernel facility and the boundary reads correctly. |
 | `Groundwork.Sqlite` / `.SqlServer` / `.PostgreSql` / `.MongoDb` | Provider runtimes for both the document and diagnostic families. | Keep. |
 | `Groundwork.DiagnosticRecords` / `.Relational` | The second contract family. | Keep; ADR 0005 governs its convergence onto kernel facilities. |
 | `Groundwork.SchemaTool` | The provider-neutral CLI. | Keep. Its command vocabulary matches ADR 0003 §6 exactly. |
 
-`Groundwork.Materialization` is the only package whose name promises a concept that is no longer the
-authority for that concept. `Core.SchemaEvolution` is.
+The former compatibility materialization package was the only package whose name promised a concept
+that was no longer the authority for that concept. `Core.SchemaEvolution` is the authority.
 
 ### Capability names
 
@@ -207,7 +207,7 @@ yet. The shipped surface now uses one word for two unrelated things:
 
 | Use | Meaning | Examples |
 |---|---|---|
-| Storage preparation | Making provider storage ready for a manifest (CONTEXT.md's definition) | `Groundwork.Materialization`, `MaterializationPlan`, `MaterializationOperationKind`, `IProviderMaterializationOperation`, `*GroundworkMaterializer` |
+| Storage preparation | Making provider storage ready for a manifest (CONTEXT.md's definition) | the former compatibility materialization package, `MaterializationPlan`, `MaterializationOperationKind`, `IProviderMaterializationOperation`, `*GroundworkMaterializer` |
 | Relationship durability | Making a cross-unit reference durable and fenced at write time | `PhysicalRelationshipMaterializationSchema`, `PhysicalRelationshipMaterializationIdentity`, `RelationshipMaterializationGeneration`, `PhysicalRelationshipSidecarField.MaterializationGeneration` |
 
 The second use arrived with #141, after #28 closed. It is not a sub-case of the first: it names a
@@ -235,7 +235,7 @@ are the only public exceptions and are renamed with the relationship family abov
 | Surface | Defect | Disposition |
 |---|---|---|
 | `Groundwork.Core.Migrations.*` (`IGroundworkMigration`, `GroundworkMigration`, `GroundworkMigrationOperation(Kind)`, `GroundworkMigrationRunner`, `IGroundworkMigrationExecutor`, `GroundworkMigrationExecutionOptions`, `GroundworkMigrationResult`, `GroundworkMigrationRecord`) and `SqliteGroundworkMigrationExecutor` | A second, imperative schema-evolution pipeline with its own ordering, executor, options, result, and ledger. No production wiring, no consumer. | **Removed in this slice.** |
-| `Groundwork.Core.Materialization.MaterializationPlan` / `MaterializationOperation` / `SchemaHistoryEntry` | Duplicate records shadowing the active `Groundwork.Materialization` names with different shapes; zero references anywhere including their own package. | **Removed in this slice.** The file now holds only the genuinely shared `MaterializationOperationKind` and `IProviderMaterializationOperation` seam and is named for it. |
+| `Groundwork.Core.Materialization.MaterializationPlan` / `MaterializationOperation` / `SchemaHistoryEntry` | Duplicate records shadowing the former compatibility package's names with different shapes; zero references anywhere including their own package. | **Removed in this slice.** The file now holds only the genuinely shared `MaterializationOperationKind` and `IProviderMaterializationOperation` seam and is named for it. |
 | `RelationalServerPhysicalSchemaDialect.Q` and `RelationalPhysicalDocumentStore.P` | Single-letter identifier-quoting and parameter members — one public abstract, one internal and reached from four files — asymmetric with `RelationalPhysicalDocumentDialect.QuoteIdentifier`, which already spelled its name out. This is the deferred #47 finding recorded on #63. | **Renamed in this slice** to `QuoteIdentifier` and `Parameter`, together with every private `Q` helper in providers, tests, and benchmarks. The two local aliases that became same-name shadows are inlined to the `dialect.` calls the rest of their file already used. |
 | `DocumentPlan` / `RelationalPlan` | Forwarding facades whose only members re-expose `MaterializationPlan`'s. Zero consumer usage. | Track. They retire with the legacy lane rather than separately. |
 | `RelationalPhysicalizationNames` | Public, unmarked, and hard-codes PostgreSQL's 63-character identifier cap for every relational provider. | Track. |
@@ -278,7 +278,7 @@ the sequence:
 3. **Warning to error** in one announced pre-1.0 release, after the consumer confirms the replacement
    declarations are in place. That release also removes the unmarked legacy helpers, so a consumer
    cannot silently reach legacy physicalization after the declarations are gone.
-4. **Removal** of the legacy lane — declarations, `Groundwork.Materialization`, the legacy document
+4. **Removal** of the legacy lane — declarations, the compatibility materialization package, the legacy document
    stores and factories, `DocumentPlan`/`RelationalPlan`, and the `ClosedQuery*` family — in the
    announced breaking release, with a migration table in the release notes.
 

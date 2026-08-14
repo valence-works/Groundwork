@@ -1,9 +1,8 @@
 namespace Groundwork.Core.Materialization;
 
 /// <summary>
-/// The one kind vocabulary shared by the compatibility <c>Groundwork.Materialization</c> plan and the
-/// route-native <c>Groundwork.Core.SchemaEvolution</c> operations, so a provider can schedule both
-/// through <see cref="IProviderMaterializationOperation"/> without a second enumeration.
+/// The one kind vocabulary used by route-native <c>Groundwork.Core.SchemaEvolution</c> operations,
+/// so providers share one execution contract without defining a second enumeration.
 /// </summary>
 public enum MaterializationOperationKind
 {

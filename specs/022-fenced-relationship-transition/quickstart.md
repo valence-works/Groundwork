@@ -26,8 +26,7 @@ stale candidates, cancellation, and restart converge without changing the wrong 
 dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj \
   --filter Relationship
 
-dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj \
-  --filter Relationship
+# The former compatibility-materialization test project was removed with the portable document model.
 ```
 
 ## Nonclaims
@@ -51,8 +50,7 @@ dotnet test tests/Groundwork/Groundwork.Tests/Groundwork.Tests.csproj \
   --filter Relationship --no-restore
 # Passed: 51, Failed: 0
 
-dotnet test tests/Groundwork/Groundwork.Materialization.Tests/Groundwork.Materialization.Tests.csproj \
-  --filter Relationship --no-restore
+# Historical compatibility-materialization result before that project was removed:
 # Passed: 1, Failed: 0
 ```
 
