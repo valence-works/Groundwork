@@ -13,9 +13,10 @@ name: v2 board sync
 # Blockers are read from each issue's "## Dependencies" section, so the graph lives in the
 # issues themselves and stays correct when one is edited.
 #
-# SETUP: needs a repository (or organisation) secret `PROJECT_TOKEN` — a fine-grained or
-# classic PAT with `project` (read/write) and `repo` scope. The default GITHUB_TOKEN
-# cannot write to organisation projects, and the job fails loudly if the secret is absent.
+# SETUP: needs a repository (or organisation) secret `PROJECT_TOKEN`. Use either a classic
+# PAT with `project` and `repo` scopes, or a fine-grained PAT with organisation Projects
+# read/write plus repository Metadata, Issues, and Pull requests read. The default
+# GITHUB_TOKEN cannot write to organisation projects, and the job fails loudly if absent.
 
 on:
   issues:
@@ -56,8 +57,8 @@ jobs:
           PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
         run: |
           if [ -z "$PROJECT_TOKEN" ]; then
-            echo "::error::PROJECT_TOKEN secret is not set. Create a PAT with 'project'"
-            echo "::error::(read/write) and 'repo' scope, then add it as a repository secret."
+            echo "::error::PROJECT_TOKEN is not set. See this workflow's setup comment for"
+            echo "::error::the classic or fine-grained PAT permissions, then add the secret."
             echo "::error::The default GITHUB_TOKEN cannot write to organisation projects."
             exit 1
           fi

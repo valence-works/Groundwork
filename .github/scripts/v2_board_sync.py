@@ -17,7 +17,8 @@ works). Phase-0 gate issues additionally block every non-gate, non-housekeeping 
 because nothing downstream may start until they report.
 
 Run with no arguments to sync. Run with --dry-run to print the plan without writing.
-Requires GH_TOKEN with `project` and `repo` scope.
+Requires GH_TOKEN from either a classic PAT with `project` and `repo` scopes, or a
+fine-grained PAT with organisation Projects write and repository Issues/Pull requests read.
 """
 import json
 import os
@@ -38,8 +39,8 @@ DRY_RUN = "--dry-run" in sys.argv
 TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
 if not TOKEN:
     sys.exit(
-        "No GH_TOKEN. In Actions this must be a PAT with `project` scope stored as a "
-        "secret — the default GITHUB_TOKEN cannot write to organisation projects."
+        "No GH_TOKEN. Configure PROJECT_TOKEN as documented in v2-board.yml; the "
+        "default GITHUB_TOKEN cannot write to organisation projects."
     )
 
 
@@ -157,7 +158,6 @@ query($owner:String!, $repo:String!, $cursor:String) {
       nodes {
         number
         baseRefName
-        title
         body
         closingIssuesReferences(first:100) {
           nodes { number repository { nameWithOwner } }
@@ -181,7 +181,7 @@ while True:
                 issues_with_open_pr.add(issue["number"])
         if pr["baseRefName"] == SHARED_TARGET_BRANCH:
             issues_with_open_pr.update(
-                closing_issue_references(f"{pr['title']}\n{pr['body'] or ''}")
+                closing_issue_references(pr["body"] or "")
             )
     page = connection["pageInfo"]
     if not page["hasNextPage"]:

@@ -79,9 +79,10 @@ do not move unrelated cards. Dragging a card is pointless; change the underlying
 Blockers are parsed from each issue's `## Dependencies` section, so the dependency graph lives
 in the issues and stays correct when one is edited.
 
-Setup requirement: a `PROJECT_TOKEN` repository secret (PAT with `project` read/write and
-`repo` scope). The default `GITHUB_TOKEN` cannot write to organisation projects, and the
-workflow fails loudly if it is missing.
+Setup requirement: a `PROJECT_TOKEN` repository secret. Use either a classic PAT with `project`
+and `repo` scopes, or a fine-grained PAT with organisation Projects read/write plus repository
+Metadata, Issues, and Pull requests read. The default `GITHUB_TOKEN` cannot write to organisation
+projects, and the workflow fails loudly if the secret is missing.
 
 ---
 
