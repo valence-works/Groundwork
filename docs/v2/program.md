@@ -222,18 +222,19 @@ stream declared in **~21 manifest lines** replacing **11,880 lines** of v1 famil
 
 ---
 
-## Phase 7 — Consumer migration
+## Phase 7 — Consumer adoption
 
 | ID | Work item | Shape |
 |---|---|---|
 | **E1** | Port Elsa's three hardest manifests **on paper, before the declaration model freezes** — `SecretsStorageManifest` (301 lines), Publishing, OpenTelemetry. The only evidence in existence about what a real consumer needs. | cross-cutting |
 | **E2** | Elsa re-declares diagnostics as ordinary manifests; delete the `DiagnosticRecords` adapters (~4,834 lines) | cross-cutting |
-| **E3** | Migrate the 45 manifest sources and ~30 modules | cross-cutting |
-| **E4** | Data migration path from v1-shaped tables (envelope + JSON) to v2 typed columns | cross-cutting |
+| **E3** | Replace the 45 manifest sources and ~30 modules with v2 public APIs | cross-cutting |
 
-**E4 is not optional and is easy to under-scope.** Existing v1 deployments have `id_comparison_key`
-primary keys and canonical-JSON content. Decide early whether v2 offers a migration tool or a
-documented export/import.
+**Clean-break decision.** v2 is a fresh-deployment product surface. It does not provide a v1 data
+migration tool, export/import bridge, dual-write window, or compatibility layer for v1-shaped
+storage. Existing installations remain on v1 until they deliberately adopt v2 with fresh storage.
+Phase 7 proves the new public API through direct consumer replacement and deletion; migration code
+is not a release gate.
 
 ---
 
@@ -304,7 +305,7 @@ gets rewritten. Do this before declaring Deliverable 0 done.
 | Stream capabilities | 3 |
 | Records + Documents + tooling | 5 |
 | **v2 total** | **~30 engineer-weeks, one senior engineer** |
-| Elsa migration | 6–10 — the program's long pole |
+| Elsa adoption | 6–10 — the program's long pole |
 
 Target `src` size: **28–32k lines against v1's 59,011.**
 
